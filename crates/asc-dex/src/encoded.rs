@@ -123,41 +123,37 @@ impl<'a> DexView<'a> {
             .ok_or(DexError::Malformed("unknown encoded_value type tag"))?;
         match ty {
             ValueType::Byte => {
+                // BYTE is always exactly one payload byte (arg must be 0).
                 need(p, 1, bytes.len())?;
                 let v = bytes[p] as i8;
                 Ok((EncodedValue::Byte(v), p + 1 - off))
             }
-            ValueType::Short => {
-                need(p, 2, bytes.len())?;
-                let v = crate::read::read_i16(bytes, p)?;
-                Ok((EncodedValue::Short(v), p + 2 - off))
+            ValueType::Short | ValueType::Int | ValueType::Long => {
+                // Signed scalars: (arg+1) payload bytes, sign-extended.
+                let width = (value_arg as usize) + 1;
+                need(p, width, bytes.len())?;
+                let v = sign_extended(bytes, p, width);
+                let r = match ty {
+                    ValueType::Short => EncodedValue::Short(v as i16),
+                    ValueType::Int => EncodedValue::Int(v as i32),
+                    _ => EncodedValue::Long(v),
+                };
+                Ok((r, p + width - off))
             }
-            ValueType::Char => {
-                need(p, 2, bytes.len())?;
-                let v = crate::read::read_u16(bytes, p)?;
-                Ok((EncodedValue::Char(v), p + 2 - off))
-            }
-            ValueType::Int => {
-                need(p, 4, bytes.len())?;
-                let v = crate::read::read_u32(bytes, p)? as i32;
-                Ok((EncodedValue::Int(v), p + 4 - off))
-            }
-            ValueType::Long => {
-                need(p, 8, bytes.len())?;
-                let v = crate::read::read_u32(bytes, p)? as u64
-                    | ((crate::read::read_u32(bytes, p + 4)? as u64) << 32);
-                Ok((EncodedValue::Long(v as i64), p + 8 - off))
-            }
-            ValueType::Float => {
-                need(p, 4, bytes.len())?;
-                let v = crate::read::read_u32(bytes, p)?;
-                Ok((EncodedValue::Float(v), p + 4 - off))
-            }
-            ValueType::Double => {
-                need(p, 8, bytes.len())?;
-                let lo = crate::read::read_u32(bytes, p)? as u64;
-                let hi = crate::read::read_u32(bytes, p + 4)? as u64;
-                Ok((EncodedValue::Double(lo | (hi << 32)), p + 8 - off))
+            ValueType::Char | ValueType::Float | ValueType::Double => {
+                // Zero-extended scalars: (arg+1) payload bytes.
+                let width = (value_arg as usize) + 1;
+                need(p, width, bytes.len())?;
+                let mut v: u64 = 0;
+                for i in 0..width {
+                    v |= (bytes[p + i] as u64) << (i * 8);
+                }
+                let r = match ty {
+                    ValueType::Char => EncodedValue::Char(v as u16),
+                    ValueType::Float => EncodedValue::Float(v as u32),
+                    _ => EncodedValue::Double(v),
+                };
+                Ok((r, p + width - off))
             }
             ValueType::MethodType | ValueType::MethodHandle => {
                 let (idx, n) = read_arg_index(bytes, p, value_arg)?;
@@ -476,6 +472,18 @@ fn read_arg_index(bytes: &[u8], off: usize, arg: u8) -> Result<(u32, usize), Dex
 pub struct AnnotationItem {
     pub visibility: u8,
     pub annotation: EncodedAnnotation,
+}
+
+/// Reads `width` little-endian bytes at `off` and sign-extends the
+/// result to `i64` (for the arg-sized signed scalars in
+/// `encoded_value`).
+fn sign_extended(bytes: &[u8], off: usize, width: usize) -> i64 {
+    let mut v: u64 = 0;
+    for i in 0..width {
+        v |= (bytes[off + i] as u64) << (i * 8);
+    }
+    let shift = 64 - width * 8;
+    ((v << shift) as i64) >> shift
 }
 
 /// Parsed `annotation_set_item`.

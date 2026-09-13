@@ -196,7 +196,8 @@ impl Builder {
             off
         };
         let idx = self.proto_specs.len() as u32;
-        self.proto_specs.push((shorty_idx, return_type, params_off, 0));
+        self.proto_specs
+            .push((shorty_idx, return_type, params_off, 0));
         idx
     }
 

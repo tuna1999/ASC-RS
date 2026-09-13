@@ -45,9 +45,7 @@ pub struct TargetSets {
 impl TargetSets {
     /// Builds a `TargetSets` from a [`crate::ResolvedTargets`],
     /// sorting each kind for `binary_search` membership.
-    pub fn from_resolved(
-        r: &crate::query::ResolvedTargets,
-    ) -> Self {
+    pub fn from_resolved(r: &crate::query::ResolvedTargets) -> Self {
         let mut strings: Vec<StringIdx> = r.strings.iter().copied().collect();
         strings.sort_unstable();
         strings.dedup();
@@ -88,9 +86,7 @@ impl TargetSets {
             // call_site / method_handle / proto: not scanned (matches
             // the oracle's `_IDX_GROUPS` exclusion at
             // `code_item_scan.py:262-263`).
-            DexRef::Proto(_)
-            | DexRef::CallSite(_)
-            | DexRef::MethodHandle(_) => false,
+            DexRef::Proto(_) | DexRef::CallSite(_) | DexRef::MethodHandle(_) => false,
         }
     }
 }
@@ -199,7 +195,9 @@ pub fn find_refs(view: &DexView, query: &Query) -> DexSearchReport {
                 // but report it defensively.
                 errors.push(SearchError::Code {
                     code_off,
-                    source: asc_dex::error::DexError::Malformed("code_off resolved to no code_item"),
+                    source: asc_dex::error::DexError::Malformed(
+                        "code_off resolved to no code_item",
+                    ),
                 });
                 complete = false;
                 continue;
@@ -333,9 +331,7 @@ mod tests {
         // call_site / proto / method_handle never match.
         assert!(!ts.matches(&DexRef::Proto(asc_bytecode::ProtoIdx(0))));
         assert!(!ts.matches(&DexRef::CallSite(asc_bytecode::CallSiteIdx(0))));
-        assert!(!ts.matches(&DexRef::MethodHandle(
-            asc_bytecode::MethodHandleIdx(0)
-        )));
+        assert!(!ts.matches(&DexRef::MethodHandle(asc_bytecode::MethodHandleIdx(0))));
     }
 
     #[test]
@@ -361,7 +357,10 @@ mod tests {
             errors: Vec::new(),
             complete: true,
         };
-        assert_eq!(report.caller_methods_sorted(), vec![MethodIdx(3), MethodIdx(5)]);
+        assert_eq!(
+            report.caller_methods_sorted(),
+            vec![MethodIdx(3), MethodIdx(5)]
+        );
     }
 
     #[test]

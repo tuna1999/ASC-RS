@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::fs;
 
 use asc_dex::ids::MethodIdx;
-use asc_query::{find_refs, ClassConstraint, Query};
+use asc_query::{ClassConstraint, Query, find_refs};
 
 mod common;
 
@@ -223,8 +223,7 @@ fn golden_findrefs_field_workload() {
 #[test]
 fn golden_findrefs_field_fuzzy_class_workload() {
     run_against_corpus!(bytes, view, "workload_classes.dex");
-    let Some(expected) =
-        read_matched_methods("findrefs_field_fuzzy_class_workload.counts.json")
+    let Some(expected) = read_matched_methods("findrefs_field_fuzzy_class_workload.counts.json")
     else {
         eprintln!("golden counts missing; skipping");
         return;
@@ -245,10 +244,7 @@ fn golden_findrefs_field_fuzzy_class_workload() {
 // Aurora and F-Droid are multidex APKs whose golden outputs are
 // per-APK. The asc-query engine is per-DEX; we run each corpus DEX
 // separately and union the caller sets.
-fn multidex_union(
-    dex_names: &[&'static str],
-    query: &Query,
-) -> Option<BTreeSet<String>> {
+fn multidex_union(dex_names: &[&'static str], query: &Query) -> Option<BTreeSet<String>> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for name in dex_names {
         let mut bytes = Vec::new();
@@ -260,20 +256,13 @@ fn multidex_union(
             out.insert(format_method(&view, mid));
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[test]
 fn golden_findrefs_string_aurora() {
     let q = Query::string("https://");
-    let Some(actual) = multidex_union(
-        &["aurora_classes.dex", "aurora_classes2.dex"],
-        &q,
-    ) else {
+    let Some(actual) = multidex_union(&["aurora_classes.dex", "aurora_classes2.dex"], &q) else {
         eprintln!("aurora corpus missing; skipping");
         return;
     };
@@ -286,10 +275,7 @@ fn golden_findrefs_string_aurora() {
 #[test]
 fn golden_findrefs_type_aurora() {
     let q = Query::type_("Fragment");
-    let Some(actual) = multidex_union(
-        &["aurora_classes.dex", "aurora_classes2.dex"],
-        &q,
-    ) else {
+    let Some(actual) = multidex_union(&["aurora_classes.dex", "aurora_classes2.dex"], &q) else {
         eprintln!("aurora corpus missing; skipping");
         return;
     };
@@ -303,10 +289,7 @@ fn golden_findrefs_type_aurora() {
 #[test]
 fn golden_findrefs_method_aurora() {
     let q = Query::method(Some("onClick"), None);
-    let Some(actual) = multidex_union(
-        &["aurora_classes.dex", "aurora_classes2.dex"],
-        &q,
-    ) else {
+    let Some(actual) = multidex_union(&["aurora_classes.dex", "aurora_classes2.dex"], &q) else {
         eprintln!("aurora corpus missing; skipping");
         return;
     };
@@ -320,10 +303,7 @@ fn golden_findrefs_method_aurora() {
 #[test]
 fn golden_findrefs_string_fdroid() {
     let q = Query::string("https://");
-    let Some(actual) = multidex_union(
-        &["fdroid_classes.dex", "fdroid_classes2.dex"],
-        &q,
-    ) else {
+    let Some(actual) = multidex_union(&["fdroid_classes.dex", "fdroid_classes2.dex"], &q) else {
         eprintln!("fdroid corpus missing; skipping");
         return;
     };

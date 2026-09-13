@@ -13,11 +13,11 @@
 
 use std::path::PathBuf;
 
-use asc_decompile::{droidsaw::DroidsawBackend, ClassDecompiler};
+use asc_decompile::{ClassDecompiler, droidsaw::DroidsawBackend};
+use criterion::{Criterion, criterion_group, criterion_main};
 use droidsaw_dex::{
     classes::decompile_class_with_census, parser::DexFile, r8_inversion::build_trampoline_census,
 };
-use criterion::{criterion_group, criterion_main, Criterion};
 
 fn workload_dex() -> Option<Vec<u8>> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -28,7 +28,10 @@ fn workload_dex() -> Option<Vec<u8>> {
             .join("corpus")
             .join("dex")
             .join("workload_classes.dex"),
-        manifest.join("corpus").join("dex").join("workload_classes.dex"),
+        manifest
+            .join("corpus")
+            .join("dex")
+            .join("workload_classes.dex"),
     ];
     for c in candidates {
         if c.exists() {

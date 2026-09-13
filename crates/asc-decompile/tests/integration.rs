@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use asc_decompile::{
-    droidsaw::DroidsawBackend, normalize_class_name, ClassDecompiler, DecompileError,
+    ClassDecompiler, DecompileError, droidsaw::DroidsawBackend, normalize_class_name,
 };
 
 fn corpus_dex() -> Option<PathBuf> {
@@ -65,7 +65,10 @@ fn roundtrip_workload_clockface_decompiles_to_java_containing_class_name() {
     );
     // Recognisable Java shape (package + class declaration somewhere).
     assert!(java.contains("class "), "output missing 'class' keyword");
-    assert!(java.contains("ClockFaceView extends"), "missing extends clause");
+    assert!(
+        java.contains("ClockFaceView extends"),
+        "missing extends clause"
+    );
     // Sanity: empty string never returned.
     assert!(!java.trim().is_empty());
 }
@@ -106,7 +109,10 @@ fn java_dotted_target_normalises_and_decompiles() {
     // Pass the same target in Java dotted form; normaliser must accept
     // it and the backend must still find the class.
     let java = backend
-        .decompile(&bytes, "com.google.android.material.timepicker.ClockFaceView")
+        .decompile(
+            &bytes,
+            "com.google.android.material.timepicker.ClockFaceView",
+        )
         .expect("java dotted form should normalise and resolve");
     assert!(java.contains("ClockFaceView"));
 }
@@ -168,7 +174,11 @@ fn trait_object_usage_compiles_and_works() {
     // The whole point of the trait: store a `dyn` reference, never
     // leak the backend type. If this compiles, no backend-specific
     // types leaked into the call site.
-    fn generic(d: &dyn ClassDecompiler, dex: &[u8], target: &str) -> Result<String, DecompileError> {
+    fn generic(
+        d: &dyn ClassDecompiler,
+        dex: &[u8],
+        target: &str,
+    ) -> Result<String, DecompileError> {
         d.decompile(dex, target)
     }
     let backend = DroidsawBackend::new();

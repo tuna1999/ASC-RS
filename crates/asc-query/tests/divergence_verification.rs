@@ -16,7 +16,7 @@
 
 use asc_dex::ids::MethodIdx;
 use asc_dex::view::DexView;
-use asc_query::{find_refs, Query};
+use asc_query::{Query, find_refs};
 
 mod common;
 
@@ -45,7 +45,11 @@ fn method_signature(view: &DexView, mid: MethodIdx) -> (String, String, Option<u
                 continue;
             }
             let data = view.class_data(cd.class_data_off).ok()??;
-            for em in data.direct_methods.iter().chain(data.virtual_methods.iter()) {
+            for em in data
+                .direct_methods
+                .iter()
+                .chain(data.virtual_methods.iter())
+            {
                 if em.method_idx == mid {
                     return Some(em.code_off);
                 }
