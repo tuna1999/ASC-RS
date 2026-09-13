@@ -54,10 +54,13 @@ impl CodeOwners {
     pub fn build(view: &DexView) -> Self {
         let n = view.class_def_count();
         let mut owners: Vec<CodeOwner> = Vec::new();
-        // Walk in reverse and `insert(0, …)` so we can keep
-        // deterministic insertion order without a `HashMap` for the
-        // dedup table. The reverse+insert keeps the table tiny.
+        // Temporary per-call dedup table (code_off → index into by_off).
+        // This is NOT a persistent global xref map: it lives only for
+        // this one build. A linear `find` here made builds O(n²) —
+        // 345ms on the workload dex; the hash map keeps it linear.
         let mut by_off: Vec<(u32, SmallVec<[MethodIdx; OWNER_INLINE_HINT]>)> = Vec::new();
+        let mut index: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::with_capacity(1024);
 
         for i in 0..n {
             let def = match view.class_def(i) {
@@ -73,8 +76,8 @@ impl CodeOwners {
             };
 
             // Direct + virtual methods, in declaration order.
-            collect_methods(&mut by_off, &data.direct_methods);
-            collect_methods(&mut by_off, &data.virtual_methods);
+            collect_methods(&mut by_off, &mut index, &data.direct_methods);
+            collect_methods(&mut by_off, &mut index, &data.virtual_methods);
         }
 
         // by_off is in insertion order; copy into `owners` keeping
@@ -110,17 +113,19 @@ impl CodeOwners {
 /// `by_off`, deduplicating by `code_off`.
 fn collect_methods(
     by_off: &mut Vec<(u32, SmallVec<[MethodIdx; OWNER_INLINE_HINT]>)>,
+    index: &mut std::collections::HashMap<u32, usize>,
     methods: &[asc_dex::EncodedMethod],
 ) {
     for m in methods {
         if m.code_off == 0 {
             continue;
         }
-        if let Some(slot) = by_off.iter_mut().find(|(off, _)| *off == m.code_off) {
-            slot.1.push(m.method_idx);
+        if let Some(&slot) = index.get(&m.code_off) {
+            by_off[slot].1.push(m.method_idx);
         } else {
             let mut v: SmallVec<[MethodIdx; OWNER_INLINE_HINT]> = SmallVec::new();
             v.push(m.method_idx);
+            index.insert(m.code_off, by_off.len());
             by_off.push((m.code_off, v));
         }
     }

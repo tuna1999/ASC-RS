@@ -149,6 +149,8 @@ dependencies = [
 name = "asc-manifest"
 version = "0.1.0"
 dependencies = [
+ "asc-apk",
+ "crc32fast",
  "thiserror",
 ]
 

@@ -259,8 +259,12 @@ fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
         return Err(ApkError::NotAZip);
     }
     let target = SIG_EOCD.to_le_bytes();
-    let mut i = len.saturating_sub(4);
+    let mut i = len.saturating_sub(EOCD_FIXED_LEN);
     loop {
+        // A valid EOCD needs its full 22-byte fixed record on disk; a
+        // signature with fewer bytes behind it is garbage, not an EOCD
+        // (fuzz-found: previously the field reads at eocd_pos+8..20
+        // indexed past EOF and panicked).
         if buf[i..i + 4] == target {
             return Ok(i);
         }
