@@ -7,15 +7,17 @@
 //! (passing) when its fixture is absent so a corpus-less checkout
 //! stays green.
 
-use asc_apk::{Apk, EntryBytes};
-use asc_bytecode::{RefWalker, DexRef};
+use asc_apk::Apk;
+use asc_bytecode::{DexRef, RefWalker};
 use asc_dex::DexView;
 
 const WORKLOAD: &str = "corpus/apk/workload.apk";
 const AURORA: &str = "corpus/apk/com.aurora.store_60.apk";
 
 fn fixture(path: &str) -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path);
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path);
     p.exists().then_some(p)
 }
 
@@ -39,7 +41,9 @@ fn gate_workload_end_to_end() {
     let view = DexView::parse(raw).expect("parse workload dex");
     assert!(matches!(
         view.version(),
-        asc_dex::DexVersion::V035 | asc_dex::DexVersion::V037 | asc_dex::DexVersion::V038
+        asc_dex::DexVersion::V035
+            | asc_dex::DexVersion::V037
+            | asc_dex::DexVersion::V038
             | asc_dex::DexVersion::V039
     ));
 
@@ -59,7 +63,9 @@ fn gate_workload_end_to_end() {
     let method_count = view.method_count();
     assert!(method_count > 100);
     for i in 0..method_count.min(50) {
-        let m = view.method(asc_dex::MethodIdx(i)).expect("method id in range");
+        let m = view
+            .method(asc_dex::MethodIdx(i))
+            .expect("method id in range");
         let name = view.string(m.name).expect("method name string");
         assert!(!name.mutf8.is_empty() || name.utf16_len == 0);
     }
@@ -79,7 +85,11 @@ fn gate_workload_end_to_end() {
         };
         // dedupe code_off: R8-deduplicated bodies verified once
         let mut seen: Vec<u32> = Vec::new();
-        for method in data.direct_methods.iter().chain(data.virtual_methods.iter()) {
+        for method in data
+            .direct_methods
+            .iter()
+            .chain(data.virtual_methods.iter())
+        {
             if method.code_off == 0 || seen.contains(&method.code_off) {
                 continue;
             }
@@ -106,7 +116,10 @@ fn gate_workload_end_to_end() {
             }
         }
     }
-    assert!(code_items_checked > 500, "checked {code_items_checked} code items");
+    assert!(
+        code_items_checked > 500,
+        "checked {code_items_checked} code items"
+    );
     assert!(ref_hits > 1_000, "collected {ref_hits} ref hits");
     assert!(
         boundary_errors.is_empty(),

@@ -9,7 +9,7 @@ mod common;
 
 use asc_apk::{Apk, ApkError, Compression, DexEntry, EntryBytes, InflateLimits, ZipView};
 
-use common::{write_to_temp, ZipBuilder, zip64_extra};
+use common::{ZipBuilder, write_to_temp, zip64_extra};
 
 /// Parse a `ZipView` from in-memory bytes (faster than round-tripping
 /// through a temp file).
@@ -29,7 +29,9 @@ fn incompressible(n: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(n);
     let mut state: u64 = 0x9E3779B97F4A7C15;
     while out.len() < n {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         out.push((state >> 33) as u8);
     }
     out
@@ -79,7 +81,8 @@ fn entry_lookup_exact_name() {
     let mut b = ZipBuilder::new();
     b.add_stored("AndroidManifest.xml", b"<?xml/>".to_vec());
     b.add_stored("classes.dex", vec![0xCA, 0xFE, 0xBA, 0xBE]);
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let xml = view.entry("AndroidManifest.xml").expect("xml present");
     assert_eq!(xml.method, Compression::Stored);
     let bytes = view.read_entry(&xml).expect("read xml");
@@ -117,8 +120,6 @@ fn stored_entry_borrowed_zero_copy() {
     }
 }
 
-
-
 #[test]
 fn stored_entry_via_zipview_borrows_input_slice() {
     let payload = vec![0u8; 2048];
@@ -146,7 +147,8 @@ fn stored_entry_via_zipview_borrows_input_slice() {
 fn deflated_empty_entry_roundtrip() {
     let mut b = ZipBuilder::new();
     b.add_deflated("empty.dex", Vec::new());
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let entry = view.entry("empty.dex").expect("entry");
     let bytes = view.read_entry(&entry).expect("read");
     assert!(bytes.is_empty());
@@ -158,7 +160,8 @@ fn deflated_highly_compressible_roundtrip() {
     let payload = highly_compressible();
     let mut b = ZipBuilder::new();
     b.add_deflated("compressed.dex", payload.clone());
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let entry = view.entry("compressed.dex").expect("entry");
     let bytes = view.read_entry(&entry).expect("read");
     assert_eq!(bytes.as_slice(), payload.as_slice());
@@ -171,7 +174,8 @@ fn deflated_incompressible_roundtrip() {
     let payload = incompressible(4096);
     let mut b = ZipBuilder::new();
     b.add_deflated("random.bin", payload.clone());
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let entry = view.entry("random.bin").expect("entry");
     let bytes = view.read_entry(&entry).expect("read");
     assert_eq!(bytes.as_slice(), payload.as_slice());
@@ -198,10 +202,15 @@ fn declared_size_mismatch_returns_size_mismatch() {
     let mut b = ZipBuilder::new();
     b.add_deflated("bad.dex", b"actual-payload".to_vec())
         .next_usize_override(999_999);
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let entry = view.entry("bad.dex").expect("entry");
     let err = view.read_entry(&entry).unwrap_err();
-    assert!(matches!(err, ApkError::SizeMismatch { .. }), "got {:?}", err);
+    assert!(
+        matches!(err, ApkError::SizeMismatch { .. }),
+        "got {:?}",
+        err
+    );
 }
 
 #[test]
@@ -209,7 +218,10 @@ fn corrupt_deflate_stream_returns_deflate() {
     // Build a valid DEFLATE entry, then corrupt one byte in the middle
     // of its compressed payload.
     let mut b = ZipBuilder::new();
-    b.add_deflated("corrupt.dex", vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    b.add_deflated(
+        "corrupt.dex",
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    );
     let mut bytes = b.build();
     // Find the local-header data offset for the only entry: parse via
     // ZipView, locate the entry, flip a byte inside the compressed
@@ -227,7 +239,11 @@ fn corrupt_deflate_stream_returns_deflate() {
     let view = parse_view(&bytes).expect("still parses");
     let entry = view.entry("corrupt.dex").expect("entry");
     let err = view.read_entry(&entry).unwrap_err();
-    assert!(matches!(err, ApkError::Deflate(_) | ApkError::SizeMismatch { .. }), "got {:?}", err);
+    assert!(
+        matches!(err, ApkError::Deflate(_) | ApkError::SizeMismatch { .. }),
+        "got {:?}",
+        err
+    );
 }
 
 #[test]
@@ -236,12 +252,11 @@ fn zip_bomb_truncated_by_cap() {
     let bomb: Vec<u8> = vec![0u8; 1 << 20];
     let mut b = ZipBuilder::new();
     b.add_deflated("bomb.dex", bomb);
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let entry = view.entry("bomb.dex").expect("entry");
     let limits = InflateLimits::with_max_output(64 * 1024).unwrap();
-    let err = view
-        .read_entry_with_limits(&entry, limits)
-        .unwrap_err();
+    let err = view.read_entry_with_limits(&entry, limits).unwrap_err();
     assert!(matches!(err, ApkError::TooLarge { .. }), "got {:?}", err);
 }
 
@@ -301,7 +316,7 @@ fn entry_name_oob_returns_truncated() {
     bytes.extend_from_slice(&9u16.to_le_bytes()); // name_len = 9
     bytes.extend_from_slice(&0u16.to_le_bytes()); // extra_len
     bytes.extend_from_slice(b"a/name.xx"); // 9 bytes
-                                            // Central entry with name_len = 999 (OOB).
+    // Central entry with name_len = 999 (OOB).
     let cd_off = bytes.len() as u32;
     bytes.extend_from_slice(&[b'P', b'K', 1, 2]);
     bytes.extend_from_slice(&20u16.to_le_bytes());
@@ -338,18 +353,25 @@ fn entry_name_oob_returns_truncated() {
 #[test]
 fn bad_local_header_signature_returns_bad_signature() {
     let mut b = ZipBuilder::new();
-    b.add_stored("bad.dex", b"abc".to_vec()).next_local_sig(*b"NOPE");
-    let archive = b.build(); let view = parse_view(&archive).expect("parse");
+    b.add_stored("bad.dex", b"abc".to_vec())
+        .next_local_sig(*b"NOPE");
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
     let entry = view.entry("bad.dex").expect("entry");
     let err = view.read_entry(&entry).unwrap_err();
-    assert!(matches!(err, ApkError::BadSignature { .. }), "got {:?}", err);
+    assert!(
+        matches!(err, ApkError::BadSignature { .. }),
+        "got {:?}",
+        err
+    );
 }
 
 #[test]
 fn encrypted_flag_returns_unsupported() {
     let mut b = ZipBuilder::new();
     b.add_stored("enc.dex", b"abc".to_vec()).next_encrypted();
-    let archive = b.build(); let err = parse_view(&archive).unwrap_err();
+    let archive = b.build();
+    let err = parse_view(&archive).unwrap_err();
     assert!(matches!(err, ApkError::Unsupported(_)), "got {:?}", err);
 }
 
@@ -357,8 +379,10 @@ fn encrypted_flag_returns_unsupported() {
 fn unsupported_method_returns_unsupported() {
     let mut b = ZipBuilder::new();
     // Method 99 (bzip2 or similar) — not supported.
-    b.add_stored("weird.dex", b"abc".to_vec()).next_method_override(99);
-    let archive = b.build(); let err = parse_view(&archive).unwrap_err();
+    b.add_stored("weird.dex", b"abc".to_vec())
+        .next_method_override(99);
+    let archive = b.build();
+    let err = parse_view(&archive).unwrap_err();
     assert!(matches!(err, ApkError::Unsupported(_)), "got {:?}", err);
 }
 
@@ -431,7 +455,11 @@ fn zip64_extra_field_in_central_resolves_placeholders() {
 
     // Central directory with ZIP64 placeholders + extra.
     let cd_off = bytes.len() as u64;
-    let extra = zip64_extra(stored.len() as u64, stored.len() as u64, local_header_offset as u64);
+    let extra = zip64_extra(
+        stored.len() as u64,
+        stored.len() as u64,
+        local_header_offset as u64,
+    );
     bytes.extend_from_slice(&[b'P', b'K', 1, 2]);
     bytes.extend_from_slice(&20u16.to_le_bytes());
     bytes.extend_from_slice(&20u16.to_le_bytes());
@@ -537,24 +565,20 @@ fn read_entry_verified_detects_corrupted_payload() {
 #[test]
 fn too_small_to_be_zip() {
     let bytes = vec![0u8; 5];
-    assert!(matches!(
-        parse_view(&bytes),
-        Err(ApkError::NotAZip)
-    ));
+    assert!(matches!(parse_view(&bytes), Err(ApkError::NotAZip)));
 }
 
 #[test]
 fn random_bytes_are_not_a_zip() {
     let bytes = incompressible(8192);
-    assert!(matches!(
-        parse_view(&bytes),
-        Err(ApkError::NotAZip)
-    ));
+    assert!(matches!(parse_view(&bytes), Err(ApkError::NotAZip)));
 }
 
 #[test]
 fn apk_open_nonexistent_returns_io_error() {
-    let result = Apk::open(std::path::Path::new("Z:/nonexistent/asc-rs-does-not-exist.apk"));
+    let result = Apk::open(std::path::Path::new(
+        "Z:/nonexistent/asc-rs-does-not-exist.apk",
+    ));
     assert!(matches!(result, Err(ApkError::Io(_))), "got {:?}", result);
 }
 
@@ -677,7 +701,15 @@ fn corpus_aurora_apk_multidex_matches_dex_fixtures() {
     let expected1 = std::fs::read(dex1_path).expect("read aurora_classes.dex");
     let expected2 = std::fs::read(dex2_path).expect("read aurora_classes2.dex");
     assert_eq!(map_dex1.len(), expected1.len(), "classes.dex length");
-    assert_eq!(map_dex1.as_slice(), expected1.as_slice(), "classes.dex content");
+    assert_eq!(
+        map_dex1.as_slice(),
+        expected1.as_slice(),
+        "classes.dex content"
+    );
     assert_eq!(map_dex2.len(), expected2.len(), "classes2.dex length");
-    assert_eq!(map_dex2.as_slice(), expected2.as_slice(), "classes2.dex content");
+    assert_eq!(
+        map_dex2.as_slice(),
+        expected2.as_slice(),
+        "classes2.dex content"
+    );
 }

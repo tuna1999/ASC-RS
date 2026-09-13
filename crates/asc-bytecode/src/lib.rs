@@ -88,9 +88,8 @@ pub mod walker;
 mod error;
 
 pub use crate::dex_ids::{
-    CallSiteIdx, FieldIdx, MethodHandleIdx, MethodIdx, ProtoIdx, StringIdx, TypeIdx,
-    NO_INDEX,
+    CallSiteIdx, FieldIdx, MethodHandleIdx, MethodIdx, NO_INDEX, ProtoIdx, StringIdx, TypeIdx,
 };
 pub use crate::error::BytecodeError;
-pub use crate::opcode::{opcode_info, Format, OpcodeInfo, OPCODE_TABLE, RefKind, RefSlot};
-pub use crate::walker::{walk_verify, DexRef, RefInstruction, RefWalker};
+pub use crate::opcode::{Format, OPCODE_TABLE, OpcodeInfo, RefKind, RefSlot, opcode_info};
+pub use crate::walker::{DexRef, RefInstruction, RefWalker, walk_verify};

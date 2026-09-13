@@ -243,10 +243,7 @@ impl<'a> DexView<'a> {
     }
 
     /// Parses a `static_values` payload at `off`. Returns `Ok(None)` for `off == 0`.
-    pub fn static_values(
-        &self,
-        off: u32,
-    ) -> Result<Option<Vec<EncodedValue>>, DexError> {
+    pub fn static_values(&self, off: u32) -> Result<Option<Vec<EncodedValue>>, DexError> {
         if off == 0 {
             return Ok(None);
         }
@@ -257,10 +254,7 @@ impl<'a> DexView<'a> {
 
     /// Parses an `annotation_item` (visibility byte + encoded_annotation)
     /// at `off`. Returns `Ok(None)` for `off == 0`.
-    pub fn annotation_item(
-        &self,
-        off: u32,
-    ) -> Result<Option<AnnotationItem>, DexError> {
+    pub fn annotation_item(&self, off: u32) -> Result<Option<AnnotationItem>, DexError> {
         if off == 0 {
             return Ok(None);
         }
@@ -308,10 +302,7 @@ impl<'a> DexView<'a> {
 
     /// Parses an `annotation_set_item` (a `u32` count followed by that many
     /// `u32` annotation_item offsets).
-    pub fn annotation_set(
-        &self,
-        off: u32,
-    ) -> Result<AnnotationSet, DexError> {
+    pub fn annotation_set(&self, off: u32) -> Result<AnnotationSet, DexError> {
         let p = off as usize;
         if p + 4 > self.physical.len() {
             return Err(DexError::OffsetOutOfBounds {
@@ -343,10 +334,7 @@ impl<'a> DexView<'a> {
 
     /// Parses an `annotation_set_ref_list` (a `u32` count followed by that
     /// many `u32` annotation_set_item offsets).
-    pub fn annotation_set_ref_list(
-        &self,
-        off: u32,
-    ) -> Result<AnnotationSetRefList, DexError> {
+    pub fn annotation_set_ref_list(&self, off: u32) -> Result<AnnotationSetRefList, DexError> {
         let p = off as usize;
         if p + 4 > self.physical.len() {
             return Err(DexError::OffsetOutOfBounds {

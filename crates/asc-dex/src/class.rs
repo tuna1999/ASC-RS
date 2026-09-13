@@ -64,10 +64,7 @@ impl<'a> DexView<'a> {
 
     /// Returns the `type_list` view for `class_def.interfaces_off`. Returns
     /// `Ok(None)` when the offset is zero.
-    pub fn class_interfaces(
-        &self,
-        def: &ClassDef,
-    ) -> Result<Option<TypeList<'a>>, DexError> {
+    pub fn class_interfaces(&self, def: &ClassDef) -> Result<Option<TypeList<'a>>, DexError> {
         if def.interfaces_off == 0 {
             return Ok(None);
         }
@@ -150,9 +147,9 @@ impl<'a> DexView<'a> {
         for i in 0..static_fields_size {
             let (delta, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
-            last_idx = last_idx.checked_add(delta).ok_or(
-                DexError::ClassDataDeltaOverflow { off: p },
-            )?;
+            last_idx = last_idx
+                .checked_add(delta)
+                .ok_or(DexError::ClassDataDeltaOverflow { off: p })?;
             let (access, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
             static_fields.push(EncodedField {
@@ -167,9 +164,9 @@ impl<'a> DexView<'a> {
         for i in 0..instance_fields_size {
             let (delta, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
-            last_idx = last_idx.checked_add(delta).ok_or(
-                DexError::ClassDataDeltaOverflow { off: p },
-            )?;
+            last_idx = last_idx
+                .checked_add(delta)
+                .ok_or(DexError::ClassDataDeltaOverflow { off: p })?;
             let (access, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
             instance_fields.push(EncodedField {
@@ -184,9 +181,9 @@ impl<'a> DexView<'a> {
         for i in 0..direct_methods_size {
             let (delta, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
-            last_idx = last_idx.checked_add(delta).ok_or(
-                DexError::ClassDataDeltaOverflow { off: p },
-            )?;
+            last_idx = last_idx
+                .checked_add(delta)
+                .ok_or(DexError::ClassDataDeltaOverflow { off: p })?;
             let (access, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
             let (code_off, n) = crate::leb::uleb128_to_u32(slice)?;
@@ -204,9 +201,9 @@ impl<'a> DexView<'a> {
         for i in 0..virtual_methods_size {
             let (delta, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
-            last_idx = last_idx.checked_add(delta).ok_or(
-                DexError::ClassDataDeltaOverflow { off: p },
-            )?;
+            last_idx = last_idx
+                .checked_add(delta)
+                .ok_or(DexError::ClassDataDeltaOverflow { off: p })?;
             let (access, n) = crate::leb::uleb128_to_u32(slice)?;
             slice = &slice[n..];
             let (code_off, n) = crate::leb::uleb128_to_u32(slice)?;

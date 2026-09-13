@@ -88,17 +88,16 @@ pub mod view;
 
 // Convenience re-exports so callers can `use asc_dex::*`.
 pub use crate::class::{ClassData, ClassDef, EncodedField, EncodedMethod};
-pub use crate::code::{CatchHandler, CatchHandlerList, CodeItem, TryItem, TriesIter};
+pub use crate::code::{CatchHandler, CatchHandlerList, CodeItem, TriesIter, TryItem};
 pub use crate::debug::{
-    DebugInfoHeader, DebugOp, DebugOps, DBG_ADVANCE_LINE, DBG_ADVANCE_PC, DBG_END_LOCAL,
-    DBG_END_SEQUENCE, DBG_RESTART_LOCAL, DBG_SET_EPILOGUE_BEGIN, DBG_SET_FILE,
-    DBG_SET_PROLOGUE_END, DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED, DBG_LINE_BASE,
-    DBG_LINE_RANGE,
+    DBG_ADVANCE_LINE, DBG_ADVANCE_PC, DBG_END_LOCAL, DBG_END_SEQUENCE, DBG_LINE_BASE,
+    DBG_LINE_RANGE, DBG_RESTART_LOCAL, DBG_SET_EPILOGUE_BEGIN, DBG_SET_FILE, DBG_SET_PROLOGUE_END,
+    DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED, DebugInfoHeader, DebugOp, DebugOps,
 };
 pub use crate::encoded::{
     AnnotationItem, AnnotationSet, AnnotationSetRefList, AnnotationsDirectory, EncodedAnnotation,
-    EncodedValue, FieldAnnotation, MethodAnnotation, ParameterAnnotation, ValueType,
-    MAX_DEPTH as ENCODED_VALUE_MAX_DEPTH,
+    EncodedValue, FieldAnnotation, MAX_DEPTH as ENCODED_VALUE_MAX_DEPTH, MethodAnnotation,
+    ParameterAnnotation, ValueType,
 };
 pub use crate::error::DexError;
 pub use crate::header::{DexHeader, DexVersion};
@@ -106,13 +105,13 @@ pub use crate::ids::{
     CallSiteIdx, FieldIdx, MethodHandleIdx, MethodIdx, NO_INDEX, ProtoIdx, StringIdx, TypeIdx,
 };
 pub use crate::leb::{
-    sleb128, sleb128_to_i32, uleb128, uleb128_to_u32, MAX_GENERIC_BYTES, MAX_I32_BYTES,
-    MAX_U32_BYTES,
+    MAX_GENERIC_BYTES, MAX_I32_BYTES, MAX_U32_BYTES, sleb128, sleb128_to_i32, uleb128,
+    uleb128_to_u32,
 };
 pub use crate::map::{MapItem, MapIter};
-pub use crate::mutf8::{decode_lossy as decode_mutf8_lossy, find_terminator, MAX_STRING_SCAN};
+pub use crate::mutf8::{MAX_STRING_SCAN, decode_lossy as decode_mutf8_lossy, find_terminator};
 pub use crate::pools::{
-    is_no_index, DexStringRef, FieldIdItem, FieldOrMethod, FieldIter, MethodHandleItem,
-    MethodIdItem, MethodIter, ProtoIdItem, ProtoIter, StringIter, TypeIter, TypeList, TypeListIter,
+    DexStringRef, FieldIdItem, FieldIter, FieldOrMethod, MethodHandleItem, MethodIdItem,
+    MethodIter, ProtoIdItem, ProtoIter, StringIter, TypeIter, TypeList, TypeListIter, is_no_index,
 };
 pub use crate::view::DexView;

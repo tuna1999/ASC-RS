@@ -1,9 +1,7 @@
 //! Opcode-table unit tests — exhaustiveness, format/width/sample
 //! coverage, and reference-bearing slot positioning.
 
-use asc_bytecode::{
-    opcode_info, Format, OpcodeInfo, RefKind, RefSlot, OPCODE_TABLE,
-};
+use asc_bytecode::{Format, OPCODE_TABLE, OpcodeInfo, RefKind, RefSlot, opcode_info};
 
 #[test]
 fn table_is_exhaustive_and_wide() {
@@ -30,8 +28,8 @@ fn unknown_opcodes_are_marked_unknown() {
     // Reserved / unassigned opcode bytes from the AOSP table:
     //   0x3e..=0x43, 0x73, 0x79..=0x7a, 0xe3..=0xec, 0xef, 0xf1
     let unknown = [
-        0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x73, 0x79, 0x7a, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
-        0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xef, 0xf1,
+        0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x73, 0x79, 0x7a, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8,
+        0xe9, 0xea, 0xeb, 0xec, 0xef, 0xf1,
     ];
     for &op in &unknown {
         let info = opcode_info(op);
@@ -68,10 +66,7 @@ fn const_string_uses_16_bit_slot() {
     let info = opcode_info(0x1a);
     assert_eq!(info.width_units, 2);
     assert_eq!(info.format, Format::Format21c);
-    assert_eq!(
-        info.primary,
-        Some((RefSlot::U16_AT_1, RefKind::String))
-    );
+    assert_eq!(info.primary, Some((RefSlot::U16_AT_1, RefKind::String)));
     assert_eq!(info.secondary, None);
 }
 
@@ -81,10 +76,7 @@ fn const_string_jumbo_uses_32_bit_slot() {
     let info = opcode_info(0x1b);
     assert_eq!(info.width_units, 3);
     assert_eq!(info.format, Format::Format31c);
-    assert_eq!(
-        info.primary,
-        Some((RefSlot::U32_AT_1, RefKind::String))
-    );
+    assert_eq!(info.primary, Some((RefSlot::U32_AT_1, RefKind::String)));
 }
 
 #[test]
@@ -93,14 +85,8 @@ fn invoke_polymorphic_has_secondary_proto() {
     let info = opcode_info(0xfa);
     assert_eq!(info.width_units, 4);
     assert_eq!(info.format, Format::Format45cc);
-    assert_eq!(
-        info.primary,
-        Some((RefSlot::U16_AT_1, RefKind::Method))
-    );
-    assert_eq!(
-        info.secondary,
-        Some((RefSlot::U16_AT_3, RefKind::Proto))
-    );
+    assert_eq!(info.primary, Some((RefSlot::U16_AT_1, RefKind::Method)));
+    assert_eq!(info.secondary, Some((RefSlot::U16_AT_3, RefKind::Proto)));
 }
 
 #[test]
@@ -117,19 +103,13 @@ fn invoke_custom_uses_callsite() {
     let info = opcode_info(0xfc);
     assert_eq!(info.width_units, 3);
     assert_eq!(info.format, Format::Format35c);
-    assert_eq!(
-        info.primary,
-        Some((RefSlot::U16_AT_1, RefKind::CallSite))
-    );
+    assert_eq!(info.primary, Some((RefSlot::U16_AT_1, RefKind::CallSite)));
     assert_eq!(info.secondary, None);
 
     let info = opcode_info(0xfd);
     assert_eq!(info.width_units, 3);
     assert_eq!(info.format, Format::Format3rc);
-    assert_eq!(
-        info.primary,
-        Some((RefSlot::U16_AT_1, RefKind::CallSite))
-    );
+    assert_eq!(info.primary, Some((RefSlot::U16_AT_1, RefKind::CallSite)));
 }
 
 #[test]
@@ -145,10 +125,7 @@ fn const_method_handle_and_type() {
     let info = opcode_info(0xff);
     assert_eq!(info.width_units, 2);
     assert_eq!(info.format, Format::Format21c);
-    assert_eq!(
-        info.primary,
-        Some((RefSlot::U16_AT_1, RefKind::Proto))
-    );
+    assert_eq!(info.primary, Some((RefSlot::U16_AT_1, RefKind::Proto)));
 }
 
 #[test]
@@ -299,8 +276,16 @@ fn ref_bearing_opcodes_are_exhaustive() {
         (0x74, Some((RefKind::Method, 16)), None),
         (0x78, Some((RefKind::Method, 16)), None),
         // method (45cc / 4rcc) with proto secondary
-        (0xfa, Some((RefKind::Method, 16)), Some((RefKind::Proto, 16))),
-        (0xfb, Some((RefKind::Method, 16)), Some((RefKind::Proto, 16))),
+        (
+            0xfa,
+            Some((RefKind::Method, 16)),
+            Some((RefKind::Proto, 16)),
+        ),
+        (
+            0xfb,
+            Some((RefKind::Method, 16)),
+            Some((RefKind::Proto, 16)),
+        ),
         // call site (35c / 3rc)
         (0xfc, Some((RefKind::CallSite, 16)), None),
         (0xfd, Some((RefKind::CallSite, 16)), None),

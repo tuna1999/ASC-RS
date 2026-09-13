@@ -31,13 +31,17 @@ pub const MAX_I32_BYTES: usize = 5;
 /// 5 bytes) returns the appropriate [`DexError`].
 pub fn uleb128_to_u32(bytes: &[u8]) -> Result<(u32, usize), DexError> {
     if bytes.is_empty() {
-        return Err(DexError::Uleb { message: "empty input" });
+        return Err(DexError::Uleb {
+            message: "empty input",
+        });
     }
     let mut result: u32 = 0;
     let mut shift: u32 = 0;
     let mut i = 0;
     while i < MAX_GENERIC_BYTES {
-        let b = *bytes.get(i).ok_or(DexError::Uleb { message: "truncated" })?;
+        let b = *bytes.get(i).ok_or(DexError::Uleb {
+            message: "truncated",
+        })?;
         i += 1;
         if shift < 32 {
             let low = (b as u32) & 0x7F;
@@ -74,13 +78,17 @@ pub fn uleb128_to_u32(bytes: &[u8]) -> Result<(u32, usize), DexError> {
 /// Returns the decoded value and the number of bytes consumed on success.
 pub fn sleb128_to_i32(bytes: &[u8]) -> Result<(i32, usize), DexError> {
     if bytes.is_empty() {
-        return Err(DexError::Sleb { message: "empty input" });
+        return Err(DexError::Sleb {
+            message: "empty input",
+        });
     }
     let mut result: u32 = 0;
     let mut shift: u32 = 0;
     let mut i = 0;
     while i < MAX_GENERIC_BYTES {
-        let byte = *bytes.get(i).ok_or(DexError::Sleb { message: "truncated" })?;
+        let byte = *bytes.get(i).ok_or(DexError::Sleb {
+            message: "truncated",
+        })?;
         i += 1;
         let payload = (byte as u32) & 0x7F;
         if shift < 32 {
@@ -112,13 +120,17 @@ pub fn sleb128_to_i32(bytes: &[u8]) -> Result<(i32, usize), DexError> {
 /// `debug_info` parameters where the spec does not restrict to `u32`.
 pub fn uleb128(bytes: &[u8]) -> Result<(u64, usize), DexError> {
     if bytes.is_empty() {
-        return Err(DexError::Uleb { message: "empty input" });
+        return Err(DexError::Uleb {
+            message: "empty input",
+        });
     }
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
     let mut i = 0;
     while i < MAX_GENERIC_BYTES {
-        let b = *bytes.get(i).ok_or(DexError::Uleb { message: "truncated" })?;
+        let b = *bytes.get(i).ok_or(DexError::Uleb {
+            message: "truncated",
+        })?;
         i += 1;
         if shift < 64 {
             result |= ((b as u64) & 0x7F) << shift;
@@ -140,13 +152,17 @@ pub fn uleb128(bytes: &[u8]) -> Result<(u64, usize), DexError> {
 /// Generic SLEB128 decoder that returns an `i64`.
 pub fn sleb128(bytes: &[u8]) -> Result<(i64, usize), DexError> {
     if bytes.is_empty() {
-        return Err(DexError::Sleb { message: "empty input" });
+        return Err(DexError::Sleb {
+            message: "empty input",
+        });
     }
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
     let mut i = 0;
     while i < MAX_GENERIC_BYTES {
-        let byte = *bytes.get(i).ok_or(DexError::Sleb { message: "truncated" })?;
+        let byte = *bytes.get(i).ok_or(DexError::Sleb {
+            message: "truncated",
+        })?;
         i += 1;
         let payload = ((byte as u64) & 0x7F) << shift;
         if shift < 64 {

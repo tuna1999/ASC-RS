@@ -4,11 +4,10 @@
 use std::fs::File;
 use std::path::Path;
 
-use memmap2::Mmap;
-use crate::inflate::{inflate_into_vec, verify_crc32, InflateLimits};
 use crate::entry::{Compression, DexEntry, EntryBytes};
 use crate::error::ApkError;
-
+use crate::inflate::{InflateLimits, inflate_into_vec, verify_crc32};
+use memmap2::Mmap;
 
 /// Read-only mmap APK/ZIP engine.
 ///
@@ -89,10 +88,7 @@ impl Apk {
 
     /// Look up an entry by exact name. Returns `None` if no entry matches.
     pub fn entry(&self, name: &str) -> Option<DexEntry> {
-        self.entries
-            .iter()
-            .find(|e| e.name == name)
-            .cloned()
+        self.entries.iter().find(|e| e.name == name).cloned()
     }
 
     /// Read the bytes of `entry`. STORED entries are returned as borrowed
@@ -106,10 +102,7 @@ impl Apk {
     /// inflated bytes against the central-directory field. Returns
     /// [`ApkError::SizeMismatch`] if the CRC does not match, to give
     /// callers a distinct signal.
-    pub fn read_entry_verified(
-        &self,
-        entry: &DexEntry,
-    ) -> Result<EntryBytes<'_>, ApkError> {
+    pub fn read_entry_verified(&self, entry: &DexEntry) -> Result<EntryBytes<'_>, ApkError> {
         let bytes = self.read_entry(entry)?;
         if !verify_crc32(bytes.as_slice(), entry.crc32) {
             return Err(ApkError::SizeMismatch {
@@ -180,10 +173,7 @@ impl<'a> ZipView<'a> {
 
     /// Look up an entry by exact name. Returns `None` if no entry matches.
     pub fn entry(&self, name: &str) -> Option<DexEntry> {
-        self.entries
-            .iter()
-            .find(|e| e.name == name)
-            .cloned()
+        self.entries.iter().find(|e| e.name == name).cloned()
     }
 
     /// Read the bytes of `entry`. STORED entries are borrowed from the

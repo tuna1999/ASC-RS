@@ -196,10 +196,7 @@ impl<'a> DexView<'a> {
     }
 
     /// Iterator over the `tries` array of the given `code_item`.
-    pub fn tries_iter<'s>(
-        &'s self,
-        code: &CodeItem<'a>,
-    ) -> Result<TriesIter<'a>, DexError> {
+    pub fn tries_iter<'s>(&'s self, code: &CodeItem<'a>) -> Result<TriesIter<'a>, DexError> {
         let base = self.code_item_tries_base(code);
         let count = code.tries_size as usize;
         if count == 0 {

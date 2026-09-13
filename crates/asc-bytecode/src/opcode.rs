@@ -102,15 +102,24 @@ impl RefSlot {
     /// 16-bit index at code-unit offset 1 — used by every
     /// `21c` / `22c` / `35c` / `3rc` primary pool reference and by the
     /// `45cc` / `4rcc` method primary reference.
-    pub const U16_AT_1: Self = Self { unit_off: 1, bits: 16 };
+    pub const U16_AT_1: Self = Self {
+        unit_off: 1,
+        bits: 16,
+    };
 
     /// 32-bit index starting at code-unit offset 1 — `const-string/jumbo`
     /// (`31c`) only.
-    pub const U32_AT_1: Self = Self { unit_off: 1, bits: 32 };
+    pub const U32_AT_1: Self = Self {
+        unit_off: 1,
+        bits: 32,
+    };
 
     /// 16-bit index at code-unit offset 3 — the prototype reference on
     /// `45cc` / `4rcc` (`invoke-polymorphic`, `invoke-polymorphic/range`).
-    pub const U16_AT_3: Self = Self { unit_off: 3, bits: 16 };
+    pub const U16_AT_3: Self = Self {
+        unit_off: 3,
+        bits: 16,
+    };
 }
 
 /// Metadata for one opcode byte.
@@ -546,11 +555,15 @@ pub(crate) fn payload_extent(
     kind: PayloadKind,
 ) -> Result<u32, crate::error::BytecodeError> {
     let byte_off = (offset_units as usize).checked_mul(2).ok_or(
-        crate::error::BytecodeError::MalformedPayload { offset: offset_units },
+        crate::error::BytecodeError::MalformedPayload {
+            offset: offset_units,
+        },
     )?;
-    let remaining = insns_units
-        .checked_sub(offset_units)
-        .ok_or(crate::error::BytecodeError::MalformedPayload { offset: offset_units })?;
+    let remaining = insns_units.checked_sub(offset_units).ok_or(
+        crate::error::BytecodeError::MalformedPayload {
+            offset: offset_units,
+        },
+    )?;
 
     let units = match kind {
         PayloadKind::PackedSwitch => {
@@ -560,11 +573,11 @@ pub(crate) fn payload_extent(
                 });
             }
             let size = u16::from_le_bytes([header[byte_off + 2], header[byte_off + 3]]) as u32;
-            size.checked_mul(2)
-                .and_then(|v| v.checked_add(4))
-                .ok_or(crate::error::BytecodeError::MalformedPayload {
+            size.checked_mul(2).and_then(|v| v.checked_add(4)).ok_or(
+                crate::error::BytecodeError::MalformedPayload {
                     offset: offset_units,
-                })?
+                },
+            )?
         }
         PayloadKind::SparseSwitch => {
             if byte_off + 4 > header.len() {
@@ -573,11 +586,11 @@ pub(crate) fn payload_extent(
                 });
             }
             let size = u16::from_le_bytes([header[byte_off + 2], header[byte_off + 3]]) as u32;
-            size.checked_mul(4)
-                .and_then(|v| v.checked_add(2))
-                .ok_or(crate::error::BytecodeError::MalformedPayload {
+            size.checked_mul(4).and_then(|v| v.checked_add(2)).ok_or(
+                crate::error::BytecodeError::MalformedPayload {
                     offset: offset_units,
-                })?
+                },
+            )?
         }
         PayloadKind::FillArrayData => {
             if byte_off + 8 > header.len() {
@@ -595,22 +608,22 @@ pub(crate) fn payload_extent(
             ]);
             // size * element_width as u64 to avoid 32-bit overflow, then
             // ceil-divide by 2 to convert bytes to code units.
-            let total_bytes = (size as u64)
-                .checked_mul(element_width as u64)
-                .ok_or(crate::error::BytecodeError::MalformedPayload {
+            let total_bytes = (size as u64).checked_mul(element_width as u64).ok_or(
+                crate::error::BytecodeError::MalformedPayload {
                     offset: offset_units,
-                })?;
+                },
+            )?;
             let extra_units = total_bytes.div_ceil(2);
             let extra_units_u32 = u32::try_from(extra_units).map_err(|_| {
                 crate::error::BytecodeError::MalformedPayload {
                     offset: offset_units,
                 }
             })?;
-            extra_units_u32.checked_add(4).ok_or(
-                crate::error::BytecodeError::MalformedPayload {
+            extra_units_u32
+                .checked_add(4)
+                .ok_or(crate::error::BytecodeError::MalformedPayload {
                     offset: offset_units,
-                },
-            )?
+                })?
         }
     };
 
@@ -620,11 +633,12 @@ pub(crate) fn payload_extent(
             offset: offset_units,
         });
     }
-    let needed_bytes = (units as usize)
-        .checked_mul(2)
-        .ok_or(crate::error::BytecodeError::MalformedPayload {
-            offset: offset_units,
-        })?;
+    let needed_bytes =
+        (units as usize)
+            .checked_mul(2)
+            .ok_or(crate::error::BytecodeError::MalformedPayload {
+                offset: offset_units,
+            })?;
     if byte_off + needed_bytes > header.len() {
         return Err(crate::error::BytecodeError::MalformedPayload {
             offset: offset_units,

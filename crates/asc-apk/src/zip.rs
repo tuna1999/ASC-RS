@@ -196,14 +196,8 @@ pub(crate) fn parse_directory(buf: &[u8]) -> Result<Vec<DexEntry>, ApkError> {
         let name_bytes = &buf[name_start..name_end];
 
         // ZIP64 resolution for fields whose 32-bit placeholders were hit.
-        let (csize, usize, lho) = resolve_zip64(
-            buf,
-            extra_start,
-            extra_end,
-            csize32,
-            usize32,
-            lho32,
-        )?;
+        let (csize, usize, lho) =
+            resolve_zip64(buf, extra_start, extra_end, csize32, usize32, lho32)?;
 
         // Validate declared sizes are non-negative (u64, so just sanity check
         // for absurd values that would have overflowed u32 sanity).
@@ -374,10 +368,7 @@ fn walk_extra(
 /// The local header carries its own (name_len, extra_len) pair, which may
 /// differ from the central directory. The returned offset is the start of
 /// the compressed data payload.
-pub(crate) fn resolve_local_data_offset(
-    buf: &[u8],
-    entry: &DexEntry,
-) -> Result<u64, ApkError> {
+pub(crate) fn resolve_local_data_offset(buf: &[u8], entry: &DexEntry) -> Result<u64, ApkError> {
     let lho = entry.local_header_offset as usize;
     if lho
         .checked_add(LH_FIXED_LEN)

@@ -29,7 +29,9 @@ pub enum DexError {
     InvalidHeader { off: usize, message: &'static str },
 
     /// A pool `[off, off + count*stride)` extends beyond the physical buffer.
-    #[error("pool {pool} out of bounds: off=0x{off:x}, count={count}, stride={stride}, file={file}")]
+    #[error(
+        "pool {pool} out of bounds: off=0x{off:x}, count={count}, stride={stride}, file={file}"
+    )]
     PoolOutOfBounds {
         pool: &'static str,
         off: usize,
@@ -83,12 +85,22 @@ pub enum DexError {
     InvalidLength { off: usize, message: &'static str },
 
     /// A `try_item.handler_off` does not lie inside the `encoded_catch_handler_list`.
-    #[error("catch handler offset 0x{off:x} outside encoded_catch_handler_list ({start:x}..{end:x})")]
-    BadCatchHandlerOffset { off: usize, start: usize, end: usize },
+    #[error(
+        "catch handler offset 0x{off:x} outside encoded_catch_handler_list ({start:x}..{end:x})"
+    )]
+    BadCatchHandlerOffset {
+        off: usize,
+        start: usize,
+        end: usize,
+    },
 
     /// A `debug_info_item` opcode stream is truncated or malformed.
     #[error("bad debug_info opcode 0x{op:02x} at offset 0x{off:x}: {message}")]
-    BadDebugOpcode { op: u8, off: usize, message: &'static str },
+    BadDebugOpcode {
+        op: u8,
+        off: usize,
+        message: &'static str,
+    },
 
     /// `code_off` is not 4-byte aligned.
     #[error("code_off 0x{off:x} is not 4-byte aligned")]
