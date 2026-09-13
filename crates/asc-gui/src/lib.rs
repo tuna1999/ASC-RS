@@ -16,18 +16,19 @@
 //!   and the integration test.
 //! - [`app`] — the eframe `App` implementation that draws the panels.
 
+use std::path::Path;
+
+pub mod app;
+pub mod selfcheck;
 pub mod session;
 pub mod worker;
-pub mod selfcheck;
-pub mod app;
 
-pub use crate::session::{
-    WorkspaceSession, SessionError, SessionResult, ClassEntry, SourceTab, FindRefsHistoryEntry,
-    MAX_OPEN_TABS, MAX_FINDREFS_HISTORY,
-};
+pub use crate::app::AscApp;
 pub use crate::selfcheck::{run_selfcheck, SelfcheckReport};
-
-use std::path::Path;
+pub use crate::session::{
+    ClassEntry, FindRefsHistoryEntry, MAX_FINDREFS_HISTORY, MAX_OPEN_TABS, SessionError,
+    SessionResult, SourceTab, WorkspaceSession,
+};
 
 /// Convenience: open an APK and return a session, or return a
 /// `SessionError` describing the failure.

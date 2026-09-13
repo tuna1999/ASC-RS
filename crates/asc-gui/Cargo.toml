@@ -10,13 +10,17 @@ asc-core.workspace = true
 asc-dex.workspace = true
 asc-manifest.workspace = true
 asc-apk.workspace = true
+asc-query.workspace = true
+thiserror.workspace = true
 # eframe pulls in winit + wgpu + accesskit + egui. Pinned locally per
 # Lead's standing approval (do NOT move into [workspace.dependencies]).
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+# parking_lot gives us a non-poisoning Mutex/RwLock — preferred over
+# std::sync::Mutex in the GUI's hot path (see CLAUDE rule rs-parking-lot).
+parking_lot = "0.12"
 
 [dev-dependencies]
 # Used by the --selfcheck integration test to open the corpus fixture.
-# (No extra deps required — tests call into the public headless path.)
 
 [[bin]]
 name = "asc-gui"
