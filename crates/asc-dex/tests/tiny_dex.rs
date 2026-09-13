@@ -124,7 +124,7 @@ fn reads_tries() {
     assert_eq!(tries.len(), 1);
     assert_eq!(tries[0].start_addr, 0);
     assert_eq!(tries[0].insn_count, 3);
-    assert_eq!(tries[0].handler_off, 0);
+    assert_eq!(tries[0].handler_off, 1);
 }
 
 #[test]

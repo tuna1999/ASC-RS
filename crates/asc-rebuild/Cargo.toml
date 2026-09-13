@@ -7,3 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+asc-dex.workspace = true
+asc-bytecode.workspace = true
+sha1.workspace = true
+adler2.workspace = true
+
+[dev-dependencies]
+asc-decompile.workspace = true

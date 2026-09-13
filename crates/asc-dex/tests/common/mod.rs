@@ -81,8 +81,8 @@ pub mod layout {
     pub const INSNS_END: u32 = CODE_HEADER_END + INSNS_SIZE * 2 + 2; // +2 padding
     pub const TRIES_END: u32 = INSNS_END + 8;
     pub const HANDLER_LIST_OFF: u32 = align4(TRIES_END);
-    // 4-byte list size + entry bytes (1 byte sleb + 1 byte uleb + 1 byte uleb = 3 bytes).
-    pub const HANDLER_LIST_END: u32 = HANDLER_LIST_OFF + 4 + 3;
+    // uleb128 list size (1 byte for 1 entry) + entry bytes (1 sleb + 2 uleb).
+    pub const HANDLER_LIST_END: u32 = HANDLER_LIST_OFF + 1 + 3;
 
     pub const DEBUG_OFF: u32 = align4(HANDLER_LIST_END);
     pub const DEBUG_END: u32 = DEBUG_OFF + 4;
@@ -305,12 +305,12 @@ fn write_code_item(buf: &mut [u8]) {
     off += 4;
     put_u16(buf, off, 3);
     off += 2;
-    put_u16(buf, off, 0);
+    put_u16(buf, off, 1); // handler_off: first entry sits right after the 1-byte uleb size
     off += 2;
     debug_assert_eq!(off, TRIES_END);
     let mut ho = HANDLER_LIST_OFF;
-    put_u32(buf, ho, HANDLER_LIST_END - ho - 4);
-    ho += 4;
+    put_u8(buf, ho, 1); // uleb128: one handler entry
+    ho += 1;
     ho = put_sleb(buf, ho, 1);
     ho = put_uleb(buf, ho, 1);
     ho = put_uleb(buf, ho, 0);

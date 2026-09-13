@@ -231,8 +231,15 @@ impl<'a> DexView<'a> {
         })
     }
 
-    /// Returns the `encoded_catch_handler_list` raw bytes (start, size) for
-    /// a given code item. Returns `Ok(None)` when `tries_size == 0`.
+    /// Returns the `encoded_catch_handler_list` for a given code item.
+    /// Returns `Ok(None)` when `tries_size == 0`.
+    ///
+    /// Format (per the DEX spec, confirmed against production dexes):
+    /// the list starts with a **uleb128 entry count**, followed by that
+    /// many `encoded_catch_handler` entries. `try_item.handler_off` is a
+    /// byte offset **from the start of the list** (offset 0 is the size
+    /// field itself; the first handler sits at offset = size-field byte
+    /// length).
     pub fn catch_handler_list<'s>(
         &'s self,
         code: &CodeItem<'a>,
@@ -245,33 +252,44 @@ impl<'a> DexView<'a> {
         let mut list_off = tries_base + tries_bytes;
         let pad = (4 - (list_off & 3)) & 3;
         list_off += pad;
-        if list_off + 4 > self.physical.len() {
+        if list_off >= self.physical.len() {
             return Err(DexError::Truncated {
-                needed: list_off + 4,
+                needed: list_off + 1,
                 actual: self.physical.len(),
             });
         }
-        let list_size = crate::read::read_u32(self.physical, list_off)?;
-        let raw_base = list_off;
-        let raw_end = list_off
-            .checked_add(4)
-            .and_then(|x| x.checked_add(list_size as usize))
-            .ok_or(DexError::InvalidLength {
+        let (size, size_len) = crate::leb::uleb128_to_u32(&self.physical[list_off..])?;
+        // The declared entry count cannot exceed the bytes left in the file
+        // (each entry is at least 2 bytes: sleb size + one operand byte).
+        let max_entries = (self.physical.len() - list_off - size_len) / 2;
+        if size as usize > max_entries {
+            return Err(DexError::InvalidLength {
                 off: list_off,
-                message: "catch_handler list overflow",
-            })?;
-        if raw_end > self.physical.len() {
-            return Err(DexError::Truncated {
-                needed: raw_end,
-                actual: self.physical.len(),
+                message: "catch_handler entry count exceeds file",
             });
         }
-        let raw = &self.physical[raw_base..raw_end];
-        Ok(Some(CatchHandlerList {
-            raw,
-            raw_base,
-            size: list_size,
-        }))
+        let mut list = CatchHandlerList {
+            raw: &self.physical[list_off..],
+            raw_base: list_off,
+            size,
+            handlers_start: size_len,
+            byte_len: size_len,
+        };
+        // Walk the entries once to find the list's byte extent (and to
+        // validate the structure eagerly).
+        let mut q = size_len;
+        for _ in 0..size {
+            if q >= list.raw.len() {
+                return Err(DexError::Truncated {
+                    needed: list_off + q + 1,
+                    actual: self.physical.len(),
+                });
+            }
+            let advance = entry_total_len(&list.raw[q..])?;
+            q += advance;
+        }
+        list.byte_len = q;
+        Ok(Some(list))
     }
 
     /// Resolves a single try item's catch handler.
@@ -280,28 +298,7 @@ impl<'a> DexView<'a> {
         list: &CatchHandlerList<'a>,
         try_item: &TryItem,
     ) -> Result<CatchHandler, DexError> {
-        let off = try_item.handler_off as usize;
-        if off >= list.raw.len() {
-            return Err(DexError::BadCatchHandlerOffset {
-                off: list.raw_base + off,
-                start: list.raw_base,
-                end: list.raw_base + list.raw.len(),
-            });
-        }
-        // Walk past the size prefix.
-        let mut q = 4usize; // skip list size
-        while q < list.raw.len() {
-            if q - 4 == off {
-                return Self::parse_catch_handler_at(list.raw, q);
-            }
-            let advance = entry_total_len(&list.raw[q..])?;
-            q += advance;
-        }
-        Err(DexError::BadCatchHandlerOffset {
-            off: list.raw_base + off,
-            start: list.raw_base,
-            end: list.raw_base + list.raw.len(),
-        })
+        list.get(try_item.handler_off)
     }
 
     /// Parses the catch handler at the given byte offset inside `raw`.
@@ -331,24 +328,57 @@ impl<'a> DexView<'a> {
 }
 
 /// Lazily-iterable view of an `encoded_catch_handler_list`.
+///
+/// `raw` starts AT the uleb128 size field and extends at least through
+/// the last handler entry (`byte_len` is the exact list length in
+/// bytes, including the size field). `try_item.handler_off` values are
+/// byte offsets from the start of `raw`.
 #[derive(Debug, Clone)]
 pub struct CatchHandlerList<'a> {
     raw: &'a [u8],
     raw_base: usize,
-    /// Total size (in bytes) recorded in the list header; used for bounds.
+    /// Declared entry count (uleb128 at raw[0]).
     size: u32,
+    /// Byte offset of the first handler entry (== size-field length).
+    handlers_start: usize,
+    /// Exact byte length of the whole list, size field included.
+    byte_len: usize,
 }
 
 impl<'a> CatchHandlerList<'a> {
-    /// Returns the total byte size of the list (not counting the 4-byte size
-    /// header itself).
+    /// Declared number of handler entries.
     #[inline]
     pub fn size(&self) -> u32 {
         self.size
     }
 
+    /// Exact byte length of the list (uleb size field + all entries).
+    #[inline]
+    pub fn byte_len(&self) -> usize {
+        self.byte_len
+    }
+
+    /// Byte offset (from list start) of each handler entry, in order.
+    /// The first entry sits at `handlers_start`.
+    pub fn handler_offsets(&self) -> Result<Vec<u32>, DexError> {
+        let mut out = Vec::with_capacity(self.size as usize);
+        let mut q = self.handlers_start;
+        for _ in 0..self.size {
+            if q >= self.raw.len() {
+                return Err(DexError::Truncated {
+                    needed: self.raw_base + q + 1,
+                    actual: self.raw_base + self.raw.len(),
+                });
+            }
+            out.push(q as u32);
+            let advance = entry_total_len(&self.raw[q..])?;
+            q += advance;
+        }
+        Ok(out)
+    }
+
     /// Resolves the catch handler at `handler_off` (a `try_item.handler_off`
-    /// value, relative to the start of the list).
+    /// value, byte offset from the start of this list).
     pub fn get(&self, handler_off: u16) -> Result<CatchHandler, DexError> {
         let off = handler_off as usize;
         if off >= self.raw.len() {
@@ -358,9 +388,9 @@ impl<'a> CatchHandlerList<'a> {
                 end: self.raw_base + self.raw.len(),
             });
         }
-        let mut q = 4usize;
+        let mut q = self.handlers_start;
         while q < self.raw.len() {
-            if q - 4 == off {
+            if q == off {
                 return DexView::parse_catch_handler_at(self.raw, q);
             }
             let advance = entry_total_len(&self.raw[q..])?;
@@ -375,12 +405,17 @@ impl<'a> CatchHandlerList<'a> {
 
     /// Eagerly parses every handler entry and returns them in order.
     pub fn iter_all(&self) -> Result<Vec<CatchHandler>, DexError> {
-        let mut out = Vec::new();
-        let mut q = 4usize;
-        while q < self.raw.len() {
-            let h = DexView::parse_catch_handler_at(self.raw, q)?;
+        let mut out = Vec::with_capacity(self.size as usize);
+        let mut q = self.handlers_start;
+        for _ in 0..self.size {
+            if q >= self.raw.len() {
+                return Err(DexError::Truncated {
+                    needed: self.raw_base + q + 1,
+                    actual: self.raw_base + self.raw.len(),
+                });
+            }
+            out.push(DexView::parse_catch_handler_at(self.raw, q)?);
             let advance = entry_total_len(&self.raw[q..])?;
-            out.push(h);
             q += advance;
         }
         Ok(out)

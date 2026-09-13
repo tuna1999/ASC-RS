@@ -112,6 +112,7 @@ version = "0.1.0"
 dependencies = [
  "adler2",
  "asc-bytecode",
+ "asc-decompile",
  "asc-dex",
  "sha1 0.10.7",
  "thiserror",
