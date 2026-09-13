@@ -47,10 +47,7 @@ fn root_size_overruns_input() {
     bytes[..4].copy_from_slice(&0x0008_0003u32.to_le_bytes());
     bytes[4..8].copy_from_slice(&1_000_000_000u32.to_le_bytes());
     let err = parse_manifest(&bytes).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::BadChunk(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
 }
 
 #[test]
@@ -60,10 +57,7 @@ fn root_size_below_header_size_errors() {
     bytes[..4].copy_from_slice(&0x0008_0003u32.to_le_bytes());
     bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
     let err = parse_manifest(&bytes).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::BadChunk(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
 }
 
 #[test]
@@ -78,10 +72,7 @@ fn first_inner_chunk_must_be_string_pool() {
     bytes[10..12].copy_from_slice(&8u16.to_le_bytes());
     bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
     let err = parse_manifest(&bytes).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::BadChunk(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
 }
 
 #[test]
@@ -101,10 +92,7 @@ fn string_pool_with_bogus_count_errors() {
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
     let err = parse_manifest(&bytes).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::BadChunk(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
 }
 
 #[test]
@@ -126,10 +114,7 @@ fn truncated_utf16_string_errors_not_panics() {
     // char_len = 100 but no payload follows — read will truncate.
     bytes.extend_from_slice(&100u16.to_le_bytes());
     let err = parse_manifest(&bytes).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::Truncated(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
 }
 
 #[test]
@@ -162,8 +147,7 @@ fn bad_string_index_in_attribute_errors_not_panics() {
     }
     bytes.extend_from_slice(&[0, 0]); // NUL terminator
     let sp_size = (bytes.len() - sp_start) as u32;
-    bytes[sp_size_placeholder..sp_size_placeholder + 4]
-        .copy_from_slice(&sp_size.to_le_bytes());
+    bytes[sp_size_placeholder..sp_size_placeholder + 4].copy_from_slice(&sp_size.to_le_bytes());
 
     // START_ELEMENT chunk referencing string 999 (out of range).
     let se_start = bytes.len();
@@ -182,18 +166,14 @@ fn bad_string_index_in_attribute_errors_not_panics() {
     bytes.extend_from_slice(&0u16.to_le_bytes()); // classIndex
     bytes.extend_from_slice(&0u16.to_le_bytes()); // styleIndex
     let se_size = (bytes.len() - se_start) as u32;
-    bytes[se_size_placeholder..se_size_placeholder + 4]
-        .copy_from_slice(&se_size.to_le_bytes());
+    bytes[se_size_placeholder..se_size_placeholder + 4].copy_from_slice(&se_size.to_le_bytes());
 
     let root_size = bytes.len() as u32;
     bytes[root_size_placeholder..root_size_placeholder + 4]
         .copy_from_slice(&root_size.to_le_bytes());
 
     let err = parse_manifest(&bytes).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::BadChunk(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
 }
 
 #[test]
@@ -221,8 +201,7 @@ fn utf8_string_pool_decodes() {
     bytes.extend_from_slice(b"main");
     bytes.push(0); // terminator
     let sp_size = (bytes.len() - sp_start) as u32;
-    bytes[sp_size_placeholder..sp_size_placeholder + 4]
-        .copy_from_slice(&sp_size.to_le_bytes());
+    bytes[sp_size_placeholder..sp_size_placeholder + 4].copy_from_slice(&sp_size.to_le_bytes());
 
     // START_ELEMENT referencing string 0 ("main") with no attrs.
     let se_start = bytes.len();
@@ -241,8 +220,7 @@ fn utf8_string_pool_decodes() {
     bytes.extend_from_slice(&0u16.to_le_bytes()); // classIndex
     bytes.extend_from_slice(&0u16.to_le_bytes()); // styleIndex
     let se_size = (bytes.len() - se_start) as u32;
-    bytes[se_size_placeholder..se_size_placeholder + 4]
-        .copy_from_slice(&se_size.to_le_bytes());
+    bytes[se_size_placeholder..se_size_placeholder + 4].copy_from_slice(&se_size.to_le_bytes());
 
     // END_ELEMENT referencing string 0.
     let ee_start = bytes.len();
@@ -255,8 +233,7 @@ fn utf8_string_pool_decodes() {
     bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // ns
     bytes.extend_from_slice(&0u32.to_le_bytes()); // name = 0
     let ee_size = (bytes.len() - ee_start) as u32;
-    bytes[ee_size_placeholder..ee_size_placeholder + 4]
-        .copy_from_slice(&ee_size.to_le_bytes());
+    bytes[ee_size_placeholder..ee_size_placeholder + 4].copy_from_slice(&ee_size.to_le_bytes());
 
     let root_size = bytes.len() as u32;
     bytes[root_size_placeholder..root_size_placeholder + 4]
@@ -289,10 +266,7 @@ fn aurora_store_manifest_real_fixture() {
     assert!(
         info.permissions.len() >= 3,
         "expected several permissions, got {:?}",
-        info.permissions
-            .iter()
-            .map(|p| &p.name)
-            .collect::<Vec<_>>()
+        info.permissions.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
     let launcher = info
         .activities
@@ -300,7 +274,9 @@ fn aurora_store_manifest_real_fixture() {
         .find(|a| {
             a.intent_filters.iter().any(|f| {
                 f.actions.iter().any(|a| a == "android.intent.action.MAIN")
-                    && f.categories.iter().any(|c| c == "android.intent.category.LAUNCHER")
+                    && f.categories
+                        .iter()
+                        .any(|c| c == "android.intent.category.LAUNCHER")
             })
         })
         .expect("expected at least one launcher activity");
@@ -318,10 +294,7 @@ fn fdroid_manifest_real_fixture() {
     assert!(
         info.permissions.len() >= 3,
         "expected several permissions, got {:?}",
-        info.permissions
-            .iter()
-            .map(|p| &p.name)
-            .collect::<Vec<_>>()
+        info.permissions.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
 }
 
@@ -332,10 +305,7 @@ fn invalid_path_io_error() {
     // path-level convenience so the error doesn't depend on the OS
     // variant of "file not found".)
     let err = parse_from_apk("/this/path/does/not/exist.apk").unwrap_err();
-    assert!(
-        matches!(err, ManifestError::Truncated(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
 }
 
 #[test]
@@ -404,9 +374,6 @@ fn apk_without_manifest_errors() {
         .write_all(&zip_bytes)
         .unwrap();
     let err = parse_from_apk(&tmp).unwrap_err();
-    assert!(
-        matches!(err, ManifestError::Truncated(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
     let _ = std::fs::remove_file(&tmp);
 }

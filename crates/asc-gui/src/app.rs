@@ -22,7 +22,7 @@ use eframe::egui;
 use asc_query::{ClassConstraint, Query};
 
 use crate::session::{ClassEntry, SessionError, SourceTab, WorkspaceSession};
-use crate::worker::{spawn_job, Job, JobResult};
+use crate::worker::{Job, JobResult, spawn_job};
 
 /// Main GUI state. Owns the session and any pending worker
 /// receivers; eframe calls `update` on every frame.
@@ -144,9 +144,7 @@ impl AscApp {
                     ctx.request_repaint();
                 }
                 Ok(other) => {
-                    self.last_error = Some(format!(
-                        "unexpected findrefs result: {other:?}"
-                    ));
+                    self.last_error = Some(format!("unexpected findrefs result: {other:?}"));
                     self.pending_findrefs = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -163,11 +161,9 @@ impl AscApp {
                 Ok(JobResult::GetClass { target, result }) => {
                     match result {
                         Ok(r) => {
-                            if let Err(e) = self.session.open_tab(
-                                r.dex_name,
-                                target.clone(),
-                                r.source,
-                            ) {
+                            if let Err(e) =
+                                self.session.open_tab(r.dex_name, target.clone(), r.source)
+                            {
                                 self.last_error = Some(format!("open_tab: {e}"));
                             }
                         }
@@ -179,9 +175,7 @@ impl AscApp {
                     ctx.request_repaint();
                 }
                 Ok(other) => {
-                    self.last_error = Some(format!(
-                        "unexpected getclass result: {other:?}"
-                    ));
+                    self.last_error = Some(format!("unexpected getclass result: {other:?}"));
                     self.pending_getclass = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -206,9 +200,7 @@ impl eframe::App for AscApp {
             ui.horizontal(|ui| {
                 ui.label("APK:");
                 let resp = ui.text_edit_singleline(&mut self.path_input);
-                if resp.lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                {
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     let p = PathBuf::from(self.path_input.trim());
                     match WorkspaceSession::open(&p) {
                         Ok(s) => {
@@ -324,10 +316,7 @@ impl eframe::App for AscApp {
                         self.start_getclass(sel.clone(), ctx);
                     }
                 }
-                ui.label(format!(
-                    "{} tab(s) open",
-                    self.session.open_tabs().len()
-                ));
+                ui.label(format!("{} tab(s) open", self.session.open_tabs().len()));
             });
             ui.separator();
             let tabs = self.session.open_tabs();
@@ -344,16 +333,13 @@ impl eframe::App for AscApp {
 }
 
 fn draw_source_tab(ui: &mut egui::Ui, tab: &SourceTab) {
-    ui.collapsing(
-        format!("{} :: {}", tab.dex_name, tab.descriptor),
-        |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(400.0)
-                .show(ui, |ui| {
-                    ui.monospace(&tab.source);
-                });
-        },
-    );
+    ui.collapsing(format!("{} :: {}", tab.dex_name, tab.descriptor), |ui| {
+        egui::ScrollArea::vertical()
+            .max_height(400.0)
+            .show(ui, |ui| {
+                ui.monospace(&tab.source);
+            });
+    });
 }
 
 /// Helper: list classes for a session as `Vec<ClassEntry>` (re-export

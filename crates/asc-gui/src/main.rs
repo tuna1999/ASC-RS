@@ -12,10 +12,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use asc_gui::{run_selfcheck, AscApp, WorkspaceSession};
+use asc_gui::{AscApp, WorkspaceSession, run_selfcheck};
 use eframe::egui;
 
- fn main() -> ExitCode {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--selfcheck") {
         return run_selfcheck_mode(&args);
