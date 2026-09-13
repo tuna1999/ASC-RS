@@ -1,32 +1,43 @@
-//! Contract: `asc_dex::encoded_value(&[u8]) -> Result<(Value, usize), Error>`
-//! (or whichever entry point the asc-dex agent lands — we depend on
-//! the name only). Behind `dex` feature.
+//! Contract: `asc_dex::DexView::encoded_value/encoded_array/
+//! encoded_annotation(bytes, off)` — fuzzing the encoded-value state
+//! machine without needing a fully valid DEX around it.
 //!
-//! Wire format: whole input is the encoded_value buffer. The first
-//! byte is the value type/arg; subsequent bytes are the value body.
+//! Wire format: a minimal valid DEX header (all pools empty) is
+//! prepended once, the whole fuzz input is appended after it, and the
+//! fuzz input's first 4 bytes (LE) select the value offset. The header
+//! guarantees `DexView::parse` succeeds, so mutations reach deep into
+//! the encoded_value / encoded_array / encoded_annotation decoders.
 
 use crate::FuzzOutcome;
 
 #[cfg(feature = "dex")]
 pub fn run(input: &[u8]) -> FuzzOutcome {
-    use asc_dex::encoded_value;
+    use asc_dex::DexView;
 
-    if input.is_empty() {
+    if input.len() < 4 {
         return FuzzOutcome::Ok;
     }
 
-    // Decode from offset 0 and from a derived offset so early
-    // mutations shift the window.
-    let r1 = encoded_value(input);
-    let len = input.len();
-    let off = if len >= 4 {
-        (u32::from_le_bytes([input[0], input[1], input[2], input[3]]) as usize).min(len)
-    } else {
-        0
+    let host = crate::host_dex(input);
+    let Ok(view) = DexView::parse(&host) else {
+        return FuzzOutcome::Ok;
     };
-    let r2 = encoded_value(&input[off..]);
 
-    if r1.is_err() || r2.is_err() {
+    let off = (u32::from_le_bytes([input[0], input[1], input[2], input[3]]) as usize)
+        .min(host.len() - 1);
+    let mut boundary = false;
+
+    if view.encoded_value(&host, off).is_err() {
+        boundary = true;
+    }
+    if view.encoded_array(&host, off).is_err() {
+        boundary = true;
+    }
+    if view.encoded_annotation(&host, off).is_err() {
+        boundary = true;
+    }
+
+    if boundary {
         FuzzOutcome::BoundaryHit("encoded_value_boundary")
     } else {
         FuzzOutcome::Ok

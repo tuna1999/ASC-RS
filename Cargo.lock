@@ -23,6 +23,7 @@ dependencies = [
 name = "asc-bytecode"
 version = "0.1.0"
 dependencies = [
+ "asc-dex",
  "thiserror",
 ]
 

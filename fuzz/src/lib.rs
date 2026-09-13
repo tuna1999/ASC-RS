@@ -267,3 +267,26 @@ pub const ULEB_MAX_BYTES: usize = 16;
 // without duplicating the byte-construction code.
 
 pub mod seeds;
+
+/// Builds a buffer that starts with a minimal VALID DEX 035 header
+/// (0x70 bytes, all pools empty, `file_size` patched to the final
+/// length) followed by `fuzz` verbatim. Fuzz targets that exercise
+/// payload decoders reachable only through a `DexView` method use this
+/// so the input always parses and mutations land inside the payload
+/// region (offset >= 0x70) instead of dying at the magic check.
+pub fn host_dex(fuzz: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(0x70 + fuzz.len());
+    buf.extend_from_slice(b"dex\n035\x00");
+    buf.extend_from_slice(&[0u8; 4]); // checksum (unchecked by parse)
+    buf.extend_from_slice(&[0u8; 20]); // signature (unchecked by parse)
+    // file_size placeholder at 0x20 — patched below.
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&0x70u32.to_le_bytes()); // header_size
+    buf.extend_from_slice(&0x1234_5678u32.to_le_bytes()); // endian_tag
+    buf.extend_from_slice(&[0u8; 0x70 - 0x2C]); // rest of header: zeroed
+    debug_assert_eq!(buf.len(), 0x70);
+    buf.extend_from_slice(fuzz);
+    let total = buf.len() as u32;
+    buf[0x20..0x24].copy_from_slice(&total.to_le_bytes());
+    buf
+}
