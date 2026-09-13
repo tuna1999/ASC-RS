@@ -1,9 +1,23 @@
 [package]
 name = "asc-gui"
-description = "eframe/egui desktop UI for ASC-RS (optional, ships behind a feature)"
+description = "eframe/egui desktop UI for ASC-RS"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 asc-core.workspace = true
+asc-dex.workspace = true
+asc-manifest.workspace = true
+asc-apk.workspace = true
+# eframe pulls in winit + wgpu + accesskit + egui. Pinned locally per
+# Lead's standing approval (do NOT move into [workspace.dependencies]).
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[dev-dependencies]
+# Used by the --selfcheck integration test to open the corpus fixture.
+# (No extra deps required — tests call into the public headless path.)
+
+[[bin]]
+name = "asc-gui"
+path = "src/main.rs"

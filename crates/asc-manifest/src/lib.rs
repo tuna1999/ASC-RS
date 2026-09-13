@@ -22,6 +22,24 @@
 //! events with a stack of element names; we never build a full XML tree,
 //! just enough to extract the summary fields a user-facing display needs.
 //!
+//! ## Layout conventions (AOSP)
+//!
+//! Every chunk starts with an 8-byte `ResChunk_header`. The chunk's
+//! type-specific fields are laid out at a chunk-type-specific offset
+//! from the chunk's start:
+//!
+//! | Chunk type                                | Type-specific fields at |
+//! |-------------------------------------------|--------------------------|
+//! | `RES_STRING_POOL_TYPE` (`0x0001`)         | chunk_start + 8          |
+//! | `RES_XML_RESOURCE_MAP_TYPE` (`0x0180`)   | chunk_start + 8          |
+//! | `RES_XML_START_NAMESPACE_TYPE` (`0x0100`)| chunk_start + 16 (after `ResXMLTree_node`) |
+//! | `RES_XML_END_NAMESPACE_TYPE` (`0x0101`)  | chunk_start + 16         |
+//! | `RES_XML_START_ELEMENT_TYPE` (`0x0102`)  | chunk_start + 16         |
+//! | `RES_XML_END_ELEMENT_TYPE` (`0x0103`)    | chunk_start + 16         |
+//!
+//! The `headerSize` field of the chunk header is informational only; we
+//! never use it to compute field offsets.
+//!
 //! ## Invariants
 //!
 //! - Never panics on untrusted input: every chunk size is bounds-checked
@@ -37,8 +55,7 @@ use thiserror::Error;
 
 // ---------------------------------------------------------------------------
 // Constants — see AOSP `frameworks/base/include/androidfw/ResourceTypes.h`.
-// ---------------------------------------------------------------------------
-
+#[expect(dead_code)] // documented for completeness (magic word byte 3)
 const RES_XML_TYPE: u16 = 0x0003;
 const RES_STRING_POOL_TYPE: u16 = 0x0001;
 const RES_XML_RESOURCE_MAP_TYPE: u16 = 0x0180;
@@ -58,6 +75,11 @@ const MAX_STRING_COUNT: u32 = 1 << 20;
 const MAX_STRING_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CHUNK_BODY: u64 = 64 * 1024 * 1024;
 const MAX_CHILDREN: usize = 1 << 20;
+
+/// Offset (relative to the chunk's start) of the type-specific fields
+/// for each chunk type we recognize.
+const STRING_POOL_BODY_OFF: usize = 8;
+const XML_TREE_BODY_OFF: usize = 16; // namespace / element events all use this
 
 // ---------------------------------------------------------------------------
 // Public types.
@@ -301,22 +323,18 @@ impl<'a> Parser<'a> {
                 "missing string pool chunk".into(),
             ));
         }
-        let (chunk_type, header_size, chunk_size, body_off) = self.read_chunk_header()?;
+        let (chunk_type, _header_size, chunk_size, _body_off) = self.read_chunk_header()?;
         if chunk_type != RES_STRING_POOL_TYPE {
             return Err(ManifestError::BadChunk(format!(
                 "first inner chunk type 0x{chunk_type:04x}, expected string pool 0x0001"
             )));
         }
-        // String pool: type-specific fields live at `body_off = cursor + 8`
-        // (right after `ResChunk_header`; the `headerSize` in the header
-        // is informational — for string pools it's 28 because the entire
-        // `ResStringPool_header` is laid out as one C struct).
-        self.parse_string_pool(body_off, chunk_size)?;
+        self.parse_string_pool()?;
         self.cursor += chunk_size;
 
         // Subsequent chunks: resource map (optional), then events.
         while self.cursor + 8 <= self.root_end {
-            let (chunk_type, header_size, chunk_size, _body_off) = self.read_chunk_header()?;
+            let (chunk_type, _header_size, chunk_size, _body_off) = self.read_chunk_header()?;
             let chunk_start = self.cursor;
             let chunk_end = self
                 .cursor
@@ -324,8 +342,8 @@ impl<'a> Parser<'a> {
                 .ok_or_else(|| ManifestError::Truncated("chunk size overflow".into()))?;
             if chunk_end > self.root_end {
                 return Err(ManifestError::Truncated(format!(
-                    "chunk at {} (type 0x{chunk_type:04x}) overruns root end ({} > {})",
-                    chunk_start, chunk_end, self.root_end
+                    "chunk at {chunk_start} (type 0x{chunk_type:04x}) overruns root end ({chunk_end} > {})",
+                    self.root_end
                 )));
             }
             match chunk_type {
@@ -365,7 +383,7 @@ impl<'a> Parser<'a> {
 
     /// Reads the next chunk header at `self.cursor` and returns
     /// `(type, headerSize, size, body_offset)` where `body_offset` is the
-    /// absolute offset of the first byte after the header.
+    /// absolute offset of the first byte after the 8-byte `ResChunk_header`.
     fn read_chunk_header(&self) -> Result<(u16, u16, usize, usize), ManifestError> {
         if self.cursor + 8 > self.bytes.len() {
             return Err(ManifestError::Truncated(format!(
@@ -389,26 +407,51 @@ impl<'a> Parser<'a> {
                 self.cursor
             )));
         }
-        // `body_off` is the offset of the type-specific header (i.e.
-        // just past the 8-byte `ResChunk_header`). AOSP struct layouts
-        // place every chunk's type-specific fields at this offset; the
-        // `headerSize` value in the chunk header is informational only
-    fn parse_string_pool(
-        &mut self,
-        body_off: usize,
-        chunk_size: usize,
-    ) -> Result<(), ManifestError> {
+        let body_off = self.cursor + 8;
+        Ok((chunk_type, header_size, chunk_size, body_off))
+    }
+
+    /// Parse the leading string-pool chunk (already established as
+    /// `RES_STRING_POOL_TYPE` by `run`). The string pool's type-specific
+    /// fields live at `STRING_POOL_BODY_OFF` (8 bytes past the chunk
+    /// start); the strings themselves live at
+    /// `chunk_start + stringsStart`.
+    fn parse_string_pool(&mut self) -> Result<(), ManifestError> {
+        let chunk_start = self.cursor;
+        let chunk_size = read_u32(self.bytes, chunk_start + 4)? as usize;
+        let chunk_end = chunk_start
+            .checked_add(chunk_size)
+            .ok_or_else(|| ManifestError::Truncated("string pool size overflow".into()))?;
+        let body_off = chunk_start + STRING_POOL_BODY_OFF;
         if body_off + 20 > self.bytes.len() {
             return Err(ManifestError::Truncated(
                 "string pool header overruns EOF".into(),
             ));
         }
-        let chunk_start = body_off - 8;
         let string_count = read_u32(self.bytes, body_off)?;
         let _style_count = read_u32(self.bytes, body_off + 4)?;
         let flags = read_u32(self.bytes, body_off + 8)?;
         let strings_start = read_u32(self.bytes, body_off + 12)?;
         let _styles_start = read_u32(self.bytes, body_off + 16)?;
+        if string_count > MAX_STRING_COUNT {
+            return Err(ManifestError::BadChunk(format!(
+                "string pool count {string_count} exceeds cap"
+            )));
+        }
+        if strings_start > chunk_size as u32 {
+            return Err(ManifestError::BadChunk(format!(
+                "stringsStart {strings_start} > chunk_size {chunk_size}"
+            )));
+        }
+        let utf8 = (flags & RES_STRING_POOL_UTF8_FLAG) != 0;
+        let mut strings_off = chunk_start + strings_start as usize;
+        let mut decoded: Vec<String> = Vec::with_capacity(string_count as usize);
+        let mut total_bytes: u64 = 0;
+        for i in 0..string_count {
+            let s = if utf8 {
+                self.read_utf8_string(&mut strings_off, chunk_end)?
+            } else {
+                self.read_utf16_string(&mut strings_off, chunk_end)?
             };
             total_bytes = total_bytes.saturating_add(s.len() as u64);
             decoded.push(s);
@@ -472,20 +515,19 @@ impl<'a> Parser<'a> {
 
     fn handle_start_namespace(
         &self,
-        header_size: u16,
-        body_off: usize,
+        chunk_start: usize,
         chunk_end: usize,
     ) -> Result<(), ManifestError> {
-        if header_size < 16 {
-            return Err(ManifestError::BadChunk(format!(
-                "start-namespace headerSize {header_size} < 16"
-            )));
-        }
-        if chunk_end - body_off < 8 {
+        // ResXMLTree_namespace: chunk_start + 16 (after ResChunk_header
+        // and ResXMLTree_node) holds:
+        //   u32 prefix
+        //   u32 uri
+        let body_off = chunk_start + XML_TREE_BODY_OFF;
+        if body_off + 8 > chunk_end {
             return Err(ManifestError::Truncated("start-namespace body".into()));
         }
-        let prefix = read_u32(self.bytes, body_off + 4)?;
-        let uri = read_u32(self.bytes, body_off + 8)?;
+        let prefix = read_u32(self.bytes, body_off)?;
+        let uri = read_u32(self.bytes, body_off + 4)?;
         self.validate_string_index(prefix, "start-ns prefix")?;
         self.validate_string_index(uri, "start-ns uri")?;
         // We do not currently consult the namespace stack at element-
@@ -497,8 +539,7 @@ impl<'a> Parser<'a> {
 
     fn handle_end_namespace(
         &self,
-        _header_size: u16,
-        _body_off: usize,
+        _chunk_start: usize,
         _chunk_end: usize,
     ) -> Result<(), ManifestError> {
         // Namespace events balance out inside a START_ELEMENT/END_ELEMENT
@@ -509,16 +550,19 @@ impl<'a> Parser<'a> {
 
     fn handle_start_element(
         &mut self,
-        header_size: u16,
-        body_off: usize,
+        chunk_start: usize,
         chunk_end: usize,
     ) -> Result<(), ManifestError> {
-        if header_size < 16 {
-            return Err(ManifestError::BadChunk(format!(
-                "start-element headerSize {header_size} < 16"
-            )));
-        }
-        if chunk_end - body_off < 20 {
+        // ResXMLTree_startElement: chunk_start + 16 (after ResChunk_header
+        // and ResXMLTree_node) holds:
+        //   u32 ns
+        //   u32 name
+        //   u16 attributeStart   (offset from chunk_start, in bytes)
+        //   u16 attributeSize    (bytes per attribute)
+        //   u16 attributeCount
+        //   u16 idIndex, classIndex, styleIndex
+        let body_off = chunk_start + XML_TREE_BODY_OFF;
+        if body_off + 20 > chunk_end {
             return Err(ManifestError::Truncated("start-element body".into()));
         }
         if self.stack.len() >= MAX_CHILDREN {
@@ -541,9 +585,10 @@ impl<'a> Parser<'a> {
         }
         self.validate_string_index(name_idx, "start-element name")?;
         let name = self.strings[name_idx as usize].clone();
-
-        // First attribute begins at offset `attr_start` past the start
-        // of the attrExt (i.e. `body_off`).
+        // First attribute begins at offset `attr_start` past the
+        // **attrExt start** (chunk_start + 16), which is `body_off`.
+        // AOSP's comment "Offset from start of node" is misleading:
+        // the offset is relative to the attrExt, not the chunk.
         let attr_table_off = body_off + attr_start;
         let attrs_needed = attr_count
             .checked_mul(attr_size)
@@ -579,7 +624,12 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn handle_end_element(&mut self, body_off: usize) -> Result<(), ManifestError> {
+    fn handle_end_element(&mut self, chunk_start: usize) -> Result<(), ManifestError> {
+        // ResXMLTree_endElement: chunk_start + 16 holds u32 ns + u32 name.
+        let body_off = chunk_start + XML_TREE_BODY_OFF;
+        if body_off + 8 > self.bytes.len() {
+            return Err(ManifestError::Truncated("end-element body".into()));
+        }
         let name_idx = read_u32(self.bytes, body_off + 4)?;
         self.validate_string_index(name_idx, "end-element name")?;
         let name = self.strings[name_idx as usize].clone();
@@ -666,9 +716,9 @@ impl<'a> Parser<'a> {
             .map(|f| (f.name.as_str(), f.component, f.filter_slot));
         let mut component: Option<(ComponentKind, usize)> = None;
         let mut filter_slot: Option<usize> = None;
-
         match parent {
             None => self.process_root_element(name, attrs)?,
+            Some(("manifest", _, _)) => self.process_manifest_child(name, attrs)?,
             Some(("application", _, _)) => {
                 component = self.process_application_child(name, attrs)?;
             }
@@ -699,6 +749,9 @@ impl<'a> Parser<'a> {
                         }
                     };
                     filter_slot = Some(slot);
+                    // Inherit the parent component so nested <action> /
+                    // <category> events can route into the right slot.
+                    component = Some((kind, comp_idx));
                 }
             }
             Some(("intent-filter", Some((kind, comp_idx)), Some(filter_idx))) => {
@@ -803,6 +856,45 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Process a child of `<application>`. Returns the new component
+    /// Process a child of `<manifest>`. Returns nothing — these elements
+    /// contribute fields directly to `self.info` and don't push a frame.
+    fn process_manifest_child(
+        &mut self,
+        name: &str,
+        attrs: &[(String, Option<String>)],
+    ) -> Result<(), ManifestError> {
+        match name {
+            "uses-sdk" => {
+                if let Some(v) = int_attr(attrs, "minSdkVersion") {
+                    self.info.min_sdk = Some(v);
+                }
+                if let Some(v) = int_attr(attrs, "targetSdkVersion") {
+                    self.info.target_sdk = Some(v);
+                }
+            }
+            "uses-permission" => {
+                if let Some(p) = attr(attrs, "name") {
+                    self.info.permissions.push(PermissionEntry {
+                        name: p.to_string(),
+                        protection_level: None,
+                        label: None,
+                    });
+                }
+            }
+            "permission" => {
+                if let Some(p) = attr(attrs, "name") {
+                    self.info.permissions.push(PermissionEntry {
+                        name: p.to_string(),
+                        protection_level: attr(attrs, "protectionLevel").map(str::to_string),
+                        label: attr(attrs, "label").map(str::to_string),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
     /// Process a child of `<application>`. Returns the new component
     /// frame context (if any) so the caller can push it onto the stack.
     fn process_application_child(
