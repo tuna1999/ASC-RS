@@ -1,0 +1,43 @@
+{
+  "apk": "org.fdroid.fdroid_1016000.apk",
+  "case_id": "findrefs_string_fdroid",
+  "dex_count": 2,
+  "expect_error": false,
+  "line_count": 24,
+  "matched_method_count": 24,
+  "matched_methods_sorted": [
+    "Landroidx/core/text/util/LinkifyCompat;->addLinks",
+    "Landroidx/room/AutoCloser$2;->run",
+    "Landroidx/room/AutoCloser;->incrementCountAndEnsureDbIsOpen",
+    "Landroidx/room/AutoCloser;->init",
+    "Linfo/guardianproject/netcipher/proxy/OrbotHelper;->getOrbotInstallIntent",
+    "Lio/reactivex/rxjava3/core/Completable;->subscribe",
+    "Lio/reactivex/rxjava3/core/Single;->subscribe",
+    "Lio/reactivex/rxjava3/exceptions/OnErrorNotImplementedException;-><init>",
+    "Lio/reactivex/rxjava3/exceptions/UndeliverableException;-><init>",
+    "Lorg/bouncycastle/LICENSE;-><clinit>",
+    "Lorg/bouncycastle/est/ESTService;-><init>",
+    "Lorg/bouncycastle/est/ESTService;->verifyServer",
+    "Lorg/fdroid/fdroid/data/App;->getFlattrUri",
+    "Lorg/fdroid/fdroid/data/App;->getLiberapayUri",
+    "Lorg/fdroid/fdroid/data/App;->getOpenCollectiveUri",
+    "Lorg/fdroid/fdroid/nearby/LocalRepoManager;->writeFdroidApkToWebroot",
+    "Lorg/fdroid/fdroid/nearby/SwapWorkflowActivity;->setUpFromWifi",
+    "Lorg/fdroid/fdroid/net/DownloaderFactory;-><clinit>",
+    "Lorg/fdroid/fdroid/views/AppDetailsActivity;->onOptionsItemSelected",
+    "Lorg/fdroid/fdroid/views/AppDetailsRecyclerViewAdapter$DonateViewHolder;->addDonateOption",
+    "Lorg/fdroid/fdroid/views/AppDetailsRecyclerViewAdapter$LinksViewHolder;->bindModel",
+    "Lorg/fdroid/fdroid/views/ManageReposActivity;->showAddRepo",
+    "Lorg/fdroid/fdroid/views/appdetails/AntiFeaturesListingView$1$1;->onClick",
+    "Lorg/fdroid/fdroid/work/FDroidMetricsWorker;->doWork"
+  ],
+  "per_dex_count": {
+    "classes.dex": 10,
+    "classes2.dex": 14
+  },
+  "query": [
+    "string",
+    "https://"
+  ],
+  "subcommand": "findrefs"
+}

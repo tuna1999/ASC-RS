@@ -1,0 +1,7 @@
+# oracle exit_code: 1
+# case_id: getclass_notfound
+----- stdout -----
+
+----- stderr -----
+Error: Class Lno/such/Class; not found in APK.
+

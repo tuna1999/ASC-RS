@@ -1,0 +1,29 @@
+{
+  "apk": "com.aurora.store_60.apk",
+  "case_id": "findrefs_method_aurora",
+  "dex_count": 2,
+  "expect_error": false,
+  "line_count": 10,
+  "matched_method_count": 10,
+  "matched_methods_sorted": [
+    "LP1/b$a;->onClick",
+    "Landroidx/appcompat/app/AlertController$c;->handleMessage",
+    "Landroidx/appcompat/app/b;->onItemClick",
+    "Landroidx/appcompat/app/c;->onItemClick",
+    "Landroidx/appcompat/widget/SearchView;->t",
+    "Lcom/google/android/material/chip/Chip;->m",
+    "Lcom/google/android/material/datepicker/MaterialDatePicker$2;->onClick",
+    "Lcom/google/android/material/timepicker/MaterialTimePicker$1;->onClick",
+    "Lcom/google/android/material/timepicker/MaterialTimePicker$2;->onClick",
+    "Ll1/a;->k"
+  ],
+  "per_dex_count": {
+    "classes.dex": 6,
+    "classes2.dex": 4
+  },
+  "query": [
+    "method",
+    "onClick"
+  ],
+  "subcommand": "findrefs"
+}

@@ -1,0 +1,34 @@
+{
+  "apk": "workload.apk",
+  "case_id": "findrefs_field_workload",
+  "dex_count": 1,
+  "expect_error": false,
+  "line_count": 16,
+  "matched_method_count": 16,
+  "matched_methods_sorted": [
+    "Landroidx/appcompat/widget/SuggestionsAdapter;->formatUrl",
+    "Landroidx/appcompat/widget/SwitchCompat;->setSwitchTextAppearance",
+    "Lcom/google/android/material/datepicker/CalendarItemStyle;-><init>",
+    "Lcom/google/android/material/datepicker/CalendarItemStyle;->styleItem",
+    "Lcom/google/android/material/internal/NavigationMenuPresenter$NavigationMenuAdapter;->onBindViewHolder",
+    "Lcom/google/android/material/internal/NavigationMenuPresenter;->getItemTextColor",
+    "Lcom/google/android/material/internal/NavigationMenuPresenter;->setItemTextColor",
+    "Lcom/google/android/material/resources/TextAppearance;-><init>",
+    "Lcom/google/android/material/resources/TextAppearance;->getTextColor",
+    "Lcom/google/android/material/resources/TextAppearance;->setTextColor",
+    "Lcom/google/android/material/resources/TextAppearance;->updateDrawState",
+    "Lcom/google/android/material/tabs/TabLayout;-><init>",
+    "Lcom/google/android/material/textfield/TextInputLayout;-><init>",
+    "Lcom/google/android/material/timepicker/ClockFaceView;-><init>",
+    "Lcom/google/android/material/timepicker/ClockFaceView;->updateTextViews",
+    "Lcom/google/android/material/tooltip/TooltipDrawable;->loadFromAttributes"
+  ],
+  "per_dex_count": {
+    "classes.dex": 16
+  },
+  "query": [
+    "field",
+    "textColor"
+  ],
+  "subcommand": "findrefs"
+}

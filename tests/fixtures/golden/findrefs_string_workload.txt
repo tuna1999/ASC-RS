@@ -1,0 +1,34 @@
+# oracle exit_code: 0
+# case_id: findrefs_string_workload
+----- stdout -----
+classes.dex | Landroidx/appcompat/app/AppCompatViewInflater$DeclaredOnClickListener;->resolveMethod | matched=((View) in a parent or ancestor Context for android:onClick attribute defined on view )
+classes.dex | Landroidx/core/app/NotificationCompat$Action$Builder;->checkContextualActionNullFields | matched=(Contextual Actions must contain a valid PendingIntent)
+classes.dex | Landroidx/core/content/ContextCompat$Api30Impl;->getDisplayOrDefault | matched=(ContextCompat)
+classes.dex | Landroidx/core/content/ContextCompat;->createFilesDir | matched=(ContextCompat)
+classes.dex | Landroidx/core/graphics/TypefaceCompat;->create | matched=(Context cannot be null)
+classes.dex | Landroidx/core/graphics/TypefaceCompat;->create | matched=(Context cannot be null)
+classes.dex | Landroidx/core/graphics/drawable/IconCompat$Api23Impl;->toIcon | matched=(Context is required to resolve the file uri of the icon: )
+classes.dex | Landroidx/emoji2/text/FontRequestEmojiCompatConfig$FontRequestMetadataLoader;-><init> | matched=(Context cannot be null)
+classes.dex | Landroidx/fragment/app/Fragment;->getDefaultViewModelCreationExtras | matched=(Could not find Application instance from Context )
+classes.dex | Landroidx/fragment/app/Fragment;->getDefaultViewModelProviderFactory | matched=(Could not find Application instance from Context )
+classes.dex | Landroidx/fragment/app/FragmentTabHost;->setup | matched=(Must call setup() that takes a Context and FragmentManager)
+classes.dex | Landroidx/lifecycle/LifecycleCoroutineScopeImpl;-><init> | matched=(coroutineContext)
+classes.dex | Landroidx/startup/InitializationProvider;->onCreate | matched=(Context cannot be null; Deferring initialization because `applicationContext` is null.)
+classes.dex | Landroidx/vectordrawable/graphics/drawable/AnimatedVectorDrawableCompat;->inflate | matched=(Context can't be null when inflating animators)
+classes.dex | Lkotlin/NumbersKt__BigDecimalsKt;->toBigDecimal | matched=(mathContext)
+classes.dex | Lkotlin/NumbersKt__BigDecimalsKt;->toBigDecimal | matched=(mathContext)
+classes.dex | Lkotlin/NumbersKt__BigDecimalsKt;->toBigDecimal | matched=(mathContext)
+classes.dex | Lkotlin/NumbersKt__BigDecimalsKt;->toBigDecimal | matched=(mathContext)
+classes.dex | Lkotlin/NumbersKt__BigIntegersKt;->toBigDecimal | matched=(mathContext)
+classes.dex | Lkotlin/NumbersKt__BigIntegersKt;->toBigDecimal$default | matched=(mathContext)
+classes.dex | Lkotlin/coroutines/CombinedContext;->containsAll | matched=(null cannot be cast to non-null type kotlin.coroutines.CoroutineContext.Element)
+classes.dex | Lkotlin/coroutines/CoroutineContext$Element$DefaultImpls;->get | matched=(null cannot be cast to non-null type E of kotlin.coroutines.CoroutineContext.Element.get)
+classes.dex | Lkotlin/coroutines/EmptyCoroutineContext;->toString | matched=(EmptyCoroutineContext)
+classes.dex | Lkotlin/coroutines/jvm/internal/RestrictedContinuationImpl;-><init> | matched=(Coroutines with restricted suspension must have EmptyCoroutineContext)
+classes.dex | Lkotlin/text/StringsKt__StringNumberConversionsJVMKt;->toBigDecimal | matched=(mathContext)
+classes.dex | Lkotlin/text/StringsKt__StringNumberConversionsJVMKt;->toBigDecimalOrNull | matched=(mathContext)
+classes.dex | Lkotlinx/coroutines/internal/ContextScope;->toString | matched=(CoroutineScope(coroutineContext=)
+classes.dex | Lkotlinx/coroutines/internal/ThreadContextKt;->restoreThreadContext | matched=(null cannot be cast to non-null type kotlinx.coroutines.ThreadContextElement<kotlin.Any?>)
+
+----- stderr -----
+

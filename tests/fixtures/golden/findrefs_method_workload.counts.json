@@ -1,0 +1,35 @@
+{
+  "apk": "workload.apk",
+  "case_id": "findrefs_method_workload",
+  "dex_count": 1,
+  "expect_error": false,
+  "line_count": 17,
+  "matched_method_count": 17,
+  "matched_methods_sorted": [
+    "Landroidx/appcompat/app/ActionBarDrawerToggle$1;->onClick",
+    "Landroidx/appcompat/app/AlertController$AlertParams$3;->onItemClick",
+    "Landroidx/appcompat/app/AlertController$AlertParams$4;->onItemClick",
+    "Landroidx/appcompat/app/AlertController$ButtonHandler;->handleMessage",
+    "Landroidx/appcompat/widget/SearchView;->onItemClicked",
+    "Landroidx/appcompat/widget/SearchView;->onSearchClicked",
+    "Landroidx/core/view/AccessibilityDelegateCompat;->performClickableSpanAction",
+    "Lcom/google/android/material/chip/Chip$ChipTouchHelper;->onPerformActionForVirtualView",
+    "Lcom/google/android/material/chip/Chip;->onTouchEvent",
+    "Lcom/google/android/material/chip/Chip;->performCloseIconClick",
+    "Lcom/google/android/material/datepicker/MaterialDatePicker$1;->onClick",
+    "Lcom/google/android/material/datepicker/MaterialDatePicker$2;->onClick",
+    "Lcom/google/android/material/textfield/EndCompoundLayout;->setEndIconMode",
+    "Lcom/google/android/material/textfield/IconHelper;->setIconOnClickListener",
+    "Lcom/google/android/material/textfield/IconHelper;->setIconOnLongClickListener",
+    "Lcom/google/android/material/timepicker/MaterialTimePicker$1;->onClick",
+    "Lcom/google/android/material/timepicker/MaterialTimePicker$2;->onClick"
+  ],
+  "per_dex_count": {
+    "classes.dex": 17
+  },
+  "query": [
+    "method",
+    "onClick"
+  ],
+  "subcommand": "findrefs"
+}

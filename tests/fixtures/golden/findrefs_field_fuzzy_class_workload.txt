@@ -1,0 +1,8 @@
+# oracle exit_code: 0
+# case_id: findrefs_field_fuzzy_class_workload
+----- stdout -----
+classes.dex | Lcom/google/android/material/timepicker/ClockFaceView;-><init> | matched=(Lcom/google/android/material/timepicker/ClockFaceView;->gradientColors)
+classes.dex | Lcom/google/android/material/timepicker/ClockFaceView;->getGradientForTextView | matched=(Lcom/google/android/material/timepicker/ClockFaceView;->gradientColors)
+
+----- stderr -----
+

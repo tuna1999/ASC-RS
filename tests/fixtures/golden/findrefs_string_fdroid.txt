@@ -1,0 +1,31 @@
+# oracle exit_code: 0
+# case_id: findrefs_string_fdroid
+----- stdout -----
+classes2.dex | Lorg/bouncycastle/est/ESTService;-><init> | matched=(https://)
+classes2.dex | Lorg/bouncycastle/est/ESTService;->verifyServer | matched=(Server contains scheme, must only be <dnsname/ipaddress>:port, https:// will be added arbitrarily.; https://)
+classes2.dex | Lorg/fdroid/fdroid/data/App;->getFlattrUri | matched=(https://flattr.com/thing/)
+classes2.dex | Lorg/fdroid/fdroid/data/App;->getLiberapayUri | matched=(https://liberapay.com/)
+classes2.dex | Lorg/fdroid/fdroid/data/App;->getOpenCollectiveUri | matched=(https://opencollective.com/)
+classes2.dex | Lorg/fdroid/fdroid/nearby/LocalRepoManager;->writeFdroidApkToWebroot | matched=(https://f-droid.org/F-Droid.apk)
+classes2.dex | Lorg/fdroid/fdroid/nearby/SwapWorkflowActivity;->setUpFromWifi | matched=(https://)
+classes2.dex | Lorg/fdroid/fdroid/net/DownloaderFactory;-><clinit> | matched=(https://cloudflare-ipfs.com/ipfs/; https://gateway.ipfs.io/ipfs/; https://gateway.pinata.cloud/ipfs/; https://ipfs.eth.aragon.network/ipfs/; https://ipfs.filebase.io/ipfs/; https://ipfs.fleek.co/ipfs/; https://ipfs.io/ipfs/)
+classes2.dex | Lorg/fdroid/fdroid/views/AppDetailsActivity;->onOptionsItemSelected | matched=(%s (%s)
+https://f-droid.org/packages/%s/)
+classes2.dex | Lorg/fdroid/fdroid/views/AppDetailsRecyclerViewAdapter$DonateViewHolder;->addDonateOption | matched=(https://)
+classes2.dex | Lorg/fdroid/fdroid/views/AppDetailsRecyclerViewAdapter$LinksViewHolder;->bindModel | matched=(https://spdx.org/licenses/)
+classes2.dex | Lorg/fdroid/fdroid/views/ManageReposActivity;->showAddRepo | matched=(https://)
+classes2.dex | Lorg/fdroid/fdroid/views/appdetails/AntiFeaturesListingView$1$1;->onClick | matched=(https://f-droid.org/docs/Anti-Features#)
+classes2.dex | Lorg/fdroid/fdroid/work/FDroidMetricsWorker;->doWork | matched=(https://metrics.cleaninsights.org/cleaninsights.php)
+classes.dex | Landroidx/core/text/util/LinkifyCompat;->addLinks | matched=(https://)
+classes.dex | Landroidx/room/AutoCloser$2;->run | matched=(mOnAutoCloseCallback is null but it should have been set before use. Please file a bug against Room at: https://issuetracker.google.com/issues/new?component=413107&template=1096568)
+classes.dex | Landroidx/room/AutoCloser;->incrementCountAndEnsureDbIsOpen | matched=(AutoCloser has not been initialized. Please file a bug against Room at: https://issuetracker.google.com/issues/new?component=413107&template=1096568)
+classes.dex | Landroidx/room/AutoCloser;->init | matched=(AutoCloser initialized multiple times. Please file a bug against room at: https://issuetracker.google.com/issues/new?component=413107&template=1096568)
+classes.dex | Linfo/guardianproject/netcipher/proxy/OrbotHelper;->getOrbotInstallIntent | matched=(https://f-droid.org/repository/browse/?fdid=org.torproject.android)
+classes.dex | Lio/reactivex/rxjava3/core/Completable;->subscribe | matched=(The RxJavaPlugins.onSubscribe hook returned a null CompletableObserver. Please check the handler provided to RxJavaPlugins.setOnCompletableSubscribe for invalid null returns. Further reading: https://github.com/ReactiveX/RxJava/wiki/Plugins)
+classes.dex | Lio/reactivex/rxjava3/core/Single;->subscribe | matched=(The RxJavaPlugins.onSubscribe hook returned a null SingleObserver. Please check the handler provided to RxJavaPlugins.setOnSingleSubscribe for invalid null returns. Further reading: https://github.com/ReactiveX/RxJava/wiki/Plugins)
+classes.dex | Lio/reactivex/rxjava3/exceptions/OnErrorNotImplementedException;-><init> | matched=(The exception was not handled due to missing onError handler in the subscribe() method call. Further reading: https://github.com/ReactiveX/RxJava/wiki/Error-Handling | )
+classes.dex | Lio/reactivex/rxjava3/exceptions/UndeliverableException;-><init> | matched=(The exception could not be delivered to the consumer because it has already canceled/disposed the flow or the exception has nowhere to go to begin with. Further reading: https://github.com/ReactiveX/RxJava/wiki/What's-different-in-2.0#error-handling | )
+classes.dex | Lorg/bouncycastle/LICENSE;-><clinit> | matched=(Copyright (c) 2000-2021 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org) )
+
+----- stderr -----
+

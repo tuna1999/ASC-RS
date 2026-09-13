@@ -1,0 +1,13 @@
+{
+  "apk": "workload.apk",
+  "case_id": "getclass_clockface_workload",
+  "exit_code": 0,
+  "expect_error": false,
+  "query": [
+    "Lcom/google/android/material/timepicker/ClockFaceView;"
+  ],
+  "stderr_byte_count": 0,
+  "stdout_byte_count": 11730,
+  "stdout_line_count": 249,
+  "subcommand": "getclass"
+}
