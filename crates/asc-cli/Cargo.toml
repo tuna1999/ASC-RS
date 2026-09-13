@@ -1,0 +1,14 @@
+[package]
+name = "asc-cli"
+description = "CLI frontend for ASC-RS (getclass/findrefs parity)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "asc-rs"
+path = "src/main.rs"
+
+[dependencies]
+asc-core.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "asc-dex"
+description = "Zero-copy lazy DEX 035-041 reader for ASC-RS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

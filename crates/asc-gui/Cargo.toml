@@ -1,0 +1,9 @@
+[package]
+name = "asc-gui"
+description = "eframe/egui desktop UI for ASC-RS (optional, ships behind a feature)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+asc-core.workspace = true

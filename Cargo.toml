@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/asc-dex",
+    "crates/asc-bytecode",
+    "crates/asc-apk",
+    "crates/asc-query",
+    "crates/asc-rebuild",
+    "crates/asc-decompile",
+    "crates/asc-manifest",
+    "crates/asc-core",
+    "crates/asc-cli",
+    "crates/asc-gui",
+]
+exclude = ["fuzz", "reference/asc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# internal crates
+asc-dex = { path = "crates/asc-dex" }
+asc-bytecode = { path = "crates/asc-bytecode" }
+asc-apk = { path = "crates/asc-apk" }
+asc-query = { path = "crates/asc-query" }
+asc-rebuild = { path = "crates/asc-rebuild" }
+asc-decompile = { path = "crates/asc-decompile" }
+asc-manifest = { path = "crates/asc-manifest" }
+asc-core = { path = "crates/asc-core" }
+# external
+thiserror = "2"
+memmap2 = "0.9"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+crc32fast = "1"
+smallvec = "1"
+sha1 = "0.10"
+adler2 = "2"
+rayon = "1"
+criterion = "0.5"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
