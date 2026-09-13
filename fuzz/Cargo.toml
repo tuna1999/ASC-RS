@@ -1,0 +1,64 @@
+[workspace]
+
+# asc-fuzz is a DETACHED workspace. The root ASC-RS workspace already
+# `exclude`s this directory, but this file's presence means `cargo build`
+# from inside fuzz/ uses asc-fuzz's package layout only — concurrent edits
+# to other crates under crates/* do not break in-flight fuzz builds.
+
+[package]
+name = "asc-fuzz"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Deterministic mutation fuzzer for ASC-RS (DEX, ZIP, RefWalker, Rebuild)"
+publish = false
+
+[[bin]]
+name = "fuzz-runner"
+path = "src/bin/fuzz-runner.rs"
+
+[[bin]]
+name = "gen-seeds"
+path = "src/bin/gen-seeds.rs"
+
+[lib]
+name = "asc_fuzz"
+path = "src/lib.rs"
+
+# -------- Features --------
+# All crate-integration features default OFF so a fresh `cargo build` in
+# fuzz/ stays green while sibling agents land the real APIs. Flip a feature
+# on at integration time (e.g. `cargo build --features dex`). `all` turns
+# everything on at once for the integration gate.
+[features]
+default = []
+dex = ["dep:asc-dex"]
+bytecode = ["dep:asc-bytecode"]
+apk = ["dep:asc-apk"]
+rebuild = ["dep:asc-rebuild"]
+all = ["dex", "bytecode", "apk", "rebuild"]
+
+# -------- Optional path deps --------
+# These MUST stay optional so a missing/unbuilt sibling crate never breaks
+# `cargo build` (the root workspace already exclude=s fuzz/).
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+asc-dex = { path = "../crates/asc-dex", optional = true }
+asc-bytecode = { path = "../crates/asc-bytecode", optional = true }
+asc-apk = { path = "../crates/asc-apk", optional = true }
+asc-rebuild = { path = "../crates/asc-rebuild", optional = true }
+
+[dev-dependencies]
+# Integration smoke tests live as `tests/*.rs`; only std needed.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = "debuginfo"
+
+[profile.dev]
+opt-level = 1
+debug = true
