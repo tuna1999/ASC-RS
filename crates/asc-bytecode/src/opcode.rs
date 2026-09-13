@@ -560,11 +560,6 @@ pub(crate) fn payload_extent(
                 });
             }
             let size = u16::from_le_bytes([header[byte_off + 2], header[byte_off + 3]]) as u32;
-            if size > remaining {
-                return Err(crate::error::BytecodeError::MalformedPayload {
-                    offset: offset_units,
-                });
-            }
             size.checked_mul(2)
                 .and_then(|v| v.checked_add(4))
                 .ok_or(crate::error::BytecodeError::MalformedPayload {
@@ -578,11 +573,6 @@ pub(crate) fn payload_extent(
                 });
             }
             let size = u16::from_le_bytes([header[byte_off + 2], header[byte_off + 3]]) as u32;
-            if size > remaining {
-                return Err(crate::error::BytecodeError::MalformedPayload {
-                    offset: offset_units,
-                });
-            }
             size.checked_mul(4)
                 .and_then(|v| v.checked_add(2))
                 .ok_or(crate::error::BytecodeError::MalformedPayload {
@@ -603,11 +593,6 @@ pub(crate) fn payload_extent(
                 header[byte_off + 6],
                 header[byte_off + 7],
             ]);
-            if size > remaining {
-                return Err(crate::error::BytecodeError::MalformedPayload {
-                    offset: offset_units,
-                });
-            }
             // size * element_width as u64 to avoid 32-bit overflow, then
             // ceil-divide by 2 to convert bytes to code units.
             let total_bytes = (size as u64)

@@ -25,6 +25,25 @@ pub struct CodeItem<'a> {
     pub insns: &'a [u8],
 }
 
+impl<'a> CodeItem<'a> {
+    /// The instruction bytes WITHOUT the optional trailing padding
+    /// unit: exactly `insns_size * 2` bytes. This is the slice to hand
+    /// to `asc_bytecode::RefWalker`/`walk_verify`, which require an
+    /// exact `insns.len() == insns_size * 2`.
+    ///
+    /// [`CodeItem::insns`] by contrast includes the 2-byte alignment
+    /// padding unit the format inserts when `tries_size > 0` and
+    /// `insns_size` is odd, because the tries array starts right after
+    /// it and handlers offsets derive from contiguous memory.
+    #[inline]
+    pub fn insns_exact(&self) -> &'a [u8] {
+        let end = (self.insns_size as usize)
+            .saturating_mul(2)
+            .min(self.insns.len());
+        &self.insns[..end]
+    }
+}
+
 /// One entry in the `tries` array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TryItem {

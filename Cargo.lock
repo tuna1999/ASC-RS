@@ -39,6 +39,9 @@ dependencies = [
 name = "asc-core"
 version = "0.1.0"
 dependencies = [
+ "asc-apk",
+ "asc-bytecode",
+ "asc-dex",
  "thiserror",
 ]
 

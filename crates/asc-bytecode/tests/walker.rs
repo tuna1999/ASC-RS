@@ -670,3 +670,40 @@ fn walker_struct_is_bounded() {
         "DexRef unexpectedly large: {ref_size} bytes"
     );
 }
+
+/// Regression (integration gate, workload.apk code_off=3972716): a
+/// fill-array-data payload with element_width=1 whose ELEMENT count
+/// (64) exceeds the remaining code UNITS (36) must still parse when its
+/// byte extent (4 + 32 units) fits exactly. The old guard compared
+/// elements against units and false-rejected the walk, killing all
+/// later reference hits in the method.
+#[test]
+fn fill_array_data_element_count_may_exceed_remaining_units() {
+    // 36 units total: payload ident (0x0300), element_width=1, size=64,
+    // then 32 units of data (64 bytes).
+    let mut units: Vec<u16> = vec![0x0300, 0x0001, 0x0040, 0x0000];
+    units.extend(std::iter::repeat(0x2a2a).take(32));
+    assert_eq!(units.len(), 36);
+    let mut bytes = Vec::with_capacity(72);
+    for u in &units {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    assert_eq!(
+        asc_bytecode::walk_verify(&bytes, 36),
+        Ok(()),
+        "width-1 payload fitting exactly must verify"
+    );
+
+    // Truncation must still be an error: declare size=64 but only
+    // provide 20 units of data.
+    let mut trunc: Vec<u16> = vec![0x0300, 0x0001, 0x0040, 0x0000];
+    trunc.extend(std::iter::repeat(0x0000).take(20));
+    let mut tbytes = Vec::new();
+    for u in &trunc {
+        tbytes.extend_from_slice(&u.to_le_bytes());
+    }
+    assert!(
+        asc_bytecode::walk_verify(&tbytes, trunc.len() as u32).is_err(),
+        "payload extent exceeding the buffer must error"
+    );
+}
