@@ -6,4 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asc-dex.workspace = true
+asc-bytecode.workspace = true
 thiserror.workspace = true
+smallvec.workspace = true
