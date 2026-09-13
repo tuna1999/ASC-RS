@@ -8,13 +8,11 @@
 
 use std::path::Path;
 
-use asc_core::{
-    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions,
-};
+use asc_core::{CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions};
 use asc_query::Query;
 
-use crate::session::SessionError;
 use crate::WorkspaceSession;
+use crate::session::SessionError;
 
 /// One-line summary of each selfcheck step.
 #[derive(Debug)]
@@ -37,8 +35,7 @@ pub struct SelfcheckReport {
 /// per `reference/BEHAVIOR.md` and `corpus/MANIFEST.md`. We decompile
 /// the Google material `ClockFaceView` that ships inside `workload.apk`
 /// (verified to exist by `asc-cli`).
-const DEFAULT_TARGET_CLASS: &str =
-    "Lcom/google/android/material/timepicker/ClockFaceView;";
+const DEFAULT_TARGET_CLASS: &str = "Lcom/google/android/material/timepicker/ClockFaceView;";
 
 /// Default findrefs pattern — substring match against any string
 /// referenced from the chosen target.
@@ -113,7 +110,10 @@ impl std::fmt::Display for SelfcheckReport {
         writeln!(
             f,
             "  findrefs          = query={}, lines={}, complete={}, errors={}",
-            self.findrefs_query, self.findrefs_caller_lines, self.findrefs_complete, self.findrefs_errors
+            self.findrefs_query,
+            self.findrefs_caller_lines,
+            self.findrefs_complete,
+            self.findrefs_errors
         )?;
         writeln!(
             f,

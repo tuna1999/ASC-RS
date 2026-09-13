@@ -19,12 +19,12 @@
 //! shared with worker threads without an `Arc<Mutex<…>>` wrapper at
 //! the call site.
 
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
 use asc_apk::Apk;
 use asc_dex::DexView;
 use asc_query;
 use parking_lot::Mutex;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
 /// Maximum number of source tabs kept open in memory. When a new tab
 /// is inserted beyond this cap, the **oldest** tab (lowest insert
@@ -160,11 +160,7 @@ impl WorkspaceSession {
 
     /// Linear class lookup against one DEX. Returns the dex name if
     /// `descriptor` is defined here.
-    fn try_class_in_dex(
-        &self,
-        entry: &asc_apk::DexEntry,
-        descriptor: &str,
-    ) -> Option<String> {
+    fn try_class_in_dex(&self, entry: &asc_apk::DexEntry, descriptor: &str) -> Option<String> {
         let bytes = self.apk.read_entry(entry).ok()?;
         let view = DexView::parse(bytes.as_slice()).ok()?;
         if asc_query::class_defines(&view, descriptor) {
@@ -266,16 +262,13 @@ impl WorkspaceSession {
 /// pairs by iterating `class_defs`. Returns an empty list if the
 /// DEX header is malformed (defensive — `read_entry` should already
 /// have rejected those).
-fn build_class_list(
-    dex_name: &str,
-    bytes: &[u8],
-) -> SessionResult<Vec<ClassEntry>> {
+fn build_class_list(dex_name: &str, bytes: &[u8]) -> SessionResult<Vec<ClassEntry>> {
     let view = match DexView::parse(bytes) {
         Ok(v) => v,
         Err(_) => {
             return Err(SessionError::NotFound(format!(
                 "failed to parse {dex_name} as DEX"
-            )))
+            )));
         }
     };
     let count = view.class_def_count();

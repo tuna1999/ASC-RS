@@ -18,7 +18,10 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
-use asc_core::{CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult, SearchReport};
+use asc_core::{
+    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult,
+    SearchReport,
+};
 use asc_query::Query;
 
 /// One in-flight job: the engine work the worker thread will run.
@@ -52,8 +55,7 @@ pub enum JobResult {
 /// [`Receiver`]; the caller is responsible for polling it on every
 /// UI frame.
 pub fn spawn_job(job: Job) -> Receiver<JobResult> {
-    let (tx, rx): (Sender<JobResult>, Receiver<JobResult>) =
-        std::sync::mpsc::channel();
+    let (tx, rx): (Sender<JobResult>, Receiver<JobResult>) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = run_job(job);
         // Ignore send errors: the UI thread may have shut down.

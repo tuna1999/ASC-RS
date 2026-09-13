@@ -303,7 +303,7 @@ impl<'a> Parser<'a> {
                 return Err(ManifestError::Truncated(format!(
                     "root chunk size {root_size} overruns file length {}",
                     bytes.len()
-                )))
+                )));
             }
         };
         Ok(Self {
@@ -319,9 +319,7 @@ impl<'a> Parser<'a> {
     fn run(&mut self) -> Result<(), ManifestError> {
         // First inner chunk must be the string pool.
         if self.cursor + 8 > self.root_end {
-            return Err(ManifestError::Truncated(
-                "missing string pool chunk".into(),
-            ));
+            return Err(ManifestError::Truncated("missing string pool chunk".into()));
         }
         let (chunk_type, _header_size, chunk_size, _body_off) = self.read_chunk_header()?;
         if chunk_type != RES_STRING_POOL_TYPE {
@@ -475,9 +473,9 @@ impl<'a> Parser<'a> {
         }
         let char_len = read_u16(self.bytes, *pos)? as usize;
         *pos += 2;
-        let byte_len = char_len.checked_mul(2).ok_or_else(|| {
-            ManifestError::BadChunk("UTF-16 char length overflow".into())
-        })?;
+        let byte_len = char_len
+            .checked_mul(2)
+            .ok_or_else(|| ManifestError::BadChunk("UTF-16 char length overflow".into()))?;
         if *pos + byte_len + 2 > chunk_end {
             return Err(ManifestError::Truncated("UTF-16 payload".into()));
         }
@@ -495,11 +493,7 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    fn read_utf8_string(
-        &self,
-        pos: &mut usize,
-        chunk_end: usize,
-    ) -> Result<String, ManifestError> {
+    fn read_utf8_string(&self, pos: &mut usize, chunk_end: usize) -> Result<String, ManifestError> {
         if *pos + 2 > chunk_end {
             return Err(ManifestError::Truncated("UTF-8 char length".into()));
         }
@@ -957,12 +951,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn push_filter_action(
-    vec: &mut [ComponentEntry],
-    comp_idx: usize,
-    filter_idx: usize,
-    name: &str,
-) {
+fn push_filter_action(vec: &mut [ComponentEntry], comp_idx: usize, filter_idx: usize, name: &str) {
     if let Some(comp) = vec.get_mut(comp_idx) {
         if let Some(f) = comp.intent_filters.get_mut(filter_idx) {
             f.actions.push(name.to_string());
@@ -1002,10 +991,7 @@ fn bool_attr(attrs: &[(String, Option<String>)], name: &str) -> bool {
     matches!(attr(attrs, name), Some("true"))
 }
 
-fn component_from_attrs(
-    name: &str,
-    attrs: &[(String, Option<String>)],
-) -> ComponentEntry {
+fn component_from_attrs(name: &str, attrs: &[(String, Option<String>)]) -> ComponentEntry {
     ComponentEntry {
         name: name.to_string(),
         exported: bool_attr(attrs, "exported"),
@@ -1048,16 +1034,18 @@ fn read_u32(bytes: &[u8], off: usize) -> Result<u32, ManifestError> {
 /// one byte if the high bit is clear; otherwise two bytes with the high
 /// bit stripped (so the value fits in 15 bits).
 fn decode_uleb128(bytes: &[u8], pos: &mut usize) -> Result<u32, ManifestError> {
-    let b0 = bytes.get(*pos).copied().ok_or_else(|| {
-        ManifestError::Truncated(format!("uleb128 read at {pos} past EOF"))
-    })?;
+    let b0 = bytes
+        .get(*pos)
+        .copied()
+        .ok_or_else(|| ManifestError::Truncated(format!("uleb128 read at {pos} past EOF")))?;
     *pos += 1;
     if b0 & 0x80 == 0 {
         Ok(b0 as u32)
     } else {
-        let b1 = bytes.get(*pos).copied().ok_or_else(|| {
-            ManifestError::Truncated(format!("uleb128 read at {pos} past EOF"))
-        })?;
+        let b1 = bytes
+            .get(*pos)
+            .copied()
+            .ok_or_else(|| ManifestError::Truncated(format!("uleb128 read at {pos} past EOF")))?;
         *pos += 1;
         Ok((((b0 & 0x7F) as u32) << 8) | b1 as u32)
     }

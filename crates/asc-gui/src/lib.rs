@@ -24,7 +24,7 @@ pub mod session;
 pub mod worker;
 
 pub use crate::app::AscApp;
-pub use crate::selfcheck::{run_selfcheck, SelfcheckReport};
+pub use crate::selfcheck::{SelfcheckReport, run_selfcheck};
 pub use crate::session::{
     ClassEntry, FindRefsHistoryEntry, MAX_FINDREFS_HISTORY, MAX_OPEN_TABS, SessionError,
     SessionResult, SourceTab, WorkspaceSession,
