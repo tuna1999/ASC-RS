@@ -7,3 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+asc-apk = { path = "../../crates/asc-apk" }
+
+[dev-dependencies]
+# Used by the malformed-ZIP test fixture (computes the CRC-32 over the
+# "hello" payload embedded in the hand-built archive).
+crc32fast.workspace = true

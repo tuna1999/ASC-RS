@@ -21,8 +21,7 @@ pub fn run(input: &[u8]) -> FuzzOutcome {
     let mut total: u64 = 0;
     let mut count: u32 = 0;
     for entry in view.entries() {
-        let name = entry.name();
-        // Skip names that would overflow our accumulator.
+        let name = &entry.name;
         total = total.saturating_add(name.len() as u64);
         count = count.saturating_add(1);
         // Hard cap: never let a single input make us visit > 1M
@@ -34,9 +33,9 @@ pub fn run(input: &[u8]) -> FuzzOutcome {
     }
     let _ = total;
 
-    // Bonus: ask the view for `classes_dex_offsets()` — the
-    // discoverer used by `getclass`. Memory-bounded by construction.
-    let _ = view.classes_dex_offsets();
+    // Bonus: the dex-entry discovery used by getclass. Memory-bounded
+    // by construction (name matching only, no inflation).
+    let _ = view.dex_entries();
 
     FuzzOutcome::Ok
 }
