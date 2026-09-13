@@ -1,0 +1,22 @@
+=== summary ===
+oracle_byte_size: 12109
+oracle_line_count: 278
+oracle_method_sigs: 18
+oracle_unique_idents: 234
+
+droidsaw_byte_size: 17421
+droidsaw_line_count: 400
+droidsaw_method_sigs: 18
+droidsaw_unique_idents: 310
+
+method_sig_intersection: 14
+method_sig_oracle_only: 4
+identifier_intersection: 199
+
+[oracle] synthetic sample:     static synthetic com.google.android.material.timepicker.ClockHandView access$000(com.google.android.material.timepicker.ClockFaceView p1)
+
+[droidsaw] synthetic sample:     static ClockHandView access$000(ClockFaceView x0) {
+
+[droidsaw] constructor header:     public ClockFaceView(Context context, AttributeSet attrs, int defStyleAttr) {
+
+[oracle] constructor header:     public ClockFaceView(android.content.Context p9, android.util.AttributeSet p10, int p11)

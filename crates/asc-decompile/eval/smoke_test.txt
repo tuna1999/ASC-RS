@@ -1,0 +1,9 @@
+=== smoke test (workload_classes.dex) ===
+Lcom/google/android/material/timepicker/ClockFaceView;: 17421 chars in 2.73 ms
+Lcom/google/android/material/timepicker/ClockHandView;: 17636 chars in 2.73 ms
+Landroidx/appcompat/widget/AppCompatTextView;: 28916 chars in 3.83 ms
+Lcom/google/android/material/timepicker/RadialViewGroup;: 7407 chars in 1.09 ms
+Landroidx/emoji2/text/EmojiCompat;: 26537 chars in 2.97 ms
+
+=== cold-path (parse + census + decompile) ===
+cold path (parse + census + decompile ClockFaceView): 167.02 ms (17421 chars)
