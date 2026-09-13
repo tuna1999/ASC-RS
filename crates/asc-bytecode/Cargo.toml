@@ -6,4 +6,5 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+asc-dex.workspace = true
 thiserror.workspace = true

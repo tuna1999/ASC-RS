@@ -10,3 +10,8 @@ thiserror.workspace = true
 memmap2.workspace = true
 flate2.workspace = true
 crc32fast.workspace = true
+
+[dev-dependencies]
+# Tests build ZIP archives in a temp file and let Apk::open mmap them.
+# Declared as a crate-local dev-dep so we don't touch the workspace root.
+tempfile = "3"

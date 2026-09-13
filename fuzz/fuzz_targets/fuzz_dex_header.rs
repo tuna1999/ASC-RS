@@ -18,7 +18,8 @@ pub fn run(input: &[u8]) -> FuzzOutcome {
         // exposes must not panic even on a half-valid header. We
         // touch the ones we know about and let the rest be added
         // by the asc-dex agent.
-        let _ = view.magic();
+        let h = view.header();
+        let _ = (h.file_size, h.map_off, h.string_ids_size, h.class_defs_size);
         let _ = view.version();
         let _ = view.string_count();
         let _ = view.type_count();
