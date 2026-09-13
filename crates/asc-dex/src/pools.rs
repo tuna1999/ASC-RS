@@ -471,6 +471,16 @@ impl<'a> DexView<'a> {
         })
     }
 
+    /// Number of entries in the `call_site_ids` pool (0 on pre-038 DEX).
+    pub fn call_site_count(&self) -> u32 {
+        self.call_site_pool().map(|(_, c)| c).unwrap_or(0)
+    }
+
+    /// Number of entries in the `method_handles` pool (0 on pre-038 DEX).
+    pub fn method_handle_count(&self) -> u32 {
+        self.method_handle_pool().map(|(_, c)| c).unwrap_or(0)
+    }
+
     /// Returns the encoded-array offset for the given `call_site_id` (DEX 038+).
     pub fn call_site_off(&self, idx: CallSiteIdx) -> Result<u32, DexError> {
         let (off, count) = self.call_site_pool()?;
