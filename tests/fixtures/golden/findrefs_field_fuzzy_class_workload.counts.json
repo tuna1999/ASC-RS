@@ -1,0 +1,23 @@
+{
+  "apk": "workload.apk",
+  "case_id": "findrefs_field_fuzzy_class_workload",
+  "dex_count": 1,
+  "expect_error": false,
+  "line_count": 2,
+  "matched_method_count": 2,
+  "matched_methods_sorted": [
+    "Lcom/google/android/material/timepicker/ClockFaceView;-><init>",
+    "Lcom/google/android/material/timepicker/ClockFaceView;->getGradientForTextView"
+  ],
+  "per_dex_count": {
+    "classes.dex": 2
+  },
+  "query": [
+    "field",
+    "gradientColors",
+    "--class",
+    "ClockFaceView",
+    "--fuzzy-class"
+  ],
+  "subcommand": "findrefs"
+}

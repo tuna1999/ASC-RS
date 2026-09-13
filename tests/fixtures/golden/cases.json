@@ -1,0 +1,240 @@
+{
+  "capture_python": "E:\\Dev\\ASC-RS\\reference\\venv\\Scripts\\python.exe",
+  "case_count": 12,
+  "cases": [
+    {
+      "apk": "workload.apk",
+      "case_id": "findrefs_string_workload",
+      "description": "Find every caller of a const-string opcode whose payload contains 'Context' (substring).",
+      "expect_error": false,
+      "query": [
+        "string",
+        "Context"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "findrefs_type_workload",
+      "description": "Find every caller that uses a type whose descriptor contains 'ClockFaceView' (substring, fuzzy type).",
+      "expect_error": false,
+      "query": [
+        "type",
+        "ClockFaceView"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "findrefs_method_workload",
+      "description": "Find every caller of a method named '*onClick*' across all classes.",
+      "expect_error": false,
+      "query": [
+        "method",
+        "onClick"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "findrefs_method_precise_workload",
+      "description": "Find every caller of method 'onLayout' only on ClockFaceView (precise class).",
+      "expect_error": false,
+      "query": [
+        "method",
+        "onLayout",
+        "--class",
+        "Lcom/google/android/material/timepicker/ClockFaceView;"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "findrefs_field_workload",
+      "description": "Find every caller of a field whose name contains 'textColor' across all classes.",
+      "expect_error": false,
+      "query": [
+        "field",
+        "textColor"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "findrefs_field_fuzzy_class_workload",
+      "description": "Find every caller of field 'gradientColors' on classes whose descriptor contains 'ClockFaceView'.",
+      "expect_error": false,
+      "query": [
+        "field",
+        "gradientColors",
+        "--class",
+        "ClockFaceView",
+        "--fuzzy-class"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "getclass_clockface_workload",
+      "description": "Decompile ClockFaceView and emit the Java-like source the oracle produces.",
+      "expect_error": false,
+      "query": [
+        "Lcom/google/android/material/timepicker/ClockFaceView;"
+      ],
+      "subcommand": "getclass"
+    },
+    {
+      "apk": "com.aurora.store_60.apk",
+      "case_id": "findrefs_string_aurora",
+      "description": "Find every URL-bearing string constant. Exercises central-directory scan + per-DEX iteration.",
+      "expect_error": false,
+      "query": [
+        "string",
+        "https://"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "com.aurora.store_60.apk",
+      "case_id": "findrefs_type_aurora",
+      "description": "Find every caller referencing a type whose descriptor contains 'Fragment' (substring).",
+      "expect_error": false,
+      "query": [
+        "type",
+        "Fragment"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "com.aurora.store_60.apk",
+      "case_id": "findrefs_method_aurora",
+      "description": "Find every caller of a method named '*onClick*' across both DEX entries.",
+      "expect_error": false,
+      "query": [
+        "method",
+        "onClick"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "org.fdroid.fdroid_1016000.apk",
+      "case_id": "findrefs_string_fdroid",
+      "description": "Same query on the larger F-Droid APK; checks scaling of per-DEX iteration.",
+      "expect_error": false,
+      "query": [
+        "string",
+        "https://"
+      ],
+      "subcommand": "findrefs"
+    },
+    {
+      "apk": "workload.apk",
+      "case_id": "getclass_notfound",
+      "description": "Oracle should print 'Error: Class ... not found in APK.' to stderr, exit 1, and emit no source.",
+      "expect_error": true,
+      "query": [
+        "Lno/such/Class;"
+      ],
+      "subcommand": "getclass"
+    }
+  ],
+  "oracle_commit": "ccc6bae7704f5c5ef1a7271e27314837079621fb",
+  "summary": [
+    {
+      "case_id": "findrefs_string_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 28,
+      "matched_method_count": 24,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_type_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 2,
+      "matched_method_count": 2,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_method_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 17,
+      "matched_method_count": 17,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_method_precise_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 0,
+      "matched_method_count": 0,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_field_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 16,
+      "matched_method_count": 16,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_field_fuzzy_class_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 2,
+      "matched_method_count": 2,
+      "ok": true
+    },
+    {
+      "case_id": "getclass_clockface_workload",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 249,
+      "matched_method_count": 0,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_string_aurora",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 56,
+      "matched_method_count": 56,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_type_aurora",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 184,
+      "matched_method_count": 184,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_method_aurora",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 10,
+      "matched_method_count": 10,
+      "ok": true
+    },
+    {
+      "case_id": "findrefs_string_fdroid",
+      "exit_code": 0,
+      "expected_error": false,
+      "line_count": 24,
+      "matched_method_count": 24,
+      "ok": true
+    },
+    {
+      "case_id": "getclass_notfound",
+      "exit_code": 1,
+      "expected_error": true,
+      "line_count": 0,
+      "matched_method_count": 0,
+      "ok": true
+    }
+  ]
+}

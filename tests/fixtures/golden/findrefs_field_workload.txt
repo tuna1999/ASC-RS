@@ -1,0 +1,22 @@
+# oracle exit_code: 0
+# case_id: findrefs_field_workload
+----- stdout -----
+classes.dex | Landroidx/appcompat/widget/SuggestionsAdapter;->formatUrl | matched=(Landroidx/appcompat/R$attr;->textColorSearchUrl)
+classes.dex | Landroidx/appcompat/widget/SwitchCompat;->setSwitchTextAppearance | matched=(Landroidx/appcompat/R$styleable;->TextAppearance_android_textColor)
+classes.dex | Lcom/google/android/material/datepicker/CalendarItemStyle;-><init> | matched=(Lcom/google/android/material/datepicker/CalendarItemStyle;->textColor)
+classes.dex | Lcom/google/android/material/datepicker/CalendarItemStyle;->styleItem | matched=(Lcom/google/android/material/datepicker/CalendarItemStyle;->textColor)
+classes.dex | Lcom/google/android/material/internal/NavigationMenuPresenter$NavigationMenuAdapter;->onBindViewHolder | matched=(Lcom/google/android/material/internal/NavigationMenuPresenter;->textColor)
+classes.dex | Lcom/google/android/material/internal/NavigationMenuPresenter;->getItemTextColor | matched=(Lcom/google/android/material/internal/NavigationMenuPresenter;->textColor)
+classes.dex | Lcom/google/android/material/internal/NavigationMenuPresenter;->setItemTextColor | matched=(Lcom/google/android/material/internal/NavigationMenuPresenter;->textColor)
+classes.dex | Lcom/google/android/material/resources/TextAppearance;-><init> | matched=(Lcom/google/android/material/R$styleable;->TextAppearance_android_textColor; Lcom/google/android/material/R$styleable;->TextAppearance_android_textColorHint; Lcom/google/android/material/R$styleable;->TextAppearance_android_textColorLink; Lcom/google/android/material/resources/TextAppearance;->textColorHint; Lcom/google/android/material/resources/TextAppearance;->textColorLink)
+classes.dex | Lcom/google/android/material/resources/TextAppearance;->getTextColor | matched=(Lcom/google/android/material/resources/TextAppearance;->textColor)
+classes.dex | Lcom/google/android/material/resources/TextAppearance;->setTextColor | matched=(Lcom/google/android/material/resources/TextAppearance;->textColor)
+classes.dex | Lcom/google/android/material/resources/TextAppearance;->updateDrawState | matched=(Lcom/google/android/material/resources/TextAppearance;->textColor)
+classes.dex | Lcom/google/android/material/tabs/TabLayout;-><init> | matched=(Landroidx/appcompat/R$styleable;->TextAppearance_android_textColor)
+classes.dex | Lcom/google/android/material/textfield/TextInputLayout;-><init> | matched=(Lcom/google/android/material/R$styleable;->TextInputLayout_android_textColorHint)
+classes.dex | Lcom/google/android/material/timepicker/ClockFaceView;-><init> | matched=(Lcom/google/android/material/timepicker/ClockFaceView;->textColor)
+classes.dex | Lcom/google/android/material/timepicker/ClockFaceView;->updateTextViews | matched=(Lcom/google/android/material/timepicker/ClockFaceView;->textColor)
+classes.dex | Lcom/google/android/material/tooltip/TooltipDrawable;->loadFromAttributes | matched=(Lcom/google/android/material/R$styleable;->Tooltip_android_textColor)
+
+----- stderr -----
+

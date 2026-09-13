@@ -1,0 +1,24 @@
+# oracle exit_code: 0
+# case_id: findrefs_method_workload
+----- stdout -----
+classes.dex | Landroidx/appcompat/app/ActionBarDrawerToggle$1;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Landroidx/appcompat/app/AlertController$AlertParams$3;->onItemClick | matched=(Landroid/content/DialogInterface$OnClickListener;->onClick)
+classes.dex | Landroidx/appcompat/app/AlertController$AlertParams$4;->onItemClick | matched=(Landroid/content/DialogInterface$OnMultiChoiceClickListener;->onClick)
+classes.dex | Landroidx/appcompat/app/AlertController$ButtonHandler;->handleMessage | matched=(Landroid/content/DialogInterface$OnClickListener;->onClick)
+classes.dex | Landroidx/appcompat/widget/SearchView;->onItemClicked | matched=(Landroidx/appcompat/widget/SearchView$OnSuggestionListener;->onSuggestionClick)
+classes.dex | Landroidx/appcompat/widget/SearchView;->onSearchClicked | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Landroidx/core/view/AccessibilityDelegateCompat;->performClickableSpanAction | matched=(Landroid/text/style/ClickableSpan;->onClick)
+classes.dex | Lcom/google/android/material/chip/Chip$ChipTouchHelper;->onPerformActionForVirtualView | matched=(Lcom/google/android/material/chip/Chip;->performCloseIconClick)
+classes.dex | Lcom/google/android/material/chip/Chip;->onTouchEvent | matched=(Lcom/google/android/material/chip/Chip;->performCloseIconClick)
+classes.dex | Lcom/google/android/material/chip/Chip;->performCloseIconClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Lcom/google/android/material/datepicker/MaterialDatePicker$1;->onClick | matched=(Lcom/google/android/material/datepicker/MaterialPickerOnPositiveButtonClickListener;->onPositiveButtonClick)
+classes.dex | Lcom/google/android/material/datepicker/MaterialDatePicker$2;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Lcom/google/android/material/snackbar/Snackbar;->lambda$setAction$0$com-google-android-material-snackbar-Snackbar | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Lcom/google/android/material/textfield/EndCompoundLayout;->setEndIconMode | matched=(Lcom/google/android/material/textfield/EndIconDelegate;->getOnIconClickListener)
+classes.dex | Lcom/google/android/material/textfield/IconHelper;->setIconOnClickListener | matched=(Lcom/google/android/material/textfield/IconHelper;->setIconClickable)
+classes.dex | Lcom/google/android/material/textfield/IconHelper;->setIconOnLongClickListener | matched=(Lcom/google/android/material/textfield/IconHelper;->setIconClickable)
+classes.dex | Lcom/google/android/material/timepicker/MaterialTimePicker$1;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Lcom/google/android/material/timepicker/MaterialTimePicker$2;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+
+----- stderr -----
+

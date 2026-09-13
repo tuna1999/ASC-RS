@@ -1,0 +1,42 @@
+{
+  "apk": "workload.apk",
+  "case_id": "findrefs_string_workload",
+  "dex_count": 1,
+  "expect_error": false,
+  "line_count": 28,
+  "matched_method_count": 24,
+  "matched_methods_sorted": [
+    "Landroidx/appcompat/app/AppCompatViewInflater$DeclaredOnClickListener;->resolveMethod",
+    "Landroidx/core/app/NotificationCompat$Action$Builder;->checkContextualActionNullFields",
+    "Landroidx/core/content/ContextCompat$Api30Impl;->getDisplayOrDefault",
+    "Landroidx/core/content/ContextCompat;->createFilesDir",
+    "Landroidx/core/graphics/TypefaceCompat;->create",
+    "Landroidx/core/graphics/drawable/IconCompat$Api23Impl;->toIcon",
+    "Landroidx/emoji2/text/FontRequestEmojiCompatConfig$FontRequestMetadataLoader;-><init>",
+    "Landroidx/fragment/app/Fragment;->getDefaultViewModelCreationExtras",
+    "Landroidx/fragment/app/Fragment;->getDefaultViewModelProviderFactory",
+    "Landroidx/fragment/app/FragmentTabHost;->setup",
+    "Landroidx/lifecycle/LifecycleCoroutineScopeImpl;-><init>",
+    "Landroidx/startup/InitializationProvider;->onCreate",
+    "Landroidx/vectordrawable/graphics/drawable/AnimatedVectorDrawableCompat;->inflate",
+    "Lkotlin/NumbersKt__BigDecimalsKt;->toBigDecimal",
+    "Lkotlin/NumbersKt__BigIntegersKt;->toBigDecimal",
+    "Lkotlin/NumbersKt__BigIntegersKt;->toBigDecimal$default",
+    "Lkotlin/coroutines/CombinedContext;->containsAll",
+    "Lkotlin/coroutines/CoroutineContext$Element$DefaultImpls;->get",
+    "Lkotlin/coroutines/EmptyCoroutineContext;->toString",
+    "Lkotlin/coroutines/jvm/internal/RestrictedContinuationImpl;-><init>",
+    "Lkotlin/text/StringsKt__StringNumberConversionsJVMKt;->toBigDecimal",
+    "Lkotlin/text/StringsKt__StringNumberConversionsJVMKt;->toBigDecimalOrNull",
+    "Lkotlinx/coroutines/internal/ContextScope;->toString",
+    "Lkotlinx/coroutines/internal/ThreadContextKt;->restoreThreadContext"
+  ],
+  "per_dex_count": {
+    "classes.dex": 28
+  },
+  "query": [
+    "string",
+    "Context"
+  ],
+  "subcommand": "findrefs"
+}

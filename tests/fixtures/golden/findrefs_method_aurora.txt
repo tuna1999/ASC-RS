@@ -1,0 +1,16 @@
+# oracle exit_code: 0
+# case_id: findrefs_method_aurora
+----- stdout -----
+classes2.dex | Lcom/google/android/material/chip/Chip;->m | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes2.dex | Lcom/google/android/material/datepicker/MaterialDatePicker$2;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes2.dex | Lcom/google/android/material/timepicker/MaterialTimePicker$1;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes2.dex | Lcom/google/android/material/timepicker/MaterialTimePicker$2;->onClick | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | LP1/b$a;->onClick | matched=(Landroidx/preference/b;->onClick)
+classes.dex | Landroidx/appcompat/app/AlertController$c;->handleMessage | matched=(Landroid/content/DialogInterface$OnClickListener;->onClick)
+classes.dex | Landroidx/appcompat/app/b;->onItemClick | matched=(Landroid/content/DialogInterface$OnClickListener;->onClick)
+classes.dex | Landroidx/appcompat/app/c;->onItemClick | matched=(Landroid/content/DialogInterface$OnMultiChoiceClickListener;->onClick)
+classes.dex | Landroidx/appcompat/widget/SearchView;->t | matched=(Landroid/view/View$OnClickListener;->onClick)
+classes.dex | Ll1/a;->k | matched=(Landroid/text/style/ClickableSpan;->onClick)
+
+----- stderr -----
+

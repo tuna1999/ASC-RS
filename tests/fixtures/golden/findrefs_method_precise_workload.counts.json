@@ -1,0 +1,17 @@
+{
+  "apk": "workload.apk",
+  "case_id": "findrefs_method_precise_workload",
+  "dex_count": 0,
+  "expect_error": false,
+  "line_count": 0,
+  "matched_method_count": 0,
+  "matched_methods_sorted": [],
+  "per_dex_count": {},
+  "query": [
+    "method",
+    "onLayout",
+    "--class",
+    "Lcom/google/android/material/timepicker/ClockFaceView;"
+  ],
+  "subcommand": "findrefs"
+}

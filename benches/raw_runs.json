@@ -1,0 +1,238 @@
+{
+  "cases": [
+    {
+      "argv": [
+        "findrefs",
+        "E:\\Dev\\ASC-RS\\corpus\\apk\\workload.apk",
+        "string",
+        "Context"
+      ],
+      "cold": {
+        "count": 5,
+        "max": 0.3397572000103537,
+        "mean": 0.3262926800060086,
+        "median": 0.32566940001561306,
+        "min": 0.31581980001647025,
+        "p10": 0.31581980001647025,
+        "p90": 0.33131030001095496,
+        "stdev": 0.009631876811883766
+      },
+      "cold_exit": 0,
+      "cold_stdout_bytes": 3520,
+      "id": "findrefs_string_workload",
+      "label": "findrefs string Context (workload, single dex)",
+      "peak_rss_mb": {
+        "count": 5,
+        "max": 4.01171875,
+        "mean": 4.01171875,
+        "median": 4.01171875,
+        "min": 4.01171875,
+        "p10": 4.01171875,
+        "p90": 4.01171875,
+        "stdev": 0.0
+      },
+      "peak_wset_mb": {
+        "count": 5,
+        "max": 4.46875,
+        "mean": 4.103125,
+        "median": 4.01171875,
+        "min": 4.01171875,
+        "p10": 4.01171875,
+        "p90": 4.01171875,
+        "stdev": 0.20439058856834016
+      }
+    },
+    {
+      "argv": [
+        "findrefs",
+        "E:\\Dev\\ASC-RS\\corpus\\apk\\com.aurora.store_60.apk",
+        "string",
+        "https://"
+      ],
+      "cold": {
+        "count": 5,
+        "max": 0.3499990999989677,
+        "mean": 0.33979863999411464,
+        "median": 0.3421667999937199,
+        "min": 0.323625599994557,
+        "p10": 0.323625599994557,
+        "p90": 0.3460499999928288,
+        "stdev": 0.010214090538783792
+      },
+      "cold_exit": 0,
+      "cold_stdout_bytes": 9036,
+      "id": "findrefs_string_aurora",
+      "label": "findrefs string https:// (Aurora, multidex)",
+      "peak_rss_mb": {
+        "count": 5,
+        "max": 4.4765625,
+        "mean": 4.1078125,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.20613751667576186
+      },
+      "peak_wset_mb": {
+        "count": 5,
+        "max": 4.4765625,
+        "mean": 4.1078125,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.20613751667576186
+      }
+    },
+    {
+      "argv": [
+        "findrefs",
+        "E:\\Dev\\ASC-RS\\corpus\\apk\\org.fdroid.fdroid_1016000.apk",
+        "string",
+        "https://"
+      ],
+      "cold": {
+        "count": 5,
+        "max": 0.4695007000118494,
+        "mean": 0.4211236800067127,
+        "median": 0.42931180002051406,
+        "min": 0.3765566000074614,
+        "p10": 0.3765566000074614,
+        "p90": 0.43019559999811463,
+        "stdev": 0.0350708204337864
+      },
+      "cold_exit": 0,
+      "cold_stdout_bytes": 4184,
+      "id": "findrefs_string_fdroid",
+      "label": "findrefs string https:// (F-Droid, multidex, larger)",
+      "peak_rss_mb": {
+        "count": 5,
+        "max": 4.09765625,
+        "mean": 4.03203125,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.03668549025585593
+      },
+      "peak_wset_mb": {
+        "count": 5,
+        "max": 4.09765625,
+        "mean": 4.03203125,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.03668549025585593
+      }
+    },
+    {
+      "argv": [
+        "findrefs",
+        "E:\\Dev\\ASC-RS\\corpus\\apk\\com.aurora.store_60.apk",
+        "method",
+        "onClick"
+      ],
+      "cold": {
+        "count": 5,
+        "max": 0.48245930002303794,
+        "mean": 0.4402156200027093,
+        "median": 0.43605670001124963,
+        "min": 0.4204375999979675,
+        "p10": 0.4204375999979675,
+        "p90": 0.43627310000010766,
+        "stdev": 0.02457066072199193
+      },
+      "cold_exit": 0,
+      "cold_stdout_bytes": 1218,
+      "id": "findrefs_method_aurora",
+      "label": "findrefs method onClick (Aurora)",
+      "peak_rss_mb": {
+        "count": 5,
+        "max": 4.01953125,
+        "mean": 4.01640625,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.0017469281074217107
+      },
+      "peak_wset_mb": {
+        "count": 5,
+        "max": 4.01953125,
+        "mean": 4.01640625,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.0017469281074217107
+      }
+    },
+    {
+      "argv": [
+        "getclass",
+        "E:\\Dev\\ASC-RS\\corpus\\apk\\workload.apk",
+        "Lcom/google/android/material/timepicker/ClockFaceView;"
+      ],
+      "cold": {
+        "count": 5,
+        "max": 0.19084049999946728,
+        "mean": 0.18231449999730104,
+        "median": 0.1827544000116177,
+        "min": 0.16942279998329468,
+        "p10": 0.16942279998329468,
+        "p90": 0.18945659999735653,
+        "stdev": 0.008666549131975003
+      },
+      "cold_exit": 0,
+      "cold_stdout_bytes": 11730,
+      "id": "getclass_clockface_workload",
+      "label": "getclass ClockFaceView (workload)",
+      "peak_rss_mb": {
+        "count": 5,
+        "max": 4.46484375,
+        "mean": 4.10546875,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.20089673235349673
+      },
+      "peak_wset_mb": {
+        "count": 5,
+        "max": 4.4765625,
+        "mean": 4.1078125,
+        "median": 4.015625,
+        "min": 4.015625,
+        "p10": 4.015625,
+        "p90": 4.015625,
+        "stdev": 0.20613751667576186
+      }
+    }
+  ],
+  "n_per_case": 5,
+  "oracle_commit": "ccc6bae7704f5c5ef1a7271e27314837079621fb",
+  "oracle_python": "E:\\Dev\\ASC-RS\\reference\\venv\\Scripts\\python.exe",
+  "startup": {
+    "python_main_help": {
+      "count": 5,
+      "max": 0.0897308999847155,
+      "mean": 0.08361325999721884,
+      "median": 0.08354200000758283,
+      "min": 0.07705739999073558,
+      "p10": 0.07705739999073558,
+      "p90": 0.08569519998854958,
+      "stdev": 0.004669502167042768
+    },
+    "python_pass": {
+      "count": 5,
+      "max": 0.037876599992159754,
+      "mean": 0.03413971999543719,
+      "median": 0.03624749998562038,
+      "min": 0.02990900000440888,
+      "p10": 0.02990900000440888,
+      "p90": 0.03645179999875836,
+      "stdev": 0.00377708046033155
+    }
+  }
+}

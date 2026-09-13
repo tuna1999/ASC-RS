@@ -1,0 +1,8 @@
+# oracle exit_code: 0
+# case_id: findrefs_type_workload
+----- stdout -----
+classes.dex | Lcom/google/android/material/timepicker/ClockFaceView;-><init> | matched=(Lcom/google/android/material/timepicker/ClockFaceView$1;; Lcom/google/android/material/timepicker/ClockFaceView$2;)
+classes.dex | Lcom/google/android/material/timepicker/TimePickerView;-><init> | matched=(Lcom/google/android/material/timepicker/ClockFaceView;)
+
+----- stderr -----
+

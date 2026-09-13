@@ -1,0 +1,13 @@
+{
+  "apk": "workload.apk",
+  "case_id": "getclass_notfound",
+  "exit_code": 1,
+  "expect_error": true,
+  "query": [
+    "Lno/such/Class;"
+  ],
+  "stderr_byte_count": 47,
+  "stdout_byte_count": 0,
+  "stdout_line_count": 0,
+  "subcommand": "getclass"
+}

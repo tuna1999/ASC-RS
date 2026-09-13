@@ -1,0 +1,6 @@
+# oracle exit_code: 0
+# case_id: findrefs_method_precise_workload
+----- stdout -----
+
+----- stderr -----
+
