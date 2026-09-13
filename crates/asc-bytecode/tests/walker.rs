@@ -2,8 +2,8 @@
 //! malformed-input reporting, and a realistic end-to-end method body.
 
 use asc_bytecode::{
-    walk_verify, BytecodeError, CallSiteIdx, DexRef, FieldIdx, MethodHandleIdx, MethodIdx,
-    ProtoIdx, RefInstruction, RefWalker, StringIdx, TypeIdx,
+    BytecodeError, CallSiteIdx, DexRef, FieldIdx, MethodHandleIdx, MethodIdx, ProtoIdx,
+    RefInstruction, RefWalker, StringIdx, TypeIdx, walk_verify,
 };
 
 // --- helpers -----------------------------------------------------------
@@ -121,7 +121,10 @@ fn walker_const_method_handle_and_type() {
     let bytes = le_units(&units);
     let h = hits(&bytes, units.len() as u32);
     assert_eq!(h.len(), 2);
-    assert_eq!(h[0].primary, Some(DexRef::MethodHandle(MethodHandleIdx(0xaa))));
+    assert_eq!(
+        h[0].primary,
+        Some(DexRef::MethodHandle(MethodHandleIdx(0xaa)))
+    );
     assert_eq!(h[1].primary, Some(DexRef::Proto(ProtoIdx(0xbb))));
 }
 
@@ -294,10 +297,10 @@ fn walker_branches_skipped_correctly() {
     // return-void        (10x, 1 unit)
     let units = [
         0x0032, 0x0001, // if-eq v0, v1, +1
-        0x0028,         // goto +0
+        0x0028, // goto +0
         0x0039, 0xFFFF, // if-nez v0, -1
         0x001a, 0x0099, // const-string v0, string@0x99
-        0x000e,         // return-void
+        0x000e, // return-void
     ];
     let bytes = le_units(&units);
     let h = hits(&bytes, units.len() as u32);
@@ -349,8 +352,8 @@ fn walker_steps_over_fill_array_data_odd_size() {
     let units = [
         0x0300, 0x0001, // ident + element_width
         0x0003, 0x0000, // size = 3
-        0x0201,         // data[0]=0x01, data[1]=0x02
-        0x0003,         // data[2]=0x03, pad=0x00
+        0x0201, // data[0]=0x01, data[1]=0x02
+        0x0003, // data[2]=0x03, pad=0x00
     ];
     let bytes = le_units(&units);
     let (consumed, hits) = drain(&bytes, 6);
@@ -366,8 +369,7 @@ fn walker_steps_over_fill_array_data_with_wide_element() {
         0x0300, 0x0008, // ident + element_width=8
         0x0002, 0x0000, // size = 2
         // 16 bytes of data = 8 units
-        0x0000, 0x0000, 0x0000, 0x0000,
-        0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     ];
     let bytes = le_units(&units);
     let (consumed, hits) = drain(&bytes, units.len() as u32);
@@ -541,19 +543,19 @@ fn walker_realistic_method_sequence() {
     // Total: 32 code units.
 
     let units = [
-        0x001a, 0x0010,               // offset 0
-        0x001b, 0xBABE, 0xCAFE,       // offset 2
-        0x001c, 0x0020,               // offset 5
-        0x0062, 0x0030,               // offset 7
-        0x0054, 0x0040,               // offset 9
-        0x026e, 0x0050, 0x0030,       // offset 11 (C=0, D=3)
-        0x0170, 0x0060, 0x0020,       // offset 14 (C=2)
-        0x0224, 0x0070, 0x0010,       // offset 17 (C=0, D=1)
+        0x001a, 0x0010, // offset 0
+        0x001b, 0xBABE, 0xCAFE, // offset 2
+        0x001c, 0x0020, // offset 5
+        0x0062, 0x0030, // offset 7
+        0x0054, 0x0040, // offset 9
+        0x026e, 0x0050, 0x0030, // offset 11 (C=0, D=3)
+        0x0170, 0x0060, 0x0020, // offset 14 (C=2)
+        0x0224, 0x0070, 0x0010, // offset 17 (C=0, D=1)
         0x02fa, 0x0080, 0x0010, 0x0081, // offset 20
-        0x01fc, 0x0090, 0x0000,       // offset 24 (C=0)
-        0x00fe, 0x00A0,               // offset 27
-        0x00ff, 0x00B0,               // offset 29
-        0x000e,                       // offset 31
+        0x01fc, 0x0090, 0x0000, // offset 24 (C=0)
+        0x00fe, 0x00A0, // offset 27
+        0x00ff, 0x00B0, // offset 29
+        0x000e, // offset 31
     ];
     assert_eq!(units.len(), 32);
 
@@ -616,7 +618,7 @@ fn walker_realistic_method_sequence_with_payload_between_refs() {
         0x0001, 0x0000, // target[0] = +1
         0x0002, 0x0000, // target[1] = +2
         0x001c, 0x0042, // const-class v1, type@0x42
-        0x000e,         // return-void
+        0x000e, // return-void
     ];
     let bytes = le_units(&units);
     let h = hits(&bytes, units.len() as u32);
@@ -635,9 +637,9 @@ fn walker_zero_and_max_indices() {
     // 31c string@0xFFFFFFFF
     // 35c meth@0xFFFF
     let units = [
-        0x001a, 0x0000,           // string@0
-        0x001b, 0xFFFF, 0xFFFF,   // string@0xFFFFFFFF
-        0x026e, 0xFFFF, 0x0010,   // invoke-virtual {v0, v1}, meth@0xFFFF
+        0x001a, 0x0000, // string@0
+        0x001b, 0xFFFF, 0xFFFF, // string@0xFFFFFFFF
+        0x026e, 0xFFFF, 0x0010, // invoke-virtual {v0, v1}, meth@0xFFFF
     ];
     let bytes = le_units(&units);
     let h = hits(&bytes, units.len() as u32);
@@ -682,7 +684,7 @@ fn fill_array_data_element_count_may_exceed_remaining_units() {
     // 36 units total: payload ident (0x0300), element_width=1, size=64,
     // then 32 units of data (64 bytes).
     let mut units: Vec<u16> = vec![0x0300, 0x0001, 0x0040, 0x0000];
-    units.extend(std::iter::repeat(0x2a2a).take(32));
+    units.extend(std::iter::repeat_n(0x2a2a, 32));
     assert_eq!(units.len(), 36);
     let mut bytes = Vec::with_capacity(72);
     for u in &units {
@@ -697,7 +699,7 @@ fn fill_array_data_element_count_may_exceed_remaining_units() {
     // Truncation must still be an error: declare size=64 but only
     // provide 20 units of data.
     let mut trunc: Vec<u16> = vec![0x0300, 0x0001, 0x0040, 0x0000];
-    trunc.extend(std::iter::repeat(0x0000).take(20));
+    trunc.extend(std::iter::repeat_n(0x0000, 20));
     let mut tbytes = Vec::new();
     for u in &trunc {
         tbytes.extend_from_slice(&u.to_le_bytes());

@@ -175,11 +175,7 @@ fn reads_annotations_directory() {
 fn reads_map_list() {
     let buf = tiny_dex();
     let view = DexView::parse(&buf).unwrap();
-    let entries: Vec<_> = view
-        .map_list()
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+    let entries: Vec<_> = view.map_list().unwrap().map(|r| r.unwrap()).collect();
     assert_eq!(entries.len(), 4);
     assert_eq!(entries[0].ty, map::MAP_TYPE_HEADER_ITEM);
     assert_eq!(entries[1].ty, map::MAP_TYPE_CODE_ITEM);

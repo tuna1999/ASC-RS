@@ -36,4 +36,4 @@ mod zip;
 pub use crate::apk::{Apk, ZipView};
 pub use crate::entry::{Compression, DexEntry, EntryBytes};
 pub use crate::error::ApkError;
-pub use crate::inflate::{InflateLimits, DEFAULT_MAX_OUTPUT};
+pub use crate::inflate::{DEFAULT_MAX_OUTPUT, InflateLimits};

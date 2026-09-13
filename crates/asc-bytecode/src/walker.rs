@@ -18,7 +18,7 @@
 
 use crate::dex_ids::*;
 use crate::error::BytecodeError;
-use crate::opcode::{make_ref, opcode_info, payload_extent, read_index, PayloadKind};
+use crate::opcode::{PayloadKind, make_ref, opcode_info, payload_extent, read_index};
 
 /// A reference operand located inside a Dalvik instruction.
 ///
@@ -79,14 +79,15 @@ impl<'a> RefWalker<'a> {
     /// or if `insns_units * 2` overflows.
     pub fn new(insns: &'a [u8], insns_units: u32) -> Result<Self, BytecodeError> {
         let bytes = insns.len() as u64;
-        let expected = (insns_units as u64)
-            .checked_mul(2)
-            .ok_or(BytecodeError::LengthMismatch {
-                offset: 0,
-                units: insns_units,
-                bytes,
-                expected: u64::MAX,
-            })?;
+        let expected =
+            (insns_units as u64)
+                .checked_mul(2)
+                .ok_or(BytecodeError::LengthMismatch {
+                    offset: 0,
+                    units: insns_units,
+                    bytes,
+                    expected: u64::MAX,
+                })?;
         if bytes != expected {
             return Err(BytecodeError::LengthMismatch {
                 offset: 0,

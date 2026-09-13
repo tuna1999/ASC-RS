@@ -133,11 +133,9 @@ pub fn decode_lossy<'a>(bytes: &'a [u8], utf16_len_hint: u32) -> Cow<'a, str> {
             {
                 // 6-byte MUTF-8 supplementary encoded as UTF-16 surrogate pair.
                 let hi = 0xD800u32
-                    | ((((bytes[i + 1] & 0x0F) as u32) << 6)
-                        | ((bytes[i + 2] & 0x3F) as u32));
+                    | ((((bytes[i + 1] & 0x0F) as u32) << 6) | ((bytes[i + 2] & 0x3F) as u32));
                 let lo = 0xDC00u32
-                    | ((((bytes[i + 4] & 0x0F) as u32) << 6)
-                        | ((bytes[i + 5] & 0x3F) as u32));
+                    | ((((bytes[i + 4] & 0x0F) as u32) << 6) | ((bytes[i + 5] & 0x3F) as u32));
                 let cp = 0x10000u32 + (((hi & 0x3FF) << 10) | (lo & 0x3FF));
                 push_cp(&mut out, cp);
                 i += 6;
@@ -152,8 +150,7 @@ pub fn decode_lossy<'a>(bytes: &'a [u8], utf16_len_hint: u32) -> Cow<'a, str> {
                     continue;
                 }
                 let cp = (((b & 0x0F) as u32) << 12)
-                    | ((((bytes[i + 1] & 0x3F) as u32) << 6)
-                        | ((bytes[i + 2] & 0x3F) as u32));
+                    | ((((bytes[i + 1] & 0x3F) as u32) << 6) | ((bytes[i + 2] & 0x3F) as u32));
                 if (0xD800..=0xDFFF).contains(&cp) || cp < 0x800 {
                     // surrogate range or overlong
                     push_repl(&mut out);

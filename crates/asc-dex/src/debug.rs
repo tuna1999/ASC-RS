@@ -42,8 +42,12 @@ pub struct DebugInfoHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebugOp {
     EndSequence,
-    AdvancePc { addr_diff: u32 },
-    AdvanceLine { line_diff: i32 },
+    AdvancePc {
+        addr_diff: u32,
+    },
+    AdvanceLine {
+        line_diff: i32,
+    },
     StartLocal {
         reg: u32,
         name: Option<StringIdx>,
@@ -55,11 +59,17 @@ pub enum DebugOp {
         ty: Option<TypeIdx>,
         sig: Option<StringIdx>,
     },
-    EndLocal { reg: u32 },
-    RestartLocal { reg: u32 },
+    EndLocal {
+        reg: u32,
+    },
+    RestartLocal {
+        reg: u32,
+    },
     SetPrologueEnd,
     SetEpilogueBegin,
-    SetFile { name: Option<StringIdx> },
+    SetFile {
+        name: Option<StringIdx>,
+    },
     /// Special opcode (0x0a..=0xff): line delta + pc delta derived from the opcode byte.
     Special {
         opcode: u8,
@@ -164,7 +174,8 @@ impl<'a> Iterator for DebugOps<'a> {
                 }
                 Err(e) => Err(e),
             },
-            DBG_ADVANCE_LINE => match crate::leb::sleb128_to_i32(slice_at(self.physical, self.pos)) {
+            DBG_ADVANCE_LINE => match crate::leb::sleb128_to_i32(slice_at(self.physical, self.pos))
+            {
                 Ok((v, n)) => {
                     self.pos += n;
                     Ok(DebugOp::AdvanceLine { line_diff: v })
@@ -215,15 +226,13 @@ impl<'a> Iterator for DebugOps<'a> {
             }
             DBG_SET_PROLOGUE_END => Ok(DebugOp::SetPrologueEnd),
             DBG_SET_EPILOGUE_BEGIN => Ok(DebugOp::SetEpilogueBegin),
-            DBG_SET_FILE => {
-                match crate::leb::uleb128_to_u32(slice_at(self.physical, self.pos)) {
-                    Ok((v, n)) => {
-                        self.pos += n;
-                        Ok(DebugOp::SetFile { name: uleb_p1(v) })
-                    }
-                    Err(e) => Err(e),
+            DBG_SET_FILE => match crate::leb::uleb128_to_u32(slice_at(self.physical, self.pos)) {
+                Ok((v, n)) => {
+                    self.pos += n;
+                    Ok(DebugOp::SetFile { name: uleb_p1(v) })
                 }
-            }
+                Err(e) => Err(e),
+            },
             op if op >= 0x0a => {
                 let adjusted = op - 0x0a;
                 let line_diff = (adjusted as i32 % DBG_LINE_RANGE) + DBG_LINE_BASE;
@@ -255,20 +264,12 @@ fn slice_at(physical: &[u8], pos: usize) -> &[u8] {
 
 #[inline]
 fn uleb_p1(v: u32) -> Option<StringIdx> {
-    if v == 0 {
-        None
-    } else {
-        Some(StringIdx(v - 1))
-    }
+    if v == 0 { None } else { Some(StringIdx(v - 1)) }
 }
 
 #[inline]
 fn uleb_p1_type(v: u32) -> Option<TypeIdx> {
-    if v == 0 {
-        None
-    } else {
-        Some(TypeIdx(v - 1))
-    }
+    if v == 0 { None } else { Some(TypeIdx(v - 1)) }
 }
 
 /// Four-element uleb tuple returned by [`read_four`].

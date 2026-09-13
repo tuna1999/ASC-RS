@@ -215,8 +215,14 @@ mod tests {
 
     #[test]
     fn magic_recognition() {
-        assert_eq!(DexVersion::from_magic(b"dex\n035\0").unwrap(), DexVersion::V035);
-        assert_eq!(DexVersion::from_magic(b"dex\n041\0").unwrap(), DexVersion::V041);
+        assert_eq!(
+            DexVersion::from_magic(b"dex\n035\0").unwrap(),
+            DexVersion::V035
+        );
+        assert_eq!(
+            DexVersion::from_magic(b"dex\n041\0").unwrap(),
+            DexVersion::V041
+        );
         assert!(DexVersion::from_magic(b"dex\n036\0").is_err());
         assert!(DexVersion::from_magic(b"dex\n035x").is_err());
         assert!(DexVersion::from_magic(b"DEX\n035\0").is_err());

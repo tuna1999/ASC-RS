@@ -26,7 +26,6 @@ impl Compression {
             other => Err(other),
         }
     }
-
 }
 
 /// One central-directory entry in the archive.

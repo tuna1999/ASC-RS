@@ -9,7 +9,7 @@
 use crate::error::DexError;
 use crate::header::DexHeader;
 use crate::ids::{
-    CallSiteIdx, FieldIdx, MethodHandleIdx, MethodIdx, ProtoIdx, StringIdx, TypeIdx, NO_INDEX,
+    CallSiteIdx, FieldIdx, MethodHandleIdx, MethodIdx, NO_INDEX, ProtoIdx, StringIdx, TypeIdx,
 };
 use crate::mutf8;
 use crate::view::DexView;
@@ -75,7 +75,7 @@ impl<'a> TypeList<'a> {
             return None;
         }
         Some(TypeIdx(
-            crate::read::read_u16(self.bytes, off).unwrap_or(0) as u32,
+            crate::read::read_u16(self.bytes, off).unwrap_or(0) as u32
         ))
     }
 
@@ -114,9 +114,7 @@ impl<'a> Iterator for TypeListIter<'a> {
         if off + 2 > self.bytes.len() {
             return None;
         }
-        let idx = TypeIdx(
-            crate::read::read_u16(self.bytes, off).unwrap_or(0) as u32,
-        );
+        let idx = TypeIdx(crate::read::read_u16(self.bytes, off).unwrap_or(0) as u32);
         self.pos += 1;
         Some(idx)
     }
@@ -191,13 +189,15 @@ pub(crate) fn check_pool(
             stride,
             file,
         })?;
-    let end = off_us.checked_add(needed as usize).ok_or(DexError::PoolOutOfBounds {
-        pool,
-        off: off_us,
-        count,
-        stride,
-        file,
-    })?;
+    let end = off_us
+        .checked_add(needed as usize)
+        .ok_or(DexError::PoolOutOfBounds {
+            pool,
+            off: off_us,
+            count,
+            stride,
+            file,
+        })?;
     if end > file {
         return Err(DexError::PoolOutOfBounds {
             pool,
@@ -220,12 +220,48 @@ pub(crate) fn validate_all(
 ) -> Result<(), DexError> {
     // Reuse the existing `check_pool` helper against the absolute end.
     let abs_end = header_off.saturating_add(file_size);
-    check_pool("string_ids", header.string_ids_off, header.string_ids_size, 4, abs_end)?;
-    check_pool("type_ids", header.type_ids_off, header.type_ids_size, 4, abs_end)?;
-    check_pool("proto_ids", header.proto_ids_off, header.proto_ids_size, 12, abs_end)?;
-    check_pool("field_ids", header.field_ids_off, header.field_ids_size, 8, abs_end)?;
-    check_pool("method_ids", header.method_ids_off, header.method_ids_size, 8, abs_end)?;
-    check_pool("class_defs", header.class_defs_off, header.class_defs_size, 32, abs_end)?;
+    check_pool(
+        "string_ids",
+        header.string_ids_off,
+        header.string_ids_size,
+        4,
+        abs_end,
+    )?;
+    check_pool(
+        "type_ids",
+        header.type_ids_off,
+        header.type_ids_size,
+        4,
+        abs_end,
+    )?;
+    check_pool(
+        "proto_ids",
+        header.proto_ids_off,
+        header.proto_ids_size,
+        12,
+        abs_end,
+    )?;
+    check_pool(
+        "field_ids",
+        header.field_ids_off,
+        header.field_ids_size,
+        8,
+        abs_end,
+    )?;
+    check_pool(
+        "method_ids",
+        header.method_ids_off,
+        header.method_ids_size,
+        8,
+        abs_end,
+    )?;
+    check_pool(
+        "class_defs",
+        header.class_defs_off,
+        header.class_defs_size,
+        32,
+        abs_end,
+    )?;
     if header.map_off != 0
         && (header.map_off as usize) < abs_end
         && (header.map_off as usize) + 4 > abs_end
@@ -357,8 +393,7 @@ impl<'a> DexView<'a> {
                     file: self.physical.len(),
                 });
             }
-            let size =
-                crate::read::read_u32(self.physical, p)? as usize;
+            let size = crate::read::read_u32(self.physical, p)? as usize;
             let needed = size.checked_mul(2).ok_or(DexError::InvalidLength {
                 off: p,
                 message: "type_list size overflow",
@@ -474,8 +509,7 @@ impl<'a> DexView<'a> {
             });
         }
         let handle_type = crate::read::read_u16(self.physical, entry)?;
-        let field_or_method_idx =
-            crate::read::read_u16(self.physical, entry + 4)?;
+        let field_or_method_idx = crate::read::read_u16(self.physical, entry + 4)?;
         if handle_type <= 5 {
             Ok(MethodHandleItem {
                 handle_type,
@@ -641,7 +675,13 @@ impl<'a> Iterator for StringIter<'a> {
             Ok(v) => v,
             Err(_) => {
                 self.pos += 1;
-                return Some((idx, DexStringRef { utf16_len, mutf8: &[] }));
+                return Some((
+                    idx,
+                    DexStringRef {
+                        utf16_len,
+                        mutf8: &[],
+                    },
+                ));
             }
         };
         self.pos += 1;
@@ -710,10 +750,8 @@ impl<'a> Iterator for ProtoIter<'a> {
             return None;
         }
         let shorty = crate::read::read_u32(self.physical, off).unwrap_or(0);
-        let return_type =
-            crate::read::read_u32(self.physical, off + 4).unwrap_or(0);
-        let params_off =
-            crate::read::read_u32(self.physical, off + 8).unwrap_or(0);
+        let return_type = crate::read::read_u32(self.physical, off + 4).unwrap_or(0);
+        let params_off = crate::read::read_u32(self.physical, off + 8).unwrap_or(0);
         let parameters = if params_off == 0 {
             TypeList { bytes: &[] }
         } else {
@@ -722,8 +760,7 @@ impl<'a> Iterator for ProtoIter<'a> {
                 self.pos = self.count;
                 return None;
             }
-            let size =
-                crate::read::read_u32(self.physical, p).unwrap_or(0) as usize;
+            let size = crate::read::read_u32(self.physical, p).unwrap_or(0) as usize;
             let needed = size.saturating_mul(2);
             if needed == usize::MAX || p + 4 + needed > self.physical.len() {
                 self.pos = self.count;

@@ -292,10 +292,26 @@ impl ZipBuilder {
         }
 
         // ---- 4. EOCD ----
-        let entries_disk = if zip64_used { 0xFFFF } else { entries_total as u16 };
-        let entries_total_u16 = if zip64_used { 0xFFFF } else { entries_total as u16 };
-        let cd_size_u32 = if zip64_used { 0xFFFF_FFFF } else { cd_size as u32 };
-        let cd_off_u32 = if zip64_used { 0xFFFF_FFFF } else { cd_off as u32 };
+        let entries_disk = if zip64_used {
+            0xFFFF
+        } else {
+            entries_total as u16
+        };
+        let entries_total_u16 = if zip64_used {
+            0xFFFF
+        } else {
+            entries_total as u16
+        };
+        let cd_size_u32 = if zip64_used {
+            0xFFFF_FFFF
+        } else {
+            cd_size as u32
+        };
+        let cd_off_u32 = if zip64_used {
+            0xFFFF_FFFF
+        } else {
+            cd_off as u32
+        };
 
         out.extend_from_slice(&[b'P', b'K', 5, 6]);
         write_u16(&mut out, 0); // disk number
@@ -317,8 +333,8 @@ fn compress_entry(data: &[u8], method: Compression) -> Vec<u8> {
     match method {
         Compression::Stored => data.to_vec(),
         Compression::Deflated => {
-            use flate2::read::DeflateEncoder;
             use flate2::Compression as Fc;
+            use flate2::read::DeflateEncoder;
             use std::io::Read;
             let mut enc = DeflateEncoder::new(data, Fc::default());
             let mut out = Vec::with_capacity(data.len() / 4 + 16);

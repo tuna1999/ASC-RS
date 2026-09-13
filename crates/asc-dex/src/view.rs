@@ -98,8 +98,7 @@ impl<'a> DexView<'a> {
             if &physical[off..off + 8] != b"dex\n041\0" {
                 break;
             }
-            let file_size =
-                crate::read::read_u32(physical, off + 0x20)? as usize;
+            let file_size = crate::read::read_u32(physical, off + 0x20)? as usize;
             if file_size < DexHeader::SIZE || off + file_size > len {
                 break;
             }
@@ -107,12 +106,16 @@ impl<'a> DexView<'a> {
             if file_size == 0 {
                 // Guard against an infinite loop if a malicious blob has
                 // file_size == 0.
-                return Err(DexError::TooManyLogicalDex { count: offsets.len() as u32 });
+                return Err(DexError::TooManyLogicalDex {
+                    count: offsets.len() as u32,
+                });
             }
             off += file_size;
             // Cap at a reasonable upper bound.
             if offsets.len() > 1024 {
-                return Err(DexError::TooManyLogicalDex { count: offsets.len() as u32 });
+                return Err(DexError::TooManyLogicalDex {
+                    count: offsets.len() as u32,
+                });
             }
         }
         if offsets.is_empty() {

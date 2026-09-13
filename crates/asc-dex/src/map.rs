@@ -114,12 +114,10 @@ impl<'a> DexView<'a> {
             });
         }
         let count = crate::read::read_u32(self.physical, base)? as usize;
-        let needed = count
-            .checked_mul(12)
-            .ok_or(DexError::InvalidLength {
-                off: base,
-                message: "map_list count overflow",
-            })?;
+        let needed = count.checked_mul(12).ok_or(DexError::InvalidLength {
+            off: base,
+            message: "map_list count overflow",
+        })?;
         if base + 4 + needed > self.physical.len() {
             return Err(DexError::Truncated {
                 needed: base + 4 + needed,
