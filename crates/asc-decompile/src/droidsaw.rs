@@ -15,13 +15,13 @@
 //! panic from the third-party crate is converted into
 //! [`DecompileError::BackendError`] rather than aborting the caller.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use droidsaw_dex::{
     classes::decompile_class_with_census, parser::DexFile, r8_inversion::build_trampoline_census,
 };
 
-use crate::{normalize_class_name, ClassDecompiler, DecompileError};
+use crate::{ClassDecompiler, DecompileError, normalize_class_name};
 
 /// DEX magic prefix `dex\n` plus the 3-byte version (`035`..=`041`).
 const DEX_MAGIC_PREFIX: &[u8; 4] = b"dex\n";
@@ -50,14 +50,15 @@ impl ClassDecompiler for DroidsawBackend {
             return Err(DecompileError::MalformedDex("empty input".into()));
         }
         if dex_bytes.len() < 8 || &dex_bytes[..4] != DEX_MAGIC_PREFIX {
-            return Err(DecompileError::MalformedDex(
-                "missing dex\\n magic".into(),
-            ));
+            return Err(DecompileError::MalformedDex("missing dex\\n magic".into()));
         }
         // Version gate — droidsaw-dex claims 035..=041 support (CHANGELOG
         // §1.0.0). Reject anything outside so callers get a typed error.
         let ver = &dex_bytes[4..7];
-        let version_ok = matches!(ver, b"035" | b"036" | b"037" | b"038" | b"039" | b"040" | b"041");
+        let version_ok = matches!(
+            ver,
+            b"035" | b"036" | b"037" | b"038" | b"039" | b"040" | b"041"
+        );
         if !version_ok {
             return Err(DecompileError::UnsupportedVersion(format!(
                 "magic version {:?} not in 035..=041",
@@ -70,9 +71,8 @@ impl ClassDecompiler for DroidsawBackend {
 
         // 3. Parse the DEX. droidsaw-dex returns DexError on failure;
         //    map to the typed taxonomy.
-        let dex = DexFile::parse(dex_bytes, None).map_err(|e| {
-            DecompileError::MalformedDex(format!("droidsaw_dex::DexError: {e:?}"))
-        })?;
+        let dex = DexFile::parse(dex_bytes, None)
+            .map_err(|e| DecompileError::MalformedDex(format!("droidsaw_dex::DexError: {e:?}")))?;
 
         // 4. Locate the matching class_def. We must iterate `class_defs`
         //    and resolve each class_idx back to its descriptor string,
@@ -101,7 +101,8 @@ impl ClassDecompiler for DroidsawBackend {
                 break;
             }
         }
-        let class_def = found_class.ok_or_else(|| DecompileError::ClassNotFound(descriptor.clone()))?;
+        let class_def =
+            found_class.ok_or_else(|| DecompileError::ClassNotFound(descriptor.clone()))?;
 
         // 5. Build the trampoline census (amortises the R8-inversion
         //    pre-scan across all methods in the class).
@@ -169,9 +170,8 @@ mod tests {
         bytes[..4].copy_from_slice(b"dex\n");
         bytes[4..7].copy_from_slice(b"039");
         // Should return *some* typed error, never panic.
-        let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            backend.decompile(&bytes, "Lfoo/Bar;")
-        }));
+        let res =
+            std::panic::catch_unwind(AssertUnwindSafe(|| backend.decompile(&bytes, "Lfoo/Bar;")));
         let inner = res.expect("DroidsawBackend must not panic on garbage input");
         assert!(inner.is_err(), "expected Err, got {:?}", inner);
     }
@@ -186,7 +186,10 @@ mod tests {
 
     #[test]
     fn normalize_accepts_java_dotted() {
-        assert_eq!(normalize_class_name("com.foo.Bar").unwrap(), "Lcom/foo/Bar;");
+        assert_eq!(
+            normalize_class_name("com.foo.Bar").unwrap(),
+            "Lcom/foo/Bar;"
+        );
     }
 
     #[test]

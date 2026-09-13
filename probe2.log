@@ -1,0 +1,81 @@
+warning: value assigned to `class_ann_off` is never read
+   --> crates\asc-rebuild\src\layout.rs:276:34
+    |
+276 |       let mut class_ann_off: u32 = 0;
+    |                                    ^ this value is reassigned later and never used
+...
+392 | /             class_ann_off = if dir.class_annotations_off != 0 {
+393 | |                 new_set_off_map.get(&dir.class_annotations_off).copied().unwrap_or(0)
+394 | |             } else {
+395 | |                 0
+396 | |             };
+    | |_____________- `class_ann_off` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `old_idx` and `new_code_offs` are never read
+  --> crates\asc-rebuild\src\closure.rs:38:9
+   |
+37 | pub(crate) struct ClassDefRecord {
+   |                   -------------- fields in this struct
+38 |     pub old_idx: u32,
+   |         ^^^^^^^
+...
+57 |     pub new_code_offs: Vec<u32>,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `ClassDefRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `method_count` is never used
+   --> crates\asc-rebuild\src\closure.rs:972:19
+    |
+971 | impl ClassDefRecord {
+    | ------------------- method in this implementation
+972 |     pub(crate) fn method_count(&self) -> usize {
+    |                   ^^^^^^^^^^^^
+
+warning: associated function `empty` is never used
+  --> crates\asc-rebuild\src\remap.rs:46:19
+   |
+28 | impl<I> IndexMap<I> {
+   | ------------------- associated function in this implementation
+...
+46 |     pub(crate) fn empty(old_count: u32) -> Self {
+   |                   ^^^^^
+
+warning: function `io_err` is never used
+   --> crates\asc-rebuild\src\util.rs:135:8
+    |
+135 | pub fn io_err(e: std::io::Error) -> RebuildError {
+    |        ^^^^^^
+
+warning: `asc-rebuild` (lib) generated 5 warnings
+   Compiling asc-rebuild v0.1.0 (E:\Dev\ASC-RS\crates\asc-rebuild)
+    Finished `release` profile [optimized] target(s) in 0.94s
+     Running tests\roundtrip.rs (target\release\deps\roundtrip-b9117f9b224bbe10.exe)
+
+running 1 test
+EMPTY method name at rebuilt idx 11
+EMPTY method name at rebuilt idx 12
+EMPTY method name at rebuilt idx 13
+EMPTY method name at rebuilt idx 23
+EMPTY method name at rebuilt idx 49
+EMPTY method name at rebuilt idx 50
+EMPTY method name at rebuilt idx 54
+EMPTY method name at rebuilt idx 60
+EMPTY method name at rebuilt idx 62
+EMPTY method name at rebuilt idx 66
+EMPTY method name at rebuilt idx 67
+EMPTY method name at rebuilt idx 68
+EMPTY method name at rebuilt idx 69
+EMPTY method name at rebuilt idx 70
+EMPTY method name at rebuilt idx 109
+EMPTY method name at rebuilt idx 110
+EMPTY method name at rebuilt idx 127
+EMPTY method name at rebuilt idx 128
+EMPTY method name at rebuilt idx 130
+test rebuilt_dex_pool_references_all_resolve ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.09s
+

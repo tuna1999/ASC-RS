@@ -12,7 +12,7 @@
 //! requiring a multi-class builder (the empty-target short-circuit).
 
 use asc_dex::view::DexView;
-use asc_query::{find_refs, Query};
+use asc_query::{Query, find_refs};
 
 mod common;
 

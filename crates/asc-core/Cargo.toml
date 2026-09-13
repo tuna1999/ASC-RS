@@ -7,8 +7,16 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-
-[dev-dependencies]
 asc-apk.workspace = true
 asc-dex.workspace = true
 asc-bytecode.workspace = true
+asc-query.workspace = true
+asc-rebuild.workspace = true
+asc-decompile.workspace = true
+smallvec.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"
+zip = { version = "0.6", default-features = false }

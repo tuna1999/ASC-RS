@@ -113,7 +113,10 @@ fn memchr_byte(hay: &[u8], needle: u8) -> Option<usize> {
 /// Resolves a `Query::String` pattern to a set of `StringIdx` whose
 /// MUTF-8 payload contains `pattern` as a literal substring. Returns
 /// an empty vector (not an error) when nothing matches.
-fn resolve_string_pattern(view: &DexView, pattern: &str) -> Result<SmallVec<[StringIdx; SMALL_HINT]>, SearchError> {
+fn resolve_string_pattern(
+    view: &DexView,
+    pattern: &str,
+) -> Result<SmallVec<[StringIdx; SMALL_HINT]>, SearchError> {
     let needle = pattern.as_bytes();
     let mut out: SmallVec<[StringIdx; SMALL_HINT]> = SmallVec::new();
     for (idx, s) in view.strings() {
@@ -138,7 +141,10 @@ fn resolve_type_pattern(
     for (idx, descriptor_sidx) in view.types() {
         let sref = view
             .string(descriptor_sidx)
-            .map_err(|e| SearchError::Locator { pool: "string_ids", source: e })?;
+            .map_err(|e| SearchError::Locator {
+                pool: "string_ids",
+                source: e,
+            })?;
         if mutf8_contains(sref.mutf8, needle) {
             out.push(idx);
         }
@@ -166,10 +172,12 @@ fn resolve_class_constraint(
         let needle = descr.as_bytes();
         let mut out: SmallVec<[TypeIdx; SMALL_HINT]> = SmallVec::new();
         for (idx, descriptor_sidx) in view.types() {
-            let sref = view.string(descriptor_sidx).map_err(|e| SearchError::Locator {
-                pool: "string_ids",
-                source: e,
-            })?;
+            let sref = view
+                .string(descriptor_sidx)
+                .map_err(|e| SearchError::Locator {
+                    pool: "string_ids",
+                    source: e,
+                })?;
             if sref.mutf8 == needle {
                 out.push(idx);
             }
@@ -277,10 +285,7 @@ fn resolve_method_query(
 /// non-fatal at the engine level: they are recorded as
 /// [`SearchError::Locator`] and the corresponding kind's set is left
 /// empty.
-pub fn resolve_target_ids(
-    view: &DexView,
-    query: &Query,
-) -> Result<ResolvedTargets, SearchError> {
+pub fn resolve_target_ids(view: &DexView, query: &Query) -> Result<ResolvedTargets, SearchError> {
     let mut out = ResolvedTargets::default();
     match query {
         Query::String { pattern } => {

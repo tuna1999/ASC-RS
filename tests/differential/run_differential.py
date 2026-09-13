@@ -101,6 +101,36 @@ def _parse_findrefs_lines(stdout: str) -> tuple[set[str], dict[str, int], set[st
     return line_set, per_dex, matched_methods
 
 
+def _structural_getclass(golden_stdout: str, bin_stdout: str,
+                         target: str) -> tuple[bool, dict]:
+    """§29 mode: different decompilers never match byte-identically.
+    PASS when the binary output declares the target class and covers
+    most of the oracle's declared-method surface."""
+    simple = target.split("/")[-1].rstrip(";")
+    if not golden_stdout.strip():
+        # Error-path cases carry no decompiled source; exit-code parity
+        # (already checked by the caller) is the whole comparison.
+        return (not bin_stdout.strip()), {"mode": "structural-empty"}
+    decl_ok = ("class " + simple) in bin_stdout
+    decl_re = re.compile(
+        r"^[\s]*(?:public|private|protected|static|final|synchronized"
+        r"|abstract|native|default|transient|volatile)[\w\s<>\[\],.?]*?"
+        r"\s([A-Za-z_$][\w$]*)\s*\(", re.M)
+    gm = set(decl_re.findall(golden_stdout))
+    bm = set(decl_re.findall(bin_stdout))
+    covered = len(gm & bm)
+    ratio = (covered / len(gm)) if gm else 1.0
+    ok = decl_ok and ratio >= 0.7
+    return ok, {
+        "mode": "structural",
+        "class_decl_present": decl_ok,
+        "oracle_methods": len(gm),
+        "covered": covered,
+        "coverage": round(ratio, 3),
+        "missing_methods": sorted(gm - bm)[:20],
+    }
+
+
 def _normalise_getclass(s: str) -> str:
     """Collapse runs of whitespace inside each line for whitespace-tolerant compare."""
     out = []
@@ -235,16 +265,15 @@ def _run_one_case(case: dict, bin_path: str, apk_abs: Path,
                 f"missing={diff['missing_count']} extra={diff['extra_count']}"
             )
     elif case["subcommand"] == "getclass":
-        ok, gdiff = _compare_getclass(golden_stdout, bin_stdout,
-                                      strict=strict_whitespace)
+        if strict_whitespace:
+            ok, gdiff = _compare_getclass(golden_stdout, bin_stdout, strict=True)
+        else:
+            target = case["query"][0] if case["query"] else ""
+            ok, gdiff = _structural_getclass(golden_stdout, bin_stdout, target)
         result.status = "PASS" if ok else "FAIL"
         if not ok:
-            result.reason = (
-                f"decompiled source mismatch "
-                f"({gdiff['golden_byte_count']}B vs {gdiff['bin_byte_count']}B)"
-            )
-            preview = bin_stdout[:400]
-            result.stdout_diff_preview = preview
+            result.reason = f"decompiled source mismatch: {gdiff}"
+            result.stdout_diff_preview = bin_stdout[:400]
     return result
 
 
@@ -476,8 +505,8 @@ def main() -> int:
         help="Validate the harness itself using fake runner scripts.",
     )
     parser.add_argument(
-        "--strict", action="store_true",
-        help="Strict whitespace comparison for getclass (default already strict).",
+        "--strict", "--strict-getclass", action="store_true",
+        help="Byte-exact getclass comparison (decompilers rarely match).",
     )
     parser.add_argument(
         "--loose-whitespace", action="store_true",
@@ -489,7 +518,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    strict = not args.loose_whitespace
+    # Default: structural getclass comparison (§29 — different decompilers
+    # never match byte-identically). --strict forces byte equality.
+    strict = args.strict
 
     if args.selftest:
         _rc, results = _run_selftest(strict)

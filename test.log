@@ -1,0 +1,28 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests\container_041.rs (target\debug\deps\container_041-cd556cec5dae2f60.exe)
+
+running 3 tests
+test build_041_container_with_two_logical_dex ... 
+thread 'build_041_container_with_two_logical_dex' (8820) panicked at crates\asc-dex\tests\container_041.rs:59:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test logical_header_offsets_single_dex_returns_zero ... ok
+test parse_at_finds_second_logical_dex ... 
+thread 'parse_at_finds_second_logical_dex' (11720) panicked at crates\asc-dex\tests\container_041.rs:97:66:
+called `Result::unwrap()` on an `Err` value: Truncated { needed: 1068, actual: 712 }
+FAILED
+
+failures:
+
+failures:
+    build_041_container_with_two_logical_dex
+    parse_at_finds_second_logical_dex
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p asc-dex --test container_041`
+error: 1 target failed:
+    `-p asc-dex --test container_041`

@@ -1,8 +1,52 @@
 //! # asc-core
 //!
-//! Orchestration: getclass (parallel DEX scan, winner-takes-all) and findrefs
-//! (all DEX entries) pipelines over asc-apk/asc-dex/asc-query/asc-rebuild,
-//! bounded native worker parallelism, cancellation, `SearchReport`
-//! partial-completeness error model, output formatting.
+//! Orchestration for ASC-RS: the `findrefs` and `getclass` pipelines,
+//! bounded worker pool, class-name normalization, and output formatting
+//! shared by `asc-cli` and `asc-gui`.
 //!
-//! Wave-3 scaffold (starts after query + rebuild + decompiler work).
+//! ## Architecture (see design §17 / §24 / §25 / §29)
+//!
+//! - [`pipeline::run_findrefs`] — open APK once, iterate `classes*.dex`
+//!   entries (with DEX-041 logical-header expansion), run
+//!   `asc_query::find_refs` per view, aggregate per-DEX hits into a
+//!   [`report::SearchReport`]. Malformed-DEX / parse errors are recorded
+//!   and the scan continues.
+//! - [`pipeline::run_getclass`] — bounded parallel scan: a small
+//!   `std::thread` pool with `AtomicUsize` work cursor + `AtomicBool`
+//!   "found" flag + `OnceLock` winner cell. Winner's DEX goes through
+//!   [`asc_rebuild::rebuild`] → [`asc_decompile::ClassDecompiler`].
+//! - [`report`] — the [`report::SearchReport`] / [`report::DexResults`]
+//!   / [`report::SearchError`] public types and their serde shape.
+//! - [`format`] — `text` and `json` emitters used by the CLI.
+//! - [`class_name`] — class-name normalization (wrapper around
+//!   [`asc_decompile::normalize_class_name`]).
+//!
+//! ## Invariants
+//!
+//! - No `unwrap` / `expect` / `panic` in input-facing paths; every
+//!   offset is bounds-checked, every allocation bounded.
+//! - The pipelines are cancellation-friendly: workers check the
+//!   "found" flag between entries and stop pulling new work.
+//! - Output text format mirrors the Python oracle exactly (see
+//!   `reference/BEHAVIOR.md` §2). The only documented divergences live
+//!   in `crates/asc-query/GOLDEN_DIVERGENCES.md` and are `oracle ⊆ engine`.
+
+#![deny(unsafe_op_in_unsafe_fn)]
+// No `unsafe` in this crate.
+
+pub mod class_name;
+pub mod format;
+pub mod pipeline;
+pub mod report;
+pub mod worker;
+
+pub use crate::class_name::normalize_class_name;
+pub use crate::format::{
+    JsonReport, format_getclass_text, format_search_report_json, format_search_report_text,
+};
+pub use crate::pipeline::{
+    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult,
+    run_findrefs, run_getclass,
+};
+pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
+pub use crate::worker::{WorkerOutcome, WorkerPool};

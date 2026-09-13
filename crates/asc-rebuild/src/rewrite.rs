@@ -364,12 +364,24 @@ pub(crate) fn rewrite_encoded_value(
     out.push(tag_byte | (arg << 5));
     match v {
         EncodedValue::Byte(x) => out.push(*x as u8),
-        EncodedValue::Short(x) => out.extend_from_slice(&x.to_le_bytes()),
-        EncodedValue::Char(x) => out.extend_from_slice(&x.to_le_bytes()),
-        EncodedValue::Int(x) => out.extend_from_slice(&x.to_le_bytes()),
-        EncodedValue::Long(x) => out.extend_from_slice(&x.to_le_bytes()),
-        EncodedValue::Float(x) => out.extend_from_slice(&x.to_le_bytes()),
-        EncodedValue::Double(x) => out.extend_from_slice(&x.to_le_bytes()),
+        EncodedValue::Short(x) => {
+            push_numeric(out, tag_byte, &x.to_le_bytes(), true);
+        }
+        EncodedValue::Char(x) => {
+            push_numeric(out, tag_byte, &x.to_le_bytes(), false);
+        }
+        EncodedValue::Int(x) => {
+            push_numeric(out, tag_byte, &x.to_le_bytes(), true);
+        }
+        EncodedValue::Long(x) => {
+            push_numeric(out, tag_byte, &x.to_le_bytes(), true);
+        }
+        EncodedValue::Float(x) => {
+            push_numeric(out, tag_byte, &x.to_le_bytes(), false);
+        }
+        EncodedValue::Double(x) => {
+            push_numeric(out, tag_byte, &x.to_le_bytes(), false);
+        }
         EncodedValue::MethodType(_) | EncodedValue::MethodHandle(_) => {
             // MethodType → proto, MethodHandle → method_handles.
             let idx = match v {
@@ -456,6 +468,33 @@ pub(crate) fn rewrite_encoded_value(
         EncodedValue::Null | EncodedValue::Boolean(_) => {}
     }
     Ok(())
+}
+
+/// Re-emits a numeric `encoded_value` payload at MINIMAL width per the
+/// DEX spec: `arg = byte_count - 1`, where byte_count is the smallest
+/// count that preserves the value under extension. Signed types
+/// (short/int/long) sign-extend; char and float/double bit patterns
+/// zero-extend. The tag byte was already pushed by the caller and is
+/// patched in place.
+fn push_numeric(out: &mut Vec<u8>, tag: u8, bytes_le: &[u8], signed: bool) {
+    let total = bytes_le.len();
+    let mut n = total;
+    for candidate in 1..=total {
+        let last = bytes_le[candidate - 1];
+        let rest_ok = if signed {
+            let fill = if last & 0x80 != 0 { 0xFF } else { 0x00 };
+            bytes_le[candidate..].iter().all(|&b| b == fill)
+        } else {
+            bytes_le[candidate..].iter().all(|&b| b == 0x00)
+        };
+        if rest_ok {
+            n = candidate;
+            break;
+        }
+    }
+    let last = out.len() - 1;
+    out[last] = tag | (((n - 1) as u8) << 5);
+    out.extend_from_slice(&bytes_le[..n]);
 }
 
 /// Returns the smallest `arg` (0..=3) whose byte width covers `idx`.
