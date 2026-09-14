@@ -124,6 +124,12 @@ impl PackageTree {
         self.entries.len()
     }
 
+    /// Total node count (packages + class path nodes) in the arena.
+    /// Used by the benchmark harness to size the built tree.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// True when the tree holds no classes.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
