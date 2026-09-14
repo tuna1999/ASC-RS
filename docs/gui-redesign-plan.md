@@ -110,6 +110,60 @@ Numbers: audit §2. Exit: docs merged, baseline recorded.
 | risk | mitigation |
 |---|---|
 | eframe repaint loop stalls on busy poll | keep `request_repaint_after` cadence; poll is non-blocking try_recv |
-| worker thread panics poison state | engine is panic-free by invariant; worker catches nothing, process abort acceptable? No — wrap job in `catch_unwind` at task boundary, convert to TaskOutcome::Failed |
+| worker thread panics poison state | wrap job in `catch_unwind` at task boundary, convert to `TaskOutcome::Failed` (done) |
 | Arc<str> churn vs plain String | measurement-driven (audit §2); Arc chosen only where shares exist (tabs ↔ documents ↔ editor) |
 | losing selfcheck parity | selfcheck path untouched by phases 1–8 (engine-only calls) |
+
+---
+
+## Execution record (2026-09-15)
+
+All phases landed on `master` (one commit per phase; the Phase 3–8
+state/UI work landed as one coherent cutover after Phase 1/2 proved
+the task/document model).
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features` | 0 warnings |
+| `cargo test --workspace` | 244+ tests green (43 in asc-gui, incl. all audit §8 scenarios + a headless full-render smoke driving every panel through `egui::Context::run`) |
+| `asc-gui --selfcheck corpus/apk/workload.apk` | exit 0 |
+| native launch smoke | process alive ≥8 s with corpus artifact loaded |
+
+### Measured outcomes (same machine, `examples/gui_bench`, release)
+
+| metric | before | after |
+|---|---|---|
+| per-frame source copies (8×512 KiB docs) | 1.0–1.9 ms + 4 MiB alloc, ≥2×/frame | **0** (one `Arc` clone; get+slice ≈ 0.06–0.12 ms) |
+| tab activation | 4–7 ms tokenize + 1–2 ms outline on UI thread | **0** (spans/outline built on worker) |
+| window interactive | after full class enumeration (9–80 ms corpus; linear in classes) | **immediately** (artifact opens as `LoadArtifact` task; tree lands ≤1 frame later) |
+| explorer filter | O(N·L) scan every frame | cached per needle |
+| findrefs | single-slot, no cancel/supersede | supersede + Esc cancel; discard-on-arrival |
+| search results | hit count only | full per-DEX/per-caller rows, clickable |
+| GUI overhead on engine ops | — | none (getclass 10.7–67 ms, findrefs 27–95 ms ≈ engine-only) |
+
+### Scenario tests (audit §8, all green headless)
+
+1. A/B late ordering → latest preview stays active (`late_result_cannot_steal_newer_activation`)
+2. A fails, B succeeds → B active (`older_failure_does_not_clear_newer_intent`)
+3. old-generation result after reload → ignored (`old_generation_result_ignored`, `generation_bump_marks_old_results_stale`)
+4. preview A, preview B → single preview slot (`preview_slot_is_single`)
+5. preview A, pin A, preview B → pinned + preview (`pin_converts_preview`, `preview_pin_preview_flow`)
+6. cancelled/superseded search A, late → discarded (`superseded_findrefs_discarded_on_arrival`, `cancelled_task_result_discarded`)
+7. pinned tab under cache pressure → metadata intact (`pinned_metadata_survives_document_eviction`)
+8. Back/Forward restore document + line (`back_forward_restores_locations`, `navigation_restores_locations`)
+
+### Notes / deliberate deviations
+
+- **Persistence**: enabled via eframe's `persistence` feature — panel
+  sizes, collapse state and window geometry persist through egui
+  memory (native eframe storage); no custom config files.
+- **Streaming search**: deferred per §10 (completed-report model
+  retained; worst-corpus query ≈ 95 ms).
+- **Per-DEX incremental explorer fill**: single `LoadArtifact` batch
+  instead (enumeration is 3–63 ms total on corpus; the window is
+  interactive before it starts, which is the actual §11 requirement).
+- **References inspector view**: shows the retained search summary;
+  per-symbol engine-driven findrefs is a search-with-class-filter run
+  (no second engine path was invented).
+
