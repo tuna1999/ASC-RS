@@ -29,15 +29,13 @@ use std::collections::BTreeSet;
 
 use eframe::egui;
 
+use crate::highlight::{self, Span, Token};
 use asc_query::{ClassConstraint, Query};
 
-use crate::highlight::{self, OutlineEntry, Token};
 use crate::package_tree::PackageTree;
-use crate::session::{ClassEntry, MAX_OPEN_TABS, SessionError, SourceTab, WorkspaceSession};
+use crate::session::{ClassEntry, SessionError, WorkspaceSession};
+use crate::state::{Document, DocumentCache};
 use crate::task::{CompletedTask, TaskId, TaskKind, TaskManager, TaskOutcome};
-
-/// One syntax span: byte range + flavor (mirrors `highlight::Token`).
-type Span = (usize, usize, Token);
 
 /// Main GUI state. Owns the session and any pending worker
 /// receivers; eframe calls `update` on every frame.
@@ -65,12 +63,10 @@ pub struct AscApp {
     last_findrefs: Option<FindRefsView>,
     /// Currently selected class (highlighted in the tree).
     selected_class: Option<String>,
-    /// Descriptor of the visible tab (one tab visible at a time).
-    active_tab: Option<String>,
-    /// Per-line syntax spans for the active tab (parallel to its lines).
-    active_spans: Vec<Vec<Span>>,
-    /// Outline of the active tab's source.
-    active_outline: Vec<OutlineEntry>,
+    /// Open documents (byte-budgeted; heavyweight storage).
+    documents: crate::state::DocumentCache,
+    /// The visible document (cheap `Arc` clone; never a source copy).
+    active_doc: Option<std::sync::Arc<crate::state::Document>>,
     /// Navigation history (descriptors) + cursor for Back/Forward.
     nav_history: Vec<String>,
     nav_pos: usize,
@@ -138,9 +134,8 @@ impl AscApp {
             pending_activation: None,
             last_findrefs: None,
             selected_class: None,
-            active_tab: None,
-            active_spans: Vec::new(),
-            active_outline: Vec::new(),
+            documents: DocumentCache::default(),
+            active_doc: None,
             nav_history: Vec::new(),
             nav_pos: 0,
             pending_scroll: None,
@@ -207,12 +202,7 @@ impl AscApp {
     /// walking history itself).
     fn open_class(&mut self, descriptor: &str, ctx: &egui::Context, push_nav: bool) {
         self.selected_class = Some(descriptor.to_string());
-        let open = self
-            .session
-            .open_tabs()
-            .iter()
-            .any(|t| t.descriptor == descriptor);
-        if open {
+        if self.documents.contains(descriptor) {
             self.activate(descriptor);
         } else {
             // Dedup inside the manager: a click on a class already
@@ -230,46 +220,29 @@ impl AscApp {
         }
     }
 
-    /// Make `descriptor` the visible tab, (re)computing its syntax
-    /// spans and outline.
+    /// Make `descriptor` the visible document. Cheap: the document's
+    /// spans and outline were computed once on its worker thread; a
+    /// tab switch is just an `Arc` swap (audit F5).
     fn activate(&mut self, descriptor: &str) {
-        self.active_tab = Some(descriptor.to_string());
-        let Some(tab) = self.tab_by_descriptor(descriptor) else {
-            self.active_spans.clear();
-            self.active_outline.clear();
-            return;
-        };
-        let mut block = false;
-        self.active_spans = tab
-            .source
-            .lines()
-            .map(|line| {
-                let mut spans = highlight::tokenize_line(line, &mut block);
-                spans.retain(|(s, e, _)| e > s);
-                spans
-            })
-            .collect();
-        self.active_outline = highlight::outline(&tab.source);
+        self.active_doc = self.documents.get(descriptor);
         self.pending_scroll = Some(0);
     }
 
-    /// Find the open tab for a descriptor (clone).
-    fn tab_by_descriptor(&self, descriptor: &str) -> Option<SourceTab> {
-        self.session
-            .open_tabs()
-            .into_iter()
-            .find(|t| t.descriptor == descriptor)
+    /// Descriptor of the visible document (test accessor).
+    #[cfg(test)]
+    fn active_descriptor(&self) -> Option<&str> {
+        self.active_doc.as_ref().map(|d| d.descriptor.as_str())
     }
 
-    /// Close a tab; activate a neighbor when the visible one closed.
+    /// Close a document; activate a neighbor when the visible one
+    /// closed.
     fn close_tab(&mut self, descriptor: &str) {
-        self.session.close_tab(descriptor);
-        if self.active_tab.as_deref() == Some(descriptor) {
-            self.active_tab = None;
-            self.active_spans.clear();
-            self.active_outline.clear();
-            if let Some(t) = self.session.open_tabs().pop() {
-                self.activate(&t.descriptor);
+        self.documents.remove(descriptor);
+        if self.active_doc.as_ref().map(|d| d.descriptor.as_str()) == Some(descriptor) {
+            self.active_doc = None;
+            if let Some(last) = self.documents.descriptors_lru().pop() {
+                let last = last.to_string();
+                self.activate(&last);
             }
         }
         self.nav_history.retain(|d| d != descriptor);
@@ -313,12 +286,13 @@ impl AscApp {
         }
         let is_pending = self.pending_activation == Some(task.id);
         match (task.kind, task.outcome) {
-            (TaskKind::DecompileClass, TaskOutcome::Decompiled { dex_name, source }) => {
+            (TaskKind::DecompileClass, TaskOutcome::Decompiled(document)) => {
                 let target = task.label;
-                if let Err(e) = self.session.open_tab(dex_name, target.clone(), source) {
-                    self.last_error = Some(format!("open_tab: {e}"));
-                    return;
-                }
+                self.documents.put(document);
+                // Soft budget: never evict the document the user is
+                // looking at.
+                let keep = self.active_doc.as_ref().map(|d| d.descriptor.clone());
+                self.documents.enforce_budget(keep.as_deref());
                 // Activate only when this task carries the current
                 // activation intent. An older click's late result
                 // fills the cache but never steals the view; a newer
@@ -403,7 +377,9 @@ impl AscApp {
                     self.draw_tree_node(ui, idx, 0, ctx);
                 }
             } else {
-                let hits = self.tree.filter(&filter);
+                // Cached in the tree; copied out (≤500 usize) so the
+                // click loop can mutate `self` freely.
+                let hits: Vec<usize> = self.tree.filter(&filter).to_vec();
                 if hits.is_empty() {
                     ui.weak(format!("no classes matching “{filter}”"));
                 } else {
@@ -480,47 +456,54 @@ impl AscApp {
 
     /// Central panel: tab strip + code view.
     fn draw_code_area(&mut self, ui: &mut egui::Ui) {
-        let tabs = self.session.open_tabs();
-        // Reconcile active tab with eviction.
-        if let Some(active) = self.active_tab.clone() {
-            if !tabs.iter().any(|t| t.descriptor == active) {
-                self.active_tab = tabs.last().map(|t| t.descriptor.clone());
+        // Lightweight metadata only: descriptors, never sources.
+        let tabs: Vec<String> = self
+            .documents
+            .descriptors_lru()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        // Reconcile the active document with eviction (defensive —
+        // budget enforcement never drops the active document).
+        if let Some(doc) = &self.active_doc {
+            if !tabs.iter().any(|t| t == &doc.descriptor) {
+                self.active_doc = None;
             }
         }
-        if self.active_tab.is_none() {
-            self.active_tab = tabs.last().map(|t| t.descriptor.clone());
-            if let Some(d) = self.active_tab.clone() {
-                self.activate(&d);
+        if self.active_doc.is_none() {
+            if let Some(last) = tabs.last() {
+                let last = last.clone();
+                self.activate(&last);
             }
         }
 
         // --- tab strip ---
         let mut clicked: Option<String> = None;
         let mut close: Option<String> = None;
-        let active = self.active_tab.clone();
+        let active = self.active_doc.as_ref().map(|d| d.descriptor.clone());
         egui::ScrollArea::horizontal()
             .id_salt("tabstrip")
             .max_height(26.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for tab in &tabs {
-                        let is_active = active.as_deref() == Some(tab.descriptor.as_str());
-                        let title = egui::RichText::new(short_name(&tab.descriptor)).monospace();
+                    for descriptor in &tabs {
+                        let is_active = active.as_deref() == Some(descriptor.as_str());
+                        let title = egui::RichText::new(short_name(descriptor)).monospace();
                         let title = if is_active { title.strong() } else { title };
                         if ui
                             .selectable_label(is_active, title)
-                            .on_hover_text(&tab.descriptor)
+                            .on_hover_text(descriptor)
                             .clicked()
                         {
-                            clicked = Some(tab.descriptor.clone());
+                            clicked = Some(descriptor.clone());
                         }
                         if ui
                             .small_button("×")
-                            .on_hover_text(format!("close {}", tab.descriptor))
+                            .on_hover_text(format!("close {descriptor}"))
                             .clicked()
                         {
-                            close = Some(tab.descriptor.clone());
+                            close = Some(descriptor.clone());
                         }
                         ui.separator();
                     }
@@ -535,11 +518,8 @@ impl AscApp {
         }
 
         // --- code view ---
-        let tab = active
-            .or_else(|| tabs.last().map(|t| t.descriptor.clone()))
-            .and_then(|d| tabs.iter().find(|t| t.descriptor == d).cloned());
-        match tab {
-            Some(tab) => self.draw_code(ui, &tab),
+        match self.active_doc.clone() {
+            Some(doc) => self.draw_code(ui, &doc),
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.weak("No class open.\nClick a class in the Source tree to decompile it.")
@@ -548,23 +528,24 @@ impl AscApp {
         }
     }
 
-    /// The code editor surface: gutter + highlighted lines.
-    fn draw_code(&mut self, ui: &mut egui::Ui, tab: &SourceTab) {
-        let lines: Vec<&str> = tab.source.lines().collect();
+    /// The code editor surface: gutter + highlighted lines. The whole
+    /// frame touches the document through one `Arc` — zero source
+    /// copies, O(1) line slicing per visible row (audit F4/F6).
+    fn draw_code(&mut self, ui: &mut egui::Ui, doc: &Document) {
         let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
 
         let pending = self.pending_scroll.take();
         let mut scroll = egui::ScrollArea::both()
             .auto_shrink([false, false])
-            .id_salt(("code", tab.key.as_str()));
+            .id_salt(("code", doc.descriptor.as_str()));
         if let Some(line) = pending {
             scroll = scroll.vertical_scroll_offset(line as f32 * row_h);
         }
-        scroll.show_rows(ui, row_h, lines.len(), |ui, range| {
-            let (start, end) = (range.start, range.end);
-            for (i, line) in lines[start..end].iter().enumerate() {
-                let idx = start + i;
-                let spans = self.active_spans.get(idx).cloned().unwrap_or_default();
+        scroll.show_rows(ui, row_h, doc.line_count(), |ui, range| {
+            for idx in range {
+                let line = doc.line(idx).unwrap_or("");
+                let empty: Vec<Span> = Vec::new();
+                let spans = doc.spans.get(idx).unwrap_or(&empty);
                 ui.horizontal(|ui| {
                     ui.set_min_height(row_h);
                     ui.add(
@@ -577,7 +558,7 @@ impl AscApp {
                     );
                     ui.add_space(6.0);
                     ui.add(
-                        egui::Label::new(spans_to_job(line, &spans))
+                        egui::Label::new(spans_to_job(line, spans))
                             .selectable(true)
                             .wrap_mode(egui::TextWrapMode::Extend),
                     );
@@ -589,13 +570,18 @@ impl AscApp {
     /// Right panel: outline of the active class.
     fn draw_outline(&mut self, ui: &mut egui::Ui) {
         ui.heading("Outline");
-        if self.active_outline.is_empty() {
+        let doc = self.active_doc.clone();
+        let Some(doc) = doc else {
+            ui.weak("open a class to see its structure");
+            return;
+        };
+        if doc.outline.is_empty() {
             ui.weak("open a class to see its structure");
             return;
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
             let mut jump: Option<usize> = None;
-            for e in &self.active_outline {
+            for e in &doc.outline {
                 let glyph = if e.is_field { "○" } else { "▶" };
                 let text = egui::RichText::new(format!("{glyph} {}", e.text))
                     .monospace()
@@ -840,12 +826,13 @@ impl eframe::App for AscApp {
                         .and_then(|m| m.version_code)
                         .map(|v| format!(" v{v}"))
                         .unwrap_or_default();
-                    let tabs = self.session.open_tabs().len();
+                    let tabs = self.documents.len();
+                    let mib =
+                        (self.documents.bytes() as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
                     ui.weak(format!(
-                        "{pkg}{ver} · {} classes · {} dex · {tabs}/{} tabs",
+                        "{pkg}{ver} · {} classes · {} dex · {tabs} docs · {mib} MiB",
                         self.tree.len(),
                         self.session.dex_entries().len(),
-                        MAX_OPEN_TABS
                     ));
                 });
             });
@@ -941,19 +928,20 @@ mod tests {
         // Poll until both workers reply (bounded wait).
         for _ in 0..600 {
             app.poll_workers(&ctx);
-            if app.session.open_tabs().len() >= 2 {
+            if app.documents.len() >= 2 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        let tabs = app.session.open_tabs();
         for want in [&target, &other] {
-            let tab = tabs
-                .iter()
-                .find(|t| &t.descriptor == want)
-                .unwrap_or_else(|| panic!("tab for {want} must open; got {tabs:?}"));
-            assert!(!tab.source.is_empty(), "source for {want} non-empty");
+            let doc = app
+                .documents
+                .peek(want)
+                .unwrap_or_else(|| panic!("document for {want} must open"));
+            assert!(!doc.source.is_empty(), "source for {want} non-empty");
+            assert_eq!(doc.spans.len(), doc.line_count(), "spans pre-computed");
+            assert!(!doc.outline.is_empty(), "outline pre-computed");
         }
         assert!(
             app.last_error.is_none(),
@@ -962,8 +950,9 @@ mod tests {
         );
     }
 
-    /// open_class on a class with an open tab activates immediately
-    /// (no worker job queued) and builds outline + spans.
+    /// open_class on a class with a cached document activates
+    /// immediately (no worker job queued); spans/outline come from the
+    /// document, computed at build time.
     #[test]
     fn open_class_with_existing_tab_activates_without_job() {
         let apk =
@@ -977,23 +966,22 @@ mod tests {
         let ctx = egui::Context::default();
         let d = "Lcom/google/android/material/timepicker/ClockFaceView;";
 
-        // Seed an open tab directly (bypassing the worker).
-        app.session
-            .open_tab(
-                "classes.dex".to_string(),
-                d.to_string(),
-                "public class ClockFaceView {\n    int mClock;\n}\n".to_string(),
-            )
-            .expect("seed tab");
+        // Seed a document directly (bypassing the worker).
+        app.documents.put(std::sync::Arc::new(Document::new(
+            d.to_string(),
+            "classes.dex".to_string(),
+            "public class ClockFaceView {\n    int mClock;\n}\n".to_string(),
+        )));
         app.open_class(d, &ctx, true);
-        assert!(!app.tasks.has_in_flight(), "no job for open tab");
-        assert_eq!(app.active_tab.as_deref(), Some(d));
+        assert!(!app.tasks.has_in_flight(), "no job for open document");
+        let doc = app.active_doc.as_ref().expect("active doc");
+        assert_eq!(doc.descriptor, d);
         assert!(
-            app.active_outline.iter().any(|e| e.text.contains("mClock")),
+            doc.outline.iter().any(|e| e.text.contains("mClock")),
             "outline has the field: {:?}",
-            app.active_outline
+            doc.outline
         );
-        assert_eq!(app.active_spans.len(), 3, "one span-row per source line");
+        assert_eq!(doc.spans.len(), 3, "one span-row per source line");
     }
 
     /// History: open_class pushes; nav(-1) walks back without pushing.
@@ -1059,10 +1047,11 @@ mod tests {
     }
 
     fn decompiled(descriptor: &str) -> TaskOutcome {
-        TaskOutcome::Decompiled {
-            dex_name: "classes.dex".into(),
-            source: format!("class {} {{}}\n", descriptor.trim_matches(['L', ';'])),
-        }
+        TaskOutcome::Decompiled(std::sync::Arc::new(Document::new(
+            descriptor.to_string(),
+            "classes.dex".into(),
+            format!("class {} {{}}\n", descriptor.trim_matches(['L', ';'])),
+        )))
     }
 
     fn empty_app() -> AscApp {
@@ -1086,17 +1075,17 @@ mod tests {
         app.pending_activation = Some(TaskId(2));
         // B lands first.
         app.apply_task(fake_task(2, "LB;", decompiled("LB;")));
-        assert_eq!(app.active_tab.as_deref(), Some("LB;"));
+        assert_eq!(app.active_descriptor(), Some("LB;"));
         assert!(app.pending_activation.is_none(), "intent consumed by B");
-        // A lands late: tab cached, view untouched.
+        // A lands late: document cached, view untouched.
         app.apply_task(fake_task(1, "LA;", decompiled("LA;")));
         assert_eq!(
-            app.active_tab.as_deref(),
+            app.active_descriptor(),
             Some("LB;"),
             "late older result must not steal the view"
         );
-        // Both tabs exist (A filled the cache in the background).
-        assert_eq!(app.session.open_tabs().len(), 2);
+        // Both documents exist (A filled the cache in the background).
+        assert_eq!(app.documents.len(), 2);
     }
 
     /// Scenario 2: click A (fails), click B (succeeds) → B activates.
@@ -1115,7 +1104,7 @@ mod tests {
         );
         // B succeeds → activates.
         app.apply_task(fake_task(2, "LB;", decompiled("LB;")));
-        assert_eq!(app.active_tab.as_deref(), Some("LB;"));
+        assert_eq!(app.active_descriptor(), Some("LB;"));
     }
 
     /// Scenario 3: old-APK job completes after opening a new APK →
@@ -1130,10 +1119,10 @@ mod tests {
         stale.stale = true; // as poll() would stamp it
         app.apply_task(stale);
         assert!(
-            app.session.open_tabs().is_empty(),
-            "stale result must not open a tab"
+            app.documents.is_empty(),
+            "stale result must not open a document"
         );
-        assert!(app.active_tab.is_none());
+        assert!(app.active_doc.is_none());
     }
 
     /// Dedup: clicking an in-flight class re-targets the same task

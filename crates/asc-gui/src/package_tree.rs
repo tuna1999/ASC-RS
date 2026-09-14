@@ -39,6 +39,10 @@ pub struct PackageTree {
     nodes: Vec<TreeNode>,
     /// The class list the tree was built from (leaf indices point here).
     entries: Vec<ClassEntry>,
+    /// Cached filter result: `(needle, hits)`. Recomputed only when
+    /// the needle changes — the tree re-renders every frame, and the
+    /// old path re-ran an O(N·L) lowercase scan per frame (audit F6).
+    filter_cache: Option<(String, Vec<usize>)>,
 }
 
 impl PackageTree {
@@ -53,6 +57,7 @@ impl PackageTree {
                 is_class: false,
             }],
             entries,
+            filter_cache: None,
         };
         for idx in 0..tree.entries.len() {
             let desc_full = tree.entries[idx].descriptor.clone();
@@ -137,15 +142,26 @@ impl PackageTree {
 
     /// Case-insensitive substring filter over descriptors. Returns
     /// matching leaf indices sorted by descriptor (the entries list is
-    /// already sorted, so a stable filter keeps it sorted).
-    pub fn filter(&self, needle: &str) -> Vec<usize> {
-        let needle = needle.to_ascii_lowercase();
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.descriptor.to_ascii_lowercase().contains(&needle))
-            .map(|(i, _)| i)
-            .collect()
+    /// already sorted, so a stable filter keeps it sorted). Results
+    /// are cached per needle: repeated per-frame calls with the same
+    /// filter text are free.
+    pub fn filter(&mut self, needle: &str) -> &[usize] {
+        let cache_valid = self.filter_cache.as_ref().is_some_and(|(n, _)| n == needle);
+        if !cache_valid {
+            let lowered = needle.to_ascii_lowercase();
+            let hits: Vec<usize> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.descriptor.to_ascii_lowercase().contains(&lowered))
+                .map(|(i, _)| i)
+                .collect();
+            self.filter_cache = Some((needle.to_string(), hits));
+        }
+        self.filter_cache
+            .as_ref()
+            .map(|(_, hits)| hits.as_slice())
+            .unwrap_or_default()
     }
 }
 
@@ -198,16 +214,18 @@ mod tests {
 
     #[test]
     fn filter_matches_case_insensitive() {
-        let tree = PackageTree::build(vec![
+        let mut tree = PackageTree::build(vec![
             entry("Lcom/Aaa/One;"),
             entry("Lcom/bbb/clockface;"),
             entry("LClock;"),
         ]);
-        let hits = tree.filter("CLOCK");
+        let hits = tree.filter("CLOCK").to_vec();
         assert_eq!(hits.len(), 2);
         assert_eq!(tree.entry(hits[0]).descriptor, "Lcom/bbb/clockface;");
         assert_eq!(tree.entry(hits[1]).descriptor, "LClock;");
         assert!(tree.filter("zzz").is_empty());
+        // Same needle again hits the cache (and returns the same set).
+        assert_eq!(tree.filter("CLOCK").len(), 2);
     }
 
     #[test]

@@ -7,9 +7,11 @@
 //!   then reused (this is the GUI's caching license per
 //!   `reference/BEHAVIOR.md` §36 — unlike the stateless CLI, the GUI
 //!   is a long-lived interactive process).
-//! - A bounded LRU cache of open source tabs (default cap
-//!   [`MAX_OPEN_TABS`]; oldest tab evicted on insert when full).
 //! - A small history of recent findrefs queries.
+//!
+//! Source documents (decompiled classes) are no longer stored here —
+//! see [`crate::state::documents`] for the byte-budgeted cache that
+//! replaced the old LRU tab store.
 //!
 //! The session itself does no engine work — callers invoke
 //! [`asc_core::run_findrefs`] / [`asc_core::run_getclass`] on a worker
@@ -26,14 +28,6 @@ use asc_query;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-
-/// Maximum number of source tabs kept open in memory. When a new tab
-/// is inserted beyond this cap, the **oldest** tab (lowest insert
-/// order) is evicted. The cap is intentionally small: each tab holds
-/// a fully decompiled class source (potentially megabytes for huge
-/// classes), so an unbounded tab list would pin the mmap's worth of
-/// class data and balloon the process.
-pub const MAX_OPEN_TABS: usize = 8;
 
 /// Maximum number of findrefs entries retained in the history list.
 pub const MAX_FINDREFS_HISTORY: usize = 32;
@@ -65,21 +59,6 @@ pub struct ClassEntry {
     pub dex_name: String,
 }
 
-/// One open source tab. The cache holds fully decompiled source text;
-/// if memory pressure forces eviction, the tab can be re-opened on
-/// demand.
-#[derive(Debug, Clone)]
-pub struct SourceTab {
-    /// Stable identity: `<dex_name>::<descriptor>`.
-    pub key: String,
-    pub dex_name: String,
-    pub descriptor: String,
-    pub source: String,
-    /// Insertion order (monotonically increasing counter); used for
-    /// LRU eviction.
-    pub opened_at: u64,
-}
-
 /// One history entry — a query that was actually run to completion.
 /// (In-flight or failed queries are kept in the worker layer, not
 /// here.)
@@ -105,12 +84,8 @@ pub struct WorkspaceSession {
     /// `dex_entries`. Lazily filled on first request; `None` slot
     /// means "not built yet".
     class_cache: Mutex<Vec<Option<Vec<ClassEntry>>>>,
-    /// Open source tabs (LRU-bounded).
-    tabs: Mutex<VecDeque<SourceTab>>,
     /// Findrefs history (most-recent at the back).
     findrefs_history: Mutex<VecDeque<FindRefsHistoryEntry>>,
-    /// Monotonic counter for tab insertion order.
-    next_tab_id: Mutex<u64>,
 }
 
 impl WorkspaceSession {
@@ -124,9 +99,7 @@ impl WorkspaceSession {
             apk,
             dex_entries,
             class_cache: Mutex::new(cache),
-            tabs: Mutex::new(VecDeque::with_capacity(MAX_OPEN_TABS)),
             findrefs_history: Mutex::new(VecDeque::with_capacity(MAX_FINDREFS_HISTORY)),
-            next_tab_id: Mutex::new(0),
         })
     }
 
@@ -202,55 +175,6 @@ impl WorkspaceSession {
         // Sort by descriptor for stable display.
         out.sort_by(|a, b| a.descriptor.cmp(&b.descriptor));
         Ok(out)
-    }
-
-    /// Insert (or refresh) a source tab. If the cap is full, the
-    /// oldest tab is evicted.
-    pub fn open_tab(
-        &self,
-        dex_name: String,
-        descriptor: String,
-        source: String,
-    ) -> SessionResult<()> {
-        let key = format!("{dex_name}::{descriptor}");
-        let mut next_id = self.next_tab_id.lock();
-        let opened_at = *next_id;
-        *next_id += 1;
-        let mut tabs = self.tabs.lock();
-        // If a tab with this key already exists, refresh and move-to-back.
-        if let Some(pos) = tabs.iter().position(|t| t.key == key) {
-            let mut t = tabs.remove(pos).unwrap();
-            t.source = source;
-            t.opened_at = opened_at;
-            tabs.push_back(t);
-            return Ok(());
-        }
-        // Evict oldest if over cap.
-        while tabs.len() >= MAX_OPEN_TABS {
-            tabs.pop_front();
-        }
-        tabs.push_back(SourceTab {
-            key,
-            dex_name,
-            descriptor,
-            source,
-            opened_at,
-        });
-        Ok(())
-    }
-
-    /// Snapshot of open tabs (most-recent at the back).
-    pub fn open_tabs(&self) -> Vec<SourceTab> {
-        self.tabs.lock().iter().cloned().collect()
-    }
-
-    /// Remove a tab by descriptor (tab close button). No-op when the
-    /// descriptor has no open tab.
-    pub fn close_tab(&self, descriptor: &str) {
-        let mut tabs = self.tabs.lock();
-        if let Some(pos) = tabs.iter().position(|t| t.descriptor == descriptor) {
-            tabs.remove(pos);
-        }
     }
 
     /// Record a completed findrefs run.

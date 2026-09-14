@@ -23,13 +23,14 @@ pub mod highlight;
 pub mod package_tree;
 pub mod selfcheck;
 pub mod session;
+pub mod state;
 pub mod task;
 
 pub use crate::app::AscApp;
 pub use crate::selfcheck::{SelfcheckReport, run_selfcheck};
 pub use crate::session::{
-    ClassEntry, FindRefsHistoryEntry, MAX_FINDREFS_HISTORY, MAX_OPEN_TABS, SessionError,
-    SessionResult, SourceTab, WorkspaceSession,
+    ClassEntry, FindRefsHistoryEntry, MAX_FINDREFS_HISTORY, SessionError, SessionResult,
+    WorkspaceSession,
 };
 
 /// Convenience: open an APK and return a session, or return a

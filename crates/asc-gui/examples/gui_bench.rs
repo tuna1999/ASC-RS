@@ -73,7 +73,7 @@ fn main() {
         );
 
         let t = Instant::now();
-        let tree = PackageTree::build(classes.clone());
+        let mut tree = PackageTree::build(classes.clone());
         println!(
             "  PackageTree::build       {:8.1} ms  ({} nodes)",
             ms(t.elapsed()),
@@ -86,11 +86,11 @@ fn main() {
 
         // Per-frame filter cost (old draw path ran this every frame).
         let t = Instant::now();
-        let hits = tree.filter("e");
+        let hits = tree.filter("e").len();
         println!(
             "  tree::filter             {:8.1} ms  ({} hits)",
             ms(t.elapsed()),
-            hits.len()
+            hits
         );
 
         // One class click: getclass (fresh APK open inside the pipeline).
@@ -123,38 +123,46 @@ fn main() {
             report.total_lines()
         );
 
-        // open_tabs() snapshot with 8 large tabs — the per-frame clone
-        // the old render path paid (status bar, tab strip, code area).
-        // Decompiled classes routinely reach hundreds of KiB, so
-        // synthesize ~512 KiB documents from the real decompiled class.
+        // Document path (replaces the old per-frame `open_tabs()`
+        // clone): build ~512 KiB documents from the real decompiled
+        // class — this is the worker-thread `Document::new` cost —
+        // then measure what a frame pays (`cache.get` = one Arc
+        // clone) and O(1) line slicing.
         let big_src = res
             .source
             .repeat((512 * 1024 / res.source.len().max(1)).max(1));
+        let mut cache = asc_gui::state::DocumentCache::default();
+        let t = Instant::now();
         for i in 0..8 {
-            let _ = session.open_tab(
-                format!("classes{i}.dex"),
+            cache.put(std::sync::Arc::new(asc_gui::state::Document::new(
                 format!("Lbench/Class{i};"),
+                format!("classes{i}.dex"),
                 big_src.clone(),
-            );
+            )));
         }
+        let build = ms(t.elapsed());
+        let bytes = cache.bytes();
         let t = Instant::now();
-        let tabs = session.open_tabs();
-        let snap = ms(t.elapsed());
-        let bytes: usize = tabs.iter().map(|t| t.source.len()).sum();
-        let t = Instant::now();
-        let _n = session.open_tabs().len();
-        let len_only = ms(t.elapsed());
+        let mut lines_sliced = 0usize;
+        for i in 0..8 {
+            let doc = cache.get(&format!("Lbench/Class{i};")).expect("doc");
+            for row in (0..doc.line_count()).step_by(64) {
+                let _ = doc.line(row);
+                lines_sliced += 1;
+            }
+        }
+        let frame = ms(t.elapsed());
         println!(
-            "  open_tabs() snapshot     {:8.1} ms  ({:.1} MiB across {} tabs; .len() variant {:.2} ms)",
-            snap,
+            "  DocumentCache 8×512 KiB  build {:6.1} ms  ({:.1} MiB); frame-path get+slice {:.3} ms ({} slices)",
+            build,
             bytes as f64 / (1024.0 * 1024.0),
-            tabs.len(),
-            len_only,
+            frame,
+            lines_sliced,
         );
 
-        // Syntax highlighting cost for one large document (old
-        // `activate()` ran this synchronously on the UI thread on
-        // every tab activation).
+        // Reference: what the old `activate()` paid synchronously on
+        // the UI thread per activation (now part of `Document::new`
+        // on the worker).
         let t = Instant::now();
         let mut block = false;
         let span_rows: Vec<Vec<(usize, usize, asc_gui::highlight::Token)>> = big_src

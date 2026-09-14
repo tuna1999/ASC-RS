@@ -26,6 +26,9 @@ pub enum Token {
     Plain,
 }
 
+/// One syntax span: byte range within a line + token flavor.
+pub type Span = (usize, usize, Token);
+
 /// Java keywords (types like `int` count as keywords; identifiers that
 /// happen to be lowercase stay plain).
 const KEYWORDS: &[&str] = &[
