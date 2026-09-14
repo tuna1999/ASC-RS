@@ -729,7 +729,10 @@ pub(crate) fn rewrite_annotation_set(
     new_offsets: &[u32],
     out: &mut Vec<u8>,
 ) -> Result<(), RebuildError> {
-    write_uleb128_to(out, new_offsets.len() as u64, crate::util::ULEB_GENERIC_MAX)?;
+    // `annotation_set_item.size` is a plain u32 (spec); it was
+    // uleb128-encoded here, which made every downstream consumer
+    // (including droidsaw) misparse the set and spin.
+    out.extend_from_slice(&(new_offsets.len() as u32).to_le_bytes());
     for &off in new_offsets {
         out.extend_from_slice(&off.to_le_bytes());
     }
@@ -741,7 +744,8 @@ pub(crate) fn rewrite_annotation_set_ref_list(
     new_offsets: &[u32],
     out: &mut Vec<u8>,
 ) -> Result<(), RebuildError> {
-    write_uleb128_to(out, new_offsets.len() as u64, crate::util::ULEB_GENERIC_MAX)?;
+    // `annotation_set_ref_list.size` is likewise a plain u32.
+    out.extend_from_slice(&(new_offsets.len() as u32).to_le_bytes());
     for &off in new_offsets {
         out.extend_from_slice(&off.to_le_bytes());
     }

@@ -21,7 +21,7 @@ use eframe::egui;
 
 use asc_query::{ClassConstraint, Query};
 
-use crate::session::{ClassEntry, SessionError, SourceTab, WorkspaceSession};
+use crate::session::{ClassEntry, MAX_OPEN_TABS, SessionError, SourceTab, WorkspaceSession};
 use crate::worker::{Job, JobResult, spawn_job};
 
 /// Main GUI state. Owns the session and any pending worker
@@ -37,8 +37,8 @@ pub struct AscApp {
     query_kind: QueryKind,
     /// Pending findrefs receiver (None when no job in flight).
     pending_findrefs: Option<Receiver<JobResult>>,
-    /// Pending getclass receiver.
-    pending_getclass: Option<Receiver<JobResult>>,
+    /// Pending getclass receivers (multiple clicks may queue jobs).
+    pending_getclass: Vec<Receiver<JobResult>>,
     /// Last completed findrefs report (displayed in the right panel).
     last_findrefs: Option<FindRefsView>,
     /// Currently selected class (clicked in the left tree).
@@ -73,7 +73,7 @@ impl AscApp {
             query_input: String::from("ClockFace"),
             query_kind: QueryKind::String,
             pending_findrefs: None,
-            pending_getclass: None,
+            pending_getclass: Vec::new(),
             last_findrefs: None,
             selected_class: None,
             last_error: None,
@@ -106,12 +106,9 @@ impl AscApp {
 
     /// Try to decompile the currently selected class.
     fn start_getclass(&mut self, target: String, ctx: &egui::Context) {
-        if self.pending_getclass.is_some() {
-            return;
-        }
         let apk = self.session.path().to_path_buf();
         let rx = spawn_job(Job::GetClass { apk, target });
-        self.pending_getclass = Some(rx);
+        self.pending_getclass.push(rx);
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
@@ -156,7 +153,8 @@ impl AscApp {
                 }
             }
         }
-        if let Some(rx) = self.pending_getclass.as_ref() {
+        let pending = std::mem::take(&mut self.pending_getclass);
+        for rx in pending {
             match rx.try_recv() {
                 Ok(JobResult::GetClass { target, result }) => {
                     match result {
@@ -171,18 +169,17 @@ impl AscApp {
                             self.last_error = Some(format!("getclass: {e}"));
                         }
                     }
-                    self.pending_getclass = None;
                     ctx.request_repaint();
                 }
                 Ok(other) => {
                     self.last_error = Some(format!("unexpected getclass result: {other:?}"));
-                    self.pending_getclass = None;
+                    ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.pending_getclass.push(rx);
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.pending_getclass = None;
                     ctx.request_repaint();
                 }
             }
@@ -247,8 +244,9 @@ impl eframe::App for AscApp {
             .show(ctx, |ui| {
                 ui.heading("Classes");
                 ui.label(format!(
-                    "{} DEX(es), up to N open tabs",
-                    self.session.dex_entries().len()
+                    "{} DEX(es), up to {} open tabs",
+                    self.session.dex_entries().len(),
+                    MAX_OPEN_TABS
                 ));
                 let classes = self.session.all_classes();
                 match classes {
@@ -263,6 +261,17 @@ impl eframe::App for AscApp {
                                     .clicked()
                                 {
                                     self.selected_class = Some(c.descriptor.clone());
+                                    // Single click decompiles immediately
+                                    // (the old two-step select-then-press
+                                    // button flow was undiscoverable).
+                                    let already_open = self
+                                        .session
+                                        .open_tabs()
+                                        .iter()
+                                        .any(|t| t.descriptor == c.descriptor);
+                                    if !already_open {
+                                        self.start_getclass(c.descriptor.clone(), ctx);
+                                    }
                                 }
                             }
                             if list.len() > 2000 {
@@ -311,17 +320,15 @@ impl eframe::App for AscApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if let Some(sel) = &self.selected_class {
-                    if ui.button(format!("Decompile {sel}")).clicked() {
-                        self.start_getclass(sel.clone(), ctx);
-                    }
+                if let Some(fr) = &self.last_error.take() {
+                    ui.colored_label(egui::Color32::RED, format!("error: {fr}"));
                 }
-                ui.label(format!("{} tab(s) open", self.session.open_tabs().len()));
             });
-            ui.separator();
             let tabs = self.session.open_tabs();
+            ui.label(format!("{} tab(s) open", tabs.len()));
+            ui.separator();
             if tabs.is_empty() {
-                ui.label("No source tabs open — click a class on the left, then press Decompile.");
+                ui.label("No source tabs open — click a class in the left panel to decompile it.");
                 return;
             }
             for tab in &tabs {
@@ -347,4 +354,64 @@ fn draw_source_tab(ui: &mut egui::Ui, tab: &SourceTab) {
 /// directly).
 pub fn list_classes(session: &WorkspaceSession) -> Result<Vec<ClassEntry>, SessionError> {
     session.all_classes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (user-reported): clicking a class in the left panel
+    /// must lead to an open source tab. Exercises the exact queue →
+    /// worker → poll → `open_tab` path `update` drives, headless
+    /// (`egui::Context::default()` needs no window).
+    #[test]
+    fn getclass_job_opens_source_tab() {
+        let apk =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+        if !apk.exists() {
+            eprintln!("corpus fixture missing; skipping");
+            return;
+        }
+        let session = WorkspaceSession::open(&apk).expect("open");
+        let mut app = AscApp::new(session);
+        let ctx = egui::Context::default();
+
+        let target = "Lcom/google/android/material/timepicker/ClockFaceView;".to_string();
+        // A second, different class to prove the queue drains both.
+        let other = app
+            .session
+            .all_classes()
+            .expect("classes")
+            .into_iter()
+            .map(|c| c.descriptor)
+            .find(|d| d != &target)
+            .expect("at least two distinct classes");
+
+        app.start_getclass(target.clone(), &ctx);
+        app.start_getclass(other.clone(), &ctx);
+        assert_eq!(app.pending_getclass.len(), 2, "both jobs queued");
+
+        // Poll until both workers reply (bounded wait).
+        for _ in 0..600 {
+            app.poll_workers(&ctx);
+            if app.session.open_tabs().len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let tabs = app.session.open_tabs();
+        for want in [&target, &other] {
+            let tab = tabs
+                .iter()
+                .find(|t| &t.descriptor == want)
+                .unwrap_or_else(|| panic!("tab for {want} must open; got {tabs:?}"));
+            assert!(!tab.source.is_empty(), "source for {want} non-empty");
+        }
+        assert!(
+            app.last_error.is_none(),
+            "unexpected error: {:?}",
+            app.last_error
+        );
+    }
 }

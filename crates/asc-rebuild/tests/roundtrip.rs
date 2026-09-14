@@ -342,6 +342,117 @@ fn rebuilt_dex_decompiles_with_independent_backend() {
     );
 }
 
+/// Regression (user-reported GUI hang): an inner class of an interface
+/// (`INotificationSideChannel$Default`) carries dalvik Throws /
+/// InnerClass / EnclosingClass annotations. The rebuilt DEX used to
+/// (a) uleb128-encode `annotation_set_item.size` (spec: u32) and
+/// (b) emit a map_list with wrong type codes and byte-sizes in the
+/// count field — droidsaw then spun forever inside its annotation
+/// collector. Rebuild must decompile this class promptly.
+#[test]
+fn rebuilt_inner_interface_class_decompiles() {
+    let Some(bytes) = read_bytes("workload_classes.dex") else {
+        eprintln!("workload_classes.dex missing; skipping");
+        return;
+    };
+    let view = DexView::parse(&bytes).expect("source parses");
+    let target = "Landroid/support/v4/app/INotificationSideChannel$Default;";
+    let out = rebuild(&view, target).expect("rebuild succeeds");
+
+    // The annotation directory chain must resolve with our own parser:
+    // directory -> method annotation sets (u32 count!) -> items.
+    let rv = DexView::parse(&out.bytes).expect("rebuilt parses");
+    let cd = rv.class_def(0).expect("one class_def");
+    if cd.annotations_off != 0 {
+        let dir = rv
+            .annotations_directory(cd.annotations_off)
+            .expect("directory parses")
+            .expect("directory present");
+        for ma in &dir.methods {
+            if ma.annotations_off != 0 {
+                rv.annotation_set(ma.annotations_off)
+                    .expect("annotation_set parses with u32 size")
+                    .annotation_offs
+                    .iter()
+                    .filter(|&&off| off != 0)
+                    .for_each(|&off| {
+                        rv.annotation_item(off)
+                            .expect("annotation item parses")
+                            .expect("item present");
+                    });
+            }
+        }
+    }
+
+    // And the independent backend must finish (it used to loop).
+    let backend = asc_decompile::droidsaw::DroidsawBackend::new();
+    use asc_decompile::ClassDecompiler as _;
+    let src = backend
+        .decompile(&out.bytes, target)
+        .expect("droidsaw decompiles the rebuilt DEX without spinning");
+    assert!(src.contains("Default"), "source mentions the class");
+}
+
+/// Regression (map_list): entries must use ART/d8 type codes, carry
+/// ITEM counts (not byte sizes), and be sorted by ascending offset —
+/// verified against the map_list of every corpus DEX.
+#[test]
+fn rebuilt_map_list_matches_art_codes_and_counts() {
+    let Some(bytes) = read_bytes("workload_classes.dex") else {
+        eprintln!("workload_classes.dex missing; skipping");
+        return;
+    };
+    let view = DexView::parse(&bytes).expect("source parses");
+    let out = rebuild(
+        &view,
+        "Landroid/support/v4/app/INotificationSideChannel$Default;",
+    )
+    .expect("rebuild succeeds");
+    let rv = DexView::parse(&out.bytes).expect("rebuilt parses");
+
+    let mut prev_off: i64 = -1;
+    let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+    for entry in rv.map_list().unwrap() {
+        let item = entry.unwrap();
+        // Offsets strictly ascending (spec).
+        assert!(
+            (item.offset as i64) > prev_off,
+            "map items must be sorted by offset, got {item:?} after {prev_off}"
+        );
+        prev_off = item.offset as i64;
+        counts.insert(item.ty, item.size);
+    }
+    // ID-table counts must equal the header pool counts exactly.
+    assert_eq!(
+        counts.get(&0x0001),
+        Some(&rv.string_count()),
+        "string_id count"
+    );
+    assert_eq!(counts.get(&0x0002), Some(&rv.type_count()), "type_id count");
+    assert_eq!(
+        counts.get(&0x0003),
+        Some(&rv.proto_count()),
+        "proto_id count"
+    );
+    assert_eq!(
+        counts.get(&0x0005),
+        Some(&rv.method_count()),
+        "method_id count"
+    );
+    // string_data count == string_id count (d8 invariant).
+    assert_eq!(
+        counts.get(&0x2002),
+        Some(&rv.string_count()),
+        "string_data_item count"
+    );
+    // The map must list itself.
+    assert_eq!(counts.get(&0x1000), Some(&1), "map_list self entry");
+    // code_item / class_data counts are item counts (5 methods with
+    // code, 1 class_data), never the section byte size.
+    assert_eq!(counts.get(&0x2001), Some(&5), "code_item item count");
+    assert_eq!(counts.get(&0x2000), Some(&1), "class_data item count");
+}
+
 /// Deep pool validation: resolve EVERY type's descriptor string, every
 /// method's name, every field's name in the rebuilt DEX. This is the
 /// class of check that would have caught the type_ids descriptor remap
