@@ -75,6 +75,8 @@ pub struct AscApp {
     pub(crate) last_error: Option<String>,
     pub(crate) commands: Vec<Command>,
     pub(crate) initial_path: Option<PathBuf>,
+    /// Desired window title (pushed to the viewport on change).
+    pub(crate) window_title: String,
 }
 
 impl AscApp {
@@ -115,6 +117,7 @@ impl AscApp {
             last_error: None,
             commands: Vec::new(),
             initial_path,
+            window_title: "asc-gui".to_string(),
         }
     }
 
@@ -169,6 +172,12 @@ impl AscApp {
     fn apply_artifact(&mut self, artifact: LoadedArtifact) {
         // Invalidate every in-flight result from the old session.
         self.tasks.bump_generation();
+        let title = artifact
+            .session
+            .path()
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.session = Some(artifact.session);
         self.tree = PackageTree::build(artifact.classes);
         self.dex_counts = artifact.dex_counts;
@@ -181,6 +190,11 @@ impl AscApp {
         self.active_doc = None;
         self.pending_scroll = None;
         self.loading_artifact = false;
+        self.window_title = if title.is_empty() {
+            "asc-gui".to_string()
+        } else {
+            format!("asc-gui — {title}")
+        };
         self.set_status("artifact ready", true);
     }
 
@@ -572,6 +586,13 @@ impl eframe::App for AscApp {
 
         // 1. Drain worker results first so this frame sees them.
         self.poll_workers(ctx);
+        let want_title = self.window_title.clone();
+        if want_title != "asc-gui" {
+            let current = ctx.input(|i| i.viewport().title.clone());
+            if current.as_deref() != Some(want_title.as_str()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(want_title));
+            }
+        }
 
         // 2. Frame-level shortcuts.
         self.frame_shortcuts(ctx);
