@@ -18,6 +18,8 @@ eframe = { version = "0.33", default-features = false, features = ["default_font
 # parking_lot gives us a non-poisoning Mutex/RwLock — preferred over
 # std::sync::Mutex in the GUI's hot path (see CLAUDE rule rs-parking-lot).
 parking_lot = "0.12"
+# Native file dialogs (File ▸ Open…, Ctrl+O).
+rfd = "0.15"
 
 [dev-dependencies]
 # Used by the --selfcheck integration test to open the corpus fixture.
