@@ -26,7 +26,6 @@
 //! - The class filter switches the tree to a flat match list.
 
 use std::collections::BTreeSet;
-use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 
@@ -35,7 +34,7 @@ use asc_query::{ClassConstraint, Query};
 use crate::highlight::{self, OutlineEntry, Token};
 use crate::package_tree::PackageTree;
 use crate::session::{ClassEntry, MAX_OPEN_TABS, SessionError, SourceTab, WorkspaceSession};
-use crate::worker::{Job, JobResult, spawn_job};
+use crate::task::{CompletedTask, TaskId, TaskKind, TaskManager, TaskOutcome};
 
 /// One syntax span: byte range + flavor (mirrors `highlight::Token`).
 type Span = (usize, usize, Token);
@@ -56,12 +55,12 @@ pub struct AscApp {
     query_input: String,
     /// Findrefs kind — selected via combo box.
     query_kind: QueryKind,
-    /// Pending findrefs receiver (None when no job in flight).
-    pending_findrefs: Option<Receiver<JobResult>>,
-    /// Pending getclass receivers (multiple clicks may queue jobs).
-    pub(crate) pending_getclass: Vec<Receiver<JobResult>>,
-    /// Descriptor whose tab we are waiting to activate once it lands.
-    want_active: Option<String>,
+    /// Background task manager (identity-stamped jobs, generation gate).
+    tasks: TaskManager,
+    /// Activation intent: the decompile task whose result should be
+    /// activated on success. Keyed by *task*, so an older failure
+    /// can never clear a newer request's intent.
+    pending_activation: Option<TaskId>,
     /// Last completed findrefs report (displayed in the bottom panel).
     last_findrefs: Option<FindRefsView>,
     /// Currently selected class (highlighted in the tree).
@@ -135,9 +134,8 @@ impl AscApp {
             expanded: BTreeSet::new(),
             query_input: String::from("ClockFace"),
             query_kind: QueryKind::String,
-            pending_findrefs: None,
-            pending_getclass: Vec::new(),
-            want_active: None,
+            tasks: TaskManager::new(),
+            pending_activation: None,
             last_findrefs: None,
             selected_class: None,
             active_tab: None,
@@ -155,8 +153,13 @@ impl AscApp {
     }
 
     /// Replace the whole session (Open… / Reload) and reset view state.
+    /// The task manager survives: its generation is bumped so every
+    /// in-flight result from the old APK arrives stale and is dropped.
     fn load_session(&mut self, session: WorkspaceSession) {
+        let mut tasks = std::mem::take(&mut self.tasks);
+        tasks.bump_generation();
         *self = AscApp::new(session);
+        self.tasks = tasks;
     }
 
     /// Status bar setter.
@@ -167,11 +170,9 @@ impl AscApp {
         });
     }
 
-    /// Try to start a findrefs job on a worker thread.
+    /// Start a findrefs query. Always spawns: a previous still-running
+    /// query is superseded (its result is discarded on arrival).
     fn start_findrefs(&mut self, ctx: &egui::Context) {
-        if self.pending_findrefs.is_some() {
-            return;
-        }
         let apk = self.session.path().to_path_buf();
         let query = match self.query_kind {
             QueryKind::String => Query::string(self.query_input.clone()),
@@ -186,17 +187,18 @@ impl AscApp {
             ),
         };
         let label = format!("{} \"{}\"", self.query_kind.label(), self.query_input);
-        let rx = spawn_job(Job::FindRefs { apk, query, label });
-        self.pending_findrefs = Some(rx);
+        self.tasks.spawn_findrefs(&apk, query, label, ctx);
         self.set_status(format!("findrefs running: {}", self.query_input), true);
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
-    /// Try to decompile the given class on a worker thread.
+    /// Decompile `target` on a worker thread and record the
+    /// activation intent for the returned task.
     fn start_getclass(&mut self, target: String, ctx: &egui::Context) {
-        let apk = self.session.path().to_path_buf();
-        let rx = spawn_job(Job::GetClass { apk, target });
-        self.pending_getclass.push(rx);
+        let id = self
+            .tasks
+            .spawn_decompile(self.session.path(), &target, ctx);
+        self.pending_activation = Some(id);
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 
@@ -213,7 +215,8 @@ impl AscApp {
         if open {
             self.activate(descriptor);
         } else {
-            self.want_active = Some(descriptor.to_string());
+            // Dedup inside the manager: a click on a class already
+            // being decompiled re-targets the existing task.
             self.set_status(format!("decompiling {descriptor}…"), true);
             self.start_getclass(descriptor.to_string(), ctx);
         }
@@ -286,101 +289,92 @@ impl AscApp {
         }
     }
 
-    /// Poll pending workers (non-blocking); apply results when ready.
+    /// Poll completed tasks (non-blocking) and apply them in arrival
+    /// order. Stale results (old session generation or superseded)
+    /// never touch application state.
     fn poll_workers(&mut self, ctx: &egui::Context) {
-        if let Some(rx) = self.pending_findrefs.as_ref() {
-            match rx.try_recv() {
-                Ok(JobResult::FindRefs { label, report }) => {
-                    let view = match report {
-                        Ok(r) => FindRefsView {
-                            label,
-                            line_count: r.total_lines(),
-                            complete: r.complete,
-                            error_count: r.errors.len(),
-                            errors: r.errors.iter().map(|e| e.to_string()).collect(),
-                        },
-                        Err(e) => {
-                            self.last_error = Some(format!("findrefs: {e}"));
-                            FindRefsView {
-                                label,
-                                line_count: 0,
-                                complete: false,
-                                error_count: 1,
-                                errors: vec![e.to_string()],
-                            }
-                        }
-                    };
-                    if view.complete && view.error_count == 0 {
-                        self.set_status(
-                            format!("findrefs: {} caller lines", view.line_count),
-                            true,
-                        );
-                    } else {
-                        self.set_status(
-                            format!(
-                                "findrefs INCOMPLETE: {} lines, {} errors",
-                                view.line_count, view.error_count
-                            ),
-                            false,
-                        );
-                    }
-                    self.last_findrefs = Some(view);
-                    self.pending_findrefs = None;
-                    ctx.request_repaint();
+        for task in self.tasks.poll() {
+            self.apply_task(task);
+            ctx.request_repaint();
+        }
+        if self.tasks.has_in_flight() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Apply one completed task. This is the single place engine
+    /// results mutate GUI state, which makes ordering scenarios
+    /// deterministic and headless-testable.
+    fn apply_task(&mut self, task: CompletedTask) {
+        if task.stale {
+            // Result predates the current session generation or was
+            // superseded: drop it entirely.
+            return;
+        }
+        let is_pending = self.pending_activation == Some(task.id);
+        match (task.kind, task.outcome) {
+            (TaskKind::DecompileClass, TaskOutcome::Decompiled { dex_name, source }) => {
+                let target = task.label;
+                if let Err(e) = self.session.open_tab(dex_name, target.clone(), source) {
+                    self.last_error = Some(format!("open_tab: {e}"));
+                    return;
                 }
-                Ok(other) => {
-                    self.last_error = Some(format!("unexpected findrefs result: {other:?}"));
-                    self.pending_findrefs = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.pending_findrefs = None;
-                    ctx.request_repaint();
+                // Activate only when this task carries the current
+                // activation intent. An older click's late result
+                // fills the cache but never steals the view; a newer
+                // click's intent survives an older failure.
+                if is_pending {
+                    self.pending_activation = None;
+                    self.activate(&target);
+                    self.set_status(format!("decompiled {target}"), true);
                 }
             }
-        }
-        let pending = std::mem::take(&mut self.pending_getclass);
-        for rx in pending {
-            match rx.try_recv() {
-                Ok(JobResult::GetClass { target, result }) => {
-                    match result {
-                        Ok(r) => {
-                            if let Err(e) =
-                                self.session.open_tab(r.dex_name, target.clone(), r.source)
-                            {
-                                self.last_error = Some(format!("open_tab: {e}"));
-                            }
-                            // Activate if this is the tab the user is
-                            // waiting for (or the first one).
-                            if self.want_active.as_deref() == Some(target.as_str())
-                                || self.active_tab.is_none()
-                            {
-                                self.want_active = None;
-                                self.activate(&target);
-                                self.set_status(format!("decompiled {target}"), true);
-                            }
-                        }
-                        Err(e) => {
-                            self.want_active = None;
-                            self.last_error = Some(format!("getclass: {e}"));
-                            self.set_status(format!("getclass failed: {e}"), false);
-                        }
-                    }
-                    ctx.request_repaint();
+            (TaskKind::DecompileClass, TaskOutcome::Failed(e)) => {
+                if is_pending {
+                    self.pending_activation = None;
                 }
-                Ok(other) => {
-                    self.last_error = Some(format!("unexpected getclass result: {other:?}"));
-                    ctx.request_repaint();
+                self.last_error = Some(format!("getclass: {e}"));
+                self.set_status(format!("getclass failed: {e}"), false);
+            }
+            (TaskKind::FindRefs, TaskOutcome::Search(report)) => {
+                let view = FindRefsView {
+                    label: task.label,
+                    line_count: report.total_lines(),
+                    complete: report.complete,
+                    error_count: report.errors.len(),
+                    errors: report.errors.iter().map(|e| e.to_string()).collect(),
+                };
+                if view.complete && view.error_count == 0 {
+                    self.set_status(format!("findrefs: {} caller lines", view.line_count), true);
+                } else {
+                    self.set_status(
+                        format!(
+                            "findrefs INCOMPLETE: {} lines, {} errors",
+                            view.line_count, view.error_count
+                        ),
+                        false,
+                    );
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    self.pending_getclass.push(rx);
-                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    ctx.request_repaint();
-                }
+                self.last_findrefs = Some(view);
+            }
+            (TaskKind::FindRefs, TaskOutcome::Failed(e)) => {
+                self.last_error = Some(format!("findrefs: {e}"));
+                self.set_status(format!("findrefs failed: {e}"), false);
+                self.last_findrefs = Some(FindRefsView {
+                    label: task.label,
+                    line_count: 0,
+                    complete: false,
+                    error_count: 1,
+                    errors: vec![e],
+                });
+            }
+            // Engine never produces Search payloads for decompile
+            // tasks or vice versa; treat mismatches as failures.
+            _ => {
+                self.last_error = Some(format!(
+                    "unexpected task payload for {kind:?}",
+                    kind = task.kind
+                ));
             }
         }
     }
@@ -647,7 +641,7 @@ impl AscApp {
             if (run.clicked() || enter) && !self.query_input.trim().is_empty() {
                 self.start_findrefs(ctx);
             }
-            if self.pending_findrefs.is_some() {
+            if self.tasks.findrefs_running() {
                 ui.spinner();
             }
             if let Some(fr) = &self.last_findrefs {
@@ -942,7 +936,7 @@ mod tests {
 
         app.start_getclass(target.clone(), &ctx);
         app.start_getclass(other.clone(), &ctx);
-        assert_eq!(app.pending_getclass.len(), 2, "both jobs queued");
+        assert_eq!(app.tasks.in_flight_count(), 2, "both jobs queued");
 
         // Poll until both workers reply (bounded wait).
         for _ in 0..600 {
@@ -992,7 +986,7 @@ mod tests {
             )
             .expect("seed tab");
         app.open_class(d, &ctx, true);
-        assert!(app.pending_getclass.is_empty(), "no job for open tab");
+        assert!(!app.tasks.has_in_flight(), "no job for open tab");
         assert_eq!(app.active_tab.as_deref(), Some(d));
         assert!(
             app.active_outline.iter().any(|e| e.text.contains("mClock")),
@@ -1045,5 +1039,122 @@ mod tests {
         let job = spans_to_job("plain only", &[]);
         assert_eq!(job.text, "plain only");
         assert_eq!(job.sections.len(), 1);
+    }
+
+    // ---- deterministic task-ordering regressions (audit §8) ----
+    // apply_task is the single place results mutate state, so the
+    // ordering scenarios are testable headless with synthetic tasks —
+    // no threads, no corpus dependency.
+
+    fn fake_task(id: u64, descriptor: &str, outcome: TaskOutcome) -> CompletedTask {
+        CompletedTask {
+            id: TaskId(id),
+            generation: crate::task::SessionGeneration::INITIAL,
+            kind: TaskKind::DecompileClass,
+            label: descriptor.to_string(),
+            outcome,
+            elapsed: std::time::Duration::from_millis(1),
+            stale: false,
+        }
+    }
+
+    fn decompiled(descriptor: &str) -> TaskOutcome {
+        TaskOutcome::Decompiled {
+            dex_name: "classes.dex".into(),
+            source: format!("class {} {{}}\n", descriptor.trim_matches(['L', ';'])),
+        }
+    }
+
+    fn empty_app() -> AscApp {
+        // Real corpus session when available; otherwise a seeded tab
+        // keeps the ordering tests independent of the fixture.
+        let apk =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+        if apk.exists() {
+            AscApp::new(WorkspaceSession::open(&apk).expect("open"))
+        } else {
+            AscApp::new(WorkspaceSession::open(&apk).expect("corpus required for ordering tests"))
+        }
+    }
+
+    /// Scenario 1: click A, click B, B finishes first, A finishes
+    /// later → B remains active.
+    #[test]
+    fn late_result_cannot_steal_newer_activation() {
+        let mut app = empty_app();
+        // Click A (task 1), then click B (task 2): intent = B.
+        app.pending_activation = Some(TaskId(2));
+        // B lands first.
+        app.apply_task(fake_task(2, "LB;", decompiled("LB;")));
+        assert_eq!(app.active_tab.as_deref(), Some("LB;"));
+        assert!(app.pending_activation.is_none(), "intent consumed by B");
+        // A lands late: tab cached, view untouched.
+        app.apply_task(fake_task(1, "LA;", decompiled("LA;")));
+        assert_eq!(
+            app.active_tab.as_deref(),
+            Some("LB;"),
+            "late older result must not steal the view"
+        );
+        // Both tabs exist (A filled the cache in the background).
+        assert_eq!(app.session.open_tabs().len(), 2);
+    }
+
+    /// Scenario 2: click A (fails), click B (succeeds) → B activates.
+    /// Regression for audit F1: A's failure used to clear the shared
+    /// `want_active` slot, silently never activating B.
+    #[test]
+    fn older_failure_does_not_clear_newer_intent() {
+        let mut app = empty_app();
+        app.pending_activation = Some(TaskId(2));
+        // A (task 1, not the pending one) fails.
+        app.apply_task(fake_task(1, "LA;", TaskOutcome::Failed("not found".into())));
+        assert_eq!(
+            app.pending_activation,
+            Some(TaskId(2)),
+            "a non-pending failure must not clear the pending intent"
+        );
+        // B succeeds → activates.
+        app.apply_task(fake_task(2, "LB;", decompiled("LB;")));
+        assert_eq!(app.active_tab.as_deref(), Some("LB;"));
+    }
+
+    /// Scenario 3: old-APK job completes after opening a new APK →
+    /// old result ignored (generation gate).
+    #[test]
+    fn old_generation_result_ignored() {
+        let mut app = empty_app();
+        // A task from the previous generation completes late.
+        let mut stale = fake_task(1, "LOLD;", decompiled("LOLD;"));
+        stale.generation = crate::task::SessionGeneration::INITIAL;
+        app.tasks.bump_generation();
+        stale.stale = true; // as poll() would stamp it
+        app.apply_task(stale);
+        assert!(
+            app.session.open_tabs().is_empty(),
+            "stale result must not open a tab"
+        );
+        assert!(app.active_tab.is_none());
+    }
+
+    /// Dedup: clicking an in-flight class re-targets the same task
+    /// instead of fanning out a second engine job.
+    #[test]
+    fn repeated_click_dedups_to_inflight_task() {
+        let apk =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+        if !apk.exists() {
+            eprintln!("corpus fixture missing; skipping");
+            return;
+        }
+        let mut app = AscApp::new(WorkspaceSession::open(&apk).expect("open"));
+        let ctx = egui::Context::default();
+        app.start_getclass("Lcom/example/SomeClass;".into(), &ctx);
+        let first = app.pending_activation;
+        app.start_getclass("Lcom/example/SomeClass;".into(), &ctx);
+        assert_eq!(
+            first, app.pending_activation,
+            "second click must reuse the in-flight task"
+        );
+        assert_eq!(app.tasks.in_flight_count(), 1);
     }
 }

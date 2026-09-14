@@ -13,7 +13,8 @@
 //!
 //! The session itself does no engine work — callers invoke
 //! [`asc_core::run_findrefs`] / [`asc_core::run_getclass`] on a worker
-//! thread and post results back via [`crate::worker::Job`].
+//! thread via [`crate::task::TaskManager`] and apply results on the
+//! UI thread.
 //!
 //! All caches are behind [`std::sync::Mutex`]es so the session can be
 //! shared with worker threads without an `Arc<Mutex<…>>` wrapper at
