@@ -4,5 +4,11 @@
 //! directly.
 
 pub mod documents;
+pub mod navigation;
+pub mod search;
+pub mod tabs;
 
 pub use documents::{DEFAULT_DOCUMENT_BUDGET, Document, DocumentCache};
+pub use navigation::{NavOrigin, NavigationHistory, NavigationLocation};
+pub use search::{SearchController, SearchKind, SearchResults, SearchRow};
+pub use tabs::{Tab, TabController, TabKind, TabStatus};
