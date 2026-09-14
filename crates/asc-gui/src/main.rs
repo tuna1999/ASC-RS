@@ -70,8 +70,21 @@ fn run_gui_mode(args: &[String]) -> ExitCode {
             }
         },
         None => {
-            eprintln!("asc-gui: pass an APK path, or use --selfcheck <apk>");
-            return ExitCode::from(2);
+            // No argument: show a native file picker instead of bailing.
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Android package", &["apk"])
+                .set_title("Open APK")
+                .pick_file()
+            else {
+                return ExitCode::SUCCESS; // user cancelled
+            };
+            match WorkspaceSession::open(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("asc-gui: cannot open {}: {e}", path.display());
+                    return ExitCode::from(1);
+                }
+            }
         }
     };
 

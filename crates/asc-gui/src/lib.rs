@@ -19,6 +19,8 @@
 use std::path::Path;
 
 pub mod app;
+pub mod highlight;
+pub mod package_tree;
 pub mod selfcheck;
 pub mod session;
 pub mod worker;

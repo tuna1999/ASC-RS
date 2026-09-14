@@ -243,6 +243,15 @@ impl WorkspaceSession {
         self.tabs.lock().iter().cloned().collect()
     }
 
+    /// Remove a tab by descriptor (tab close button). No-op when the
+    /// descriptor has no open tab.
+    pub fn close_tab(&self, descriptor: &str) {
+        let mut tabs = self.tabs.lock();
+        if let Some(pos) = tabs.iter().position(|t| t.descriptor == descriptor) {
+            tabs.remove(pos);
+        }
+    }
+
     /// Record a completed findrefs run.
     pub fn push_findrefs_history(&self, entry: FindRefsHistoryEntry) {
         let mut h = self.findrefs_history.lock();
