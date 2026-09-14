@@ -1,5 +1,35 @@
+# --- build artifacts ---
 /target
+fuzz/target
+**/*.rs.bk
+
+# --- frozen oracle clone + venv (re-clone per reference/FREEZE.md) ---
 /reference/asc/
 /reference/venv/
+
+# --- python scratch ---
 __pycache__/
 *.pyc
+.venv/
+
+# --- logs (any level) ---
+*.log
+
+# --- generated benchmark outputs (reproduce with benches/bench_ascrs.py) ---
+benches/ascrs_results.json
+benches/raw_runs.json
+benches/raw_runs.txt
+bench-out.txt
+
+# --- one-off evaluation outputs (verdicts live in BACKENDS.md) ---
+crates/asc-decompile/eval/
+
+# --- fuzzer runtime state (seeds/ and regress/ ARE tracked) ---
+crashes/
+fuzz/crashes/
+
+# --- debugging / session scratch ---
+gui-check*.png
+rebuilt-*.dex
+*.heap
+probe*.rs
