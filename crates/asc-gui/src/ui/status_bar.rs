@@ -40,11 +40,14 @@ impl AscApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mib = (self.documents.bytes() as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0;
                 ui.monospace(
-                    egui::RichText::new(format!("{} docs · {mib} MiB", self.documents.len()))
-                        .small()
-                        .color(T.text_disabled),
+                    egui::RichText::new(format!(
+                        "{} docs · {}",
+                        self.documents.len(),
+                        human_bytes(self.documents.bytes())
+                    ))
+                    .small()
+                    .color(T.text_disabled),
                 );
                 let (pos, len) = self.nav.position();
                 if len > 0 {
@@ -72,5 +75,16 @@ impl AscApp {
                 );
             });
         });
+    }
+}
+
+fn human_bytes(bytes: usize) -> String {
+    let b = bytes as f64;
+    if b < 1024.0 {
+        format!("{bytes} B")
+    } else if b < 1024.0 * 1024.0 {
+        format!("{:.1} KiB", b / 1024.0)
+    } else {
+        format!("{:.1} MiB", b / (1024.0 * 1024.0))
     }
 }

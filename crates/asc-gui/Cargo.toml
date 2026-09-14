@@ -22,7 +22,10 @@ parking_lot = "0.12"
 rfd = "0.15"
 
 [dev-dependencies]
-# Used by the --selfcheck integration test to open the corpus fixture.
+egui_kittest = { version = "0.33", features = ["wgpu"] }
+# Re-enable eframe's accesskit plumbing so egui-winit's PlatformOutput
+# pattern matches the (kittest-enabled) egui build in tests.
+eframe = { version = "0.33", features = ["accesskit"] }
 
 [[bin]]
 name = "asc-gui"

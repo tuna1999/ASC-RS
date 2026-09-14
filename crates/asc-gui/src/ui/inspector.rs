@@ -5,8 +5,9 @@
 use eframe::egui;
 
 use crate::app::AscApp;
+use crate::command::Command;
 use crate::design::DARK as T;
-use crate::state::TabStatus;
+use crate::state::{NavOrigin, TabStatus};
 
 impl AscApp {
     pub(crate) fn draw_inspector(&mut self, ui: &mut egui::Ui) {
@@ -19,6 +20,7 @@ impl AscApp {
         ui.add_space(2.0);
 
         self.inspector_symbol(ui);
+        self.inspector_outline(ui);
         self.inspector_dex(ui);
         self.inspector_references(ui);
         self.inspector_metadata(ui);
@@ -74,6 +76,70 @@ impl AscApp {
                 let _ = ui.weak("no symbol selected");
             }
         });
+    }
+
+    /// STRUCTURE: the computed document outline (methods and fields,
+    /// with line numbers). Clicking jumps to the line in the editor.
+    fn inspector_outline(&mut self, ui: &mut egui::Ui) {
+        let entries: Vec<(String, usize, bool)> = self
+            .active_doc
+            .as_ref()
+            .map(|d| {
+                d.outline
+                    .iter()
+                    .map(|e| (e.text.clone(), e.line, e.is_field))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let header = egui::CollapsingHeader::new(
+            egui::RichText::new("STRUCTURE")
+                .small()
+                .strong()
+                .color(T.text_secondary),
+        )
+        .default_open(true)
+        .show(ui, |ui| {
+            if entries.is_empty() {
+                ui.weak("open a class to see its structure");
+                return;
+            }
+            let mut jump: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .auto_shrink([false, false])
+                .show_rows(ui, T.row_list, entries.len(), |ui, range| {
+                    for idx in range {
+                        let (text, line, is_field) = &entries[idx];
+                        let rich = if *is_field {
+                            egui::RichText::new(text)
+                                .monospace()
+                                .small()
+                                .color(T.text_secondary)
+                        } else {
+                            egui::RichText::new(text).monospace().small().color(T.text)
+                        };
+                        let resp = ui
+                            .add(egui::Button::new(rich).frame(false))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("line {}", line + 1));
+                        if resp.clicked() {
+                            jump = Some(*line);
+                        }
+                    }
+                });
+            if let Some(line) = jump {
+                let descriptor = self.tabs.active_descriptor().map(str::to_string);
+                if let Some(descriptor) = descriptor {
+                    self.queue(Command::OpenClass {
+                        descriptor,
+                        pin: false,
+                        line: Some(line),
+                        origin: NavOrigin::Outline,
+                    });
+                }
+            }
+        });
+        let _ = header;
     }
 
     fn inspector_dex(&mut self, ui: &mut egui::Ui) {
