@@ -23,7 +23,7 @@ pub mod highlight;
 pub mod package_tree;
 pub mod selfcheck;
 pub mod session;
-pub mod worker;
+pub mod task;
 
 pub use crate::app::AscApp;
 pub use crate::selfcheck::{SelfcheckReport, run_selfcheck};
