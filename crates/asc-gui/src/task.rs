@@ -69,6 +69,9 @@ pub enum TaskKind {
     DecompileClass,
     /// `run_findrefs` for one query.
     FindRefs,
+    /// `run_findrefs` for "references to the selected class" (Analysis
+    /// menu). Routed to the REFERENCES bottom tab, not search results.
+    FindRefsClass,
 }
 
 impl TaskKind {
@@ -78,6 +81,7 @@ impl TaskKind {
             TaskKind::LoadArtifact => "open",
             TaskKind::DecompileClass => "decompile",
             TaskKind::FindRefs => "findrefs",
+            TaskKind::FindRefsClass => "references",
         }
     }
 }
@@ -305,6 +309,38 @@ impl TaskManager {
             move || run_findrefs_job(&apk, &query),
             ctx,
         )
+    }
+
+    /// Spawn a `run_findrefs` for references to one class (Analysis
+    /// menu). Supersedes only previous `FindRefsClass` tasks; global
+    /// searches are independent.
+    pub fn spawn_findrefs_class(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        for t in &mut self.in_flight {
+            if t.kind == TaskKind::FindRefsClass {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        let query = Query::type_(descriptor);
+        let label = format!("refs {descriptor}");
+        self.submit(
+            TaskKind::FindRefsClass,
+            label,
+            move || run_findrefs_job(&apk, &query),
+            ctx,
+        )
+    }
+
+    /// Is a class-references query running?
+    pub fn findrefs_class_running(&self) -> bool {
+        self.in_flight
+            .iter()
+            .any(|t| t.kind == TaskKind::FindRefsClass)
     }
 
     /// The in-flight decompile task for `descriptor`, if any.

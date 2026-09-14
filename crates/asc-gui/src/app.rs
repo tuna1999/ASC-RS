@@ -77,6 +77,11 @@ pub struct AscApp {
     pub(crate) initial_path: Option<PathBuf>,
     /// Desired window title (pushed to the viewport on change).
     pub(crate) window_title: String,
+    /// Selected row in the open palette.
+    pub(crate) palette_sel: usize,
+    /// Last "references to selected class" report (Analysis menu) —
+    /// shown in the REFERENCES bottom tab.
+    pub(crate) references: Option<SearchResults>,
 }
 
 impl AscApp {
@@ -118,6 +123,8 @@ impl AscApp {
             commands: Vec::new(),
             initial_path,
             window_title: "asc-gui".to_string(),
+            palette_sel: 0,
+            references: None,
         }
     }
 
@@ -186,6 +193,7 @@ impl AscApp {
         self.tabs.clear();
         self.nav = NavigationHistory::default();
         self.search.clear_results();
+        self.references = None;
         self.selected_class = None;
         self.active_doc = None;
         self.pending_scroll = None;
@@ -403,6 +411,27 @@ impl AscApp {
                     .set_results(SearchResults::from_error(task.label, e));
                 self.bottom_tab = BottomTab::Results;
             }
+            (TaskKind::FindRefsClass, TaskOutcome::Search(report)) => {
+                let results = SearchResults::from_report(task.label, &report);
+                let hits = results.rows.len();
+                let ok = results.complete && results.errors.is_empty();
+                self.references = Some(results);
+                self.bottom_tab = BottomTab::References;
+                self.set_status(
+                    if ok {
+                        format!("references: {hits} callers")
+                    } else {
+                        format!("references incomplete: {hits} callers")
+                    },
+                    ok,
+                );
+            }
+            (TaskKind::FindRefsClass, TaskOutcome::Failed(e)) => {
+                self.last_error = Some(format!("references: {e}"));
+                self.set_status(format!("references failed: {e}"), false);
+                self.references = Some(SearchResults::from_error(task.label, e));
+                self.bottom_tab = BottomTab::References;
+            }
             // Payload/kind mismatches cannot occur (engine contract);
             // surfaced instead of silently dropped.
             (kind, outcome) => {
@@ -456,9 +485,23 @@ impl AscApp {
                 }
             }
             Command::FindReferences => {
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::Results;
-                self.focus_search = true;
+                // References to the active class: an engine type-query
+                // keyed on the full descriptor, routed to the
+                // REFERENCES tab.
+                let descriptor = self
+                    .tabs
+                    .active_descriptor()
+                    .or(self.selected_class.as_deref())
+                    .map(str::to_string);
+                if let (Some(session), Some(descriptor)) = (&self.session, descriptor) {
+                    let apk = session.path().to_path_buf();
+                    self.tasks.spawn_findrefs_class(&apk, &descriptor, ctx);
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::References;
+                    self.set_status(format!("references: {descriptor}"), true);
+                } else {
+                    self.set_status("open a class first", false);
+                }
             }
             Command::FindInDocument => {
                 self.show_find = true;
@@ -638,6 +681,30 @@ impl eframe::App for AscApp {
                         self.queue(Command::QuickOpen);
                     }
                 });
+                ui.menu_button("Analysis", |ui| {
+                    let target = self
+                        .tabs
+                        .active_descriptor()
+                        .or(self.selected_class.as_deref())
+                        .map(super::ui::short_name)
+                        .unwrap_or_else(|| "—".to_string());
+                    let has_target = self
+                        .tabs
+                        .active_descriptor()
+                        .or(self.selected_class.as_deref())
+                        .is_some();
+                    if ui
+                        .add_enabled(
+                            has_target,
+                            egui::Button::new(format!("Find references to {target}")),
+                        )
+                        .on_disabled_hover_text("open a class first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::FindReferences);
+                    }
+                });
                 ui.menu_button("View", |ui| {
                     ui.toggle_value(&mut self.show_explorer, "Explorer  (Ctrl+1)");
                     ui.toggle_value(&mut self.show_inspector, "Inspector  (Ctrl+2)");
@@ -750,6 +817,60 @@ impl eframe::App for AscApp {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         self.draw_inspector(ui);
                     });
+                });
+        }
+
+        // 7b. Activity bar (far left): Explorer / Search / Tasks.
+        {
+            egui::SidePanel::left("activity_bar")
+                .exact_width(36.0)
+                .frame(egui::Frame::new().fill(design::DARK.panel_bg))
+                .show(ctx, |ui| {
+                    ui.with_layout(
+                        egui::Layout::top_down_justified(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(4.0);
+                            let toggle = |ui: &mut egui::Ui,
+                                          label: &'static str,
+                                          active: bool,
+                                          hint: &'static str|
+                             -> bool {
+                                let rich = egui::RichText::new(label).size(15.0).color(if active {
+                                    design::DARK.accent
+                                } else {
+                                    design::DARK.text_secondary
+                                });
+                                let btn = egui::Button::new(rich).frame(false);
+                                let resp = ui
+                                    .add(btn)
+                                    .on_hover_text(hint)
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                resp.clicked()
+                            };
+                            if toggle(ui, "▤", self.show_explorer, "Explorer (Ctrl+1)") {
+                                self.show_explorer = !self.show_explorer;
+                            }
+                            if toggle(
+                                ui,
+                                "🔍",
+                                self.show_bottom && self.bottom_tab == BottomTab::Results,
+                                "Search (Ctrl+Shift+F)",
+                            ) {
+                                self.show_bottom = true;
+                                self.bottom_tab = BottomTab::Results;
+                                self.focus_search = true;
+                            }
+                            if toggle(
+                                ui,
+                                "☰",
+                                self.show_bottom && self.bottom_tab == BottomTab::Tasks,
+                                "Tasks (Ctrl+3)",
+                            ) {
+                                self.show_bottom = true;
+                                self.bottom_tab = BottomTab::Tasks;
+                            }
+                        },
+                    );
                 });
         }
 
@@ -1092,5 +1213,178 @@ mod tests {
             });
         }
         assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    }
+
+    /// Render full-workspace reference screenshots to
+    /// `target/shots/*.png` via egui_kittest (software rasterizer —
+    /// pixels as the user sees them, no GPU needed). Opt-in:
+    /// `ASC_GUI_SHOTS=1 cargo test -p asc-gui --lib visual_shots`.
+    #[test]
+    fn visual_shots() {
+        if std::env::var("ASC_GUI_SHOTS").is_err() {
+            eprintln!("ASC_GUI_SHOTS not set; skipping");
+            return;
+        }
+        let Some(apk) = corpus() else {
+            eprintln!("corpus fixture missing; skipping");
+            return;
+        };
+        let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+        let _ = std::fs::remove_dir_all(&shots);
+        std::fs::create_dir_all(&shots).unwrap();
+        let save = |h: &mut egui_kittest::Harness<'_, AscApp>, name: &str| {
+            let img = h.render().expect("render");
+            let path = shots.join(format!("{name}.png"));
+            img.save(&path).unwrap();
+            eprintln!("shot: {}", path.display());
+        };
+
+        // Boot + load.
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .wgpu()
+            .build_state(
+                |ctx, app: &mut AscApp| {
+                    let mut frame = eframe::Frame::_new_kittest();
+                    app.update(ctx, &mut frame);
+                },
+                AscApp::new(None),
+            );
+        crate::design::apply(&h.ctx);
+        for _ in 0..5 {
+            h.step();
+        }
+        save(&mut h, "01_boot_empty");
+
+        // Load artifact as a background task.
+        let ctx0 = h.ctx.clone();
+        h.state_mut().open_path(&apk, &ctx0);
+        for _ in 0..300 {
+            h.step();
+            if h.state().session.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        assert!(h.state().session.is_some(), "artifact loaded");
+        save(&mut h, "02_loaded");
+
+        // Open a class (preview) — syntax-highlighted source + inspector.
+        h.state_mut().queue(Command::OpenClass {
+            descriptor: "Lcom/google/android/material/timepicker/ClockFaceView;".into(),
+            pin: false,
+            line: None,
+            origin: NavOrigin::Tree,
+        });
+        for _ in 0..300 {
+            h.step();
+            if h.state().active_doc.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        assert!(h.state().active_doc.is_some(), "class open");
+        save(&mut h, "03_class_open");
+
+        // String search with results in the bottom panel.
+        {
+            let app = h.state_mut();
+            app.search.input = "onCreate".into();
+            app.queue(Command::RunSearch);
+        }
+        for _ in 0..300 {
+            h.step();
+            if h.state().search.results().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        save(&mut h, "04_search_results");
+
+        // Find-in-document.
+        {
+            let app = h.state_mut();
+            app.show_find = true;
+            app.find_input = "view".into();
+            app.recompute_find_matches();
+        }
+        for _ in 0..2 {
+            h.step();
+        }
+        save(&mut h, "05_find");
+
+        // Quick-open palette with input + selection.
+        h.state_mut().queue(Command::QuickOpen);
+        for _ in 0..2 {
+            h.step();
+        }
+        h.state_mut().palette_input = "clock".into();
+        for _ in 0..2 {
+            h.step();
+        }
+        save(&mut h, "06_palette");
+
+        // Command palette.
+        h.state_mut().queue(Command::ToggleCommandPalette);
+        for _ in 0..2 {
+            h.step();
+        }
+        save(&mut h, "07_commands");
+
+        // References to the active class (Analysis ▸ Find references).
+        h.state_mut().queue(Command::FindReferences);
+        for _ in 0..300 {
+            h.step();
+            if h.state().references.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        assert!(h.state().references.is_some(), "references landed");
+        save(&mut h, "08_references");
+    }
+
+    /// Rasterize candidate glyphs so font coverage can be verified by
+    /// eye: `ASC_GUI_SHOTS=1 cargo test -p asc-gui --lib glyph_probe`.
+    /// Each row is `NNN` + one candidate glyph.
+    #[test]
+    fn glyph_probe() {
+        if std::env::var("ASC_GUI_SHOTS").is_err() {
+            eprintln!("ASC_GUI_SHOTS not set; skipping");
+            return;
+        }
+        const GLYPHS: &[&str] = &[
+            "🔍", "🔎", "⌖", "⌾", "⊙", "◎", "◉", "○", "■", "□", "✔", "✗", "⇄", "↻", "⟳", "ℹ", "⚡",
+            "☰", "▤", "⚙", "≡", "▰", "▣", "⏵", "⚠",
+        ];
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(420.0, 720.0))
+            .build_ui(|ui| {
+                egui::Grid::new("glyphs").num_columns(2).show(ui, |ui| {
+                    for (i, g) in GLYPHS.iter().enumerate() {
+                        ui.monospace(format!("{:03}", i));
+                        ui.monospace(egui::RichText::new(*g).size(22.0));
+                        ui.end_row();
+                    }
+                });
+            });
+        h.run();
+        let img = h.render().expect("render");
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/shots/09_glyph_probe.png");
+        img.save(&out).unwrap();
+        eprintln!("probe: {}", out.display());
     }
 }

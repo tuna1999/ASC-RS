@@ -167,3 +167,28 @@ the task/document model).
   per-symbol engine-driven findrefs is a search-with-class-filter run
   (no second engine path was invented).
 
+### Polish round 2 (2026-09-15, driven by rendered screenshots)
+
+Visual review via `egui_kittest` + wgpu software rasterization
+(`visual_shots` test, `ASC_GUI_SHOTS=1` — renders the real workspace
+to PNG, no GPU/window needed) surfaced and fixed:
+
+| finding | fix |
+|---|---|
+| palette invisible (`Window::fixed_size([w, 0])` pinned interior height to 0 — Ctrl+P showed nothing) | `min_width/max_width`, content-sized height; full keyboard nav (▲▼/Enter/Esc), selected-row highlight, footer hints |
+| bottom search-bar Enter only ran an *empty* query (inverted condition) | corrected |
+| `Command::FindReferences` existed but no UI queued it | Analysis menu + palette entry: engine `Query::type_` on the active descriptor → REFERENCES bottom tab (new `TaskKind::FindRefsClass`, own supersede lane) |
+| `Document.outline` computed on the worker but never rendered | STRUCTURE section in the inspector: fields dimmed, methods bright, click jumps to line |
+| design §2 activity bar missing | 36px far-left strip: ▤ Explorer / 🔍 Search / ☰ Tasks, accent when active |
+| glyph coverage unknown | `glyph_probe` test rasterizes candidates: `⌕ ✓ ⧉ ⋮ …` are tofu in egui default fonts; `🔍 ✔ ▤ ☰ ≡ ⚙ ▲▼ ▸▾ ⌘ ⚠ ●` render — UI now uses only covered glyphs |
+| tab strip: dead code, boxed close button, status glyph after the close button, no active indicator | accent underline on the active tab, status glyph inside the tab, hover-only ×, no separators |
+| editor empty state = one weak line in a void | structured quick-start (title + Ctrl+O/P/Shift+F/1-2-3 rows) |
+| search rows overflowed on long literals | 96-char ellipsis + pointing-hand cursor |
+| status bar `0 MiB` for small docs | human B/KiB/MiB |
+| find current-match vs other matches indistinguishable | current match = stronger tint + accent border; other matches lighter |
+
+Verification: 8 reference screenshots regenerated and inspected, all
+gates green (fmt, clippy 0, workspace tests, selfcheck, native launch
+smoke ≥8 s). Screenshot harness is permanent: `ASC_GUI_SHOTS=1 cargo
+test -p asc-gui --lib visual_shots`.
+

@@ -12,6 +12,7 @@ use crate::state::{NavOrigin, SearchKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
     Results,
+    References,
     Problems,
     Tasks,
 }
@@ -20,13 +21,19 @@ impl BottomTab {
     fn title(self) -> &'static str {
         match self {
             BottomTab::Results => "SEARCH RESULTS",
+            BottomTab::References => "REFERENCES",
             BottomTab::Problems => "PROBLEMS",
             BottomTab::Tasks => "TASKS",
         }
     }
 }
 
-const BOTTOM_TABS: [BottomTab; 3] = [BottomTab::Results, BottomTab::Problems, BottomTab::Tasks];
+const BOTTOM_TABS: [BottomTab; 4] = [
+    BottomTab::Results,
+    BottomTab::References,
+    BottomTab::Problems,
+    BottomTab::Tasks,
+];
 
 impl AscApp {
     pub(crate) fn draw_bottom_panel(&mut self, ui: &mut egui::Ui) {
@@ -46,10 +53,15 @@ impl AscApp {
                 ui.add_space(4.0);
             }
             // Right-aligned result summary.
-            if let Some(r) = self.search.results() {
+            let summary_source = if self.bottom_tab == BottomTab::References {
+                self.references.as_ref()
+            } else {
+                self.search.results()
+            };
+            if let Some(r) = summary_source {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (color, glyph) = if r.complete && r.errors.is_empty() {
-                        (T.success, "✓")
+                        (T.success, "✔")
                     } else {
                         (T.warning, "⚠")
                     };
@@ -69,6 +81,7 @@ impl AscApp {
 
         match self.bottom_tab {
             BottomTab::Results => self.draw_search_results(ui),
+            BottomTab::References => self.draw_references(ui),
             BottomTab::Problems => self.draw_problems(ui),
             BottomTab::Tasks => self.draw_tasks(ui),
         }
@@ -109,7 +122,7 @@ impl AscApp {
                 self.queue(Command::RunSearch);
             }
             let enter = run_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if enter && self.search.input.trim().is_empty() {
+            if enter && !self.search.input.trim().is_empty() {
                 self.queue(Command::RunSearch);
             }
             if self.focus_search {
@@ -117,6 +130,41 @@ impl AscApp {
                 self.focus_search = false;
             }
         });
+    }
+
+    /// REFERENCES tab: callers of the active class (Analysis ▸ Find
+    /// references, or the palette).
+    fn draw_references(&mut self, ui: &mut egui::Ui) {
+        let rows: Vec<(String, String, String, String)> = self
+            .references
+            .as_ref()
+            .map(|r| {
+                r.rows
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.dex_name.clone(),
+                            format!(
+                                "{}.{}",
+                                super::short_name(&row.caller_class),
+                                row.caller_member
+                            ),
+                            row.caller_class.clone(),
+                            row.matched.join(" "),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rows.is_empty() {
+            ui.weak(if self.tasks.findrefs_class_running() {
+                "collecting references…"
+            } else {
+                "no references — Analysis ▸ Find references to the open class"
+            });
+            return;
+        }
+        self.draw_result_rows(ui, rows, false);
     }
 
     /// Virtualized search-result rows: DEX · caller · matched
@@ -151,6 +199,18 @@ impl AscApp {
             });
             return;
         }
+        self.draw_result_rows(ui, rows, true);
+    }
+
+    /// Shared virtualized result rows. `track_selection` keeps the
+    /// clicked row highlighted in SEARCH RESULTS (the REFERENCES list
+    /// is transient).
+    fn draw_result_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        rows: Vec<(String, String, String, String)>,
+        track_selection: bool,
+    ) {
         let row_h = T.row_list;
         let selected = self.search.selected();
         let mut activate: Option<(usize, String)> = None;
@@ -159,11 +219,11 @@ impl AscApp {
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for idx in range {
                     let (dex, caller, descriptor, matched) = &rows[idx];
-                    let is_sel = selected == Some(idx);
+                    let is_sel = track_selection && selected == Some(idx);
                     let frame = if is_sel {
                         egui::Frame::new().fill(T.accent.linear_multiply(0.15))
                     } else {
-                        egui::Frame::new()
+                        egui::Frame::new().fill(T.panel_bg)
                     };
                     let resp = frame
                         .show(ui, |ui| {
@@ -178,19 +238,24 @@ impl AscApp {
                                     T.accent
                                 }));
                                 ui.monospace(
-                                    egui::RichText::new(matched).small().color(T.text_secondary),
+                                    egui::RichText::new(truncate(matched, 96))
+                                        .small()
+                                        .color(T.text_secondary),
                                 );
                             });
                         })
                         .response
-                        .interact(egui::Sense::click());
+                        .interact(egui::Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
                         activate = Some((idx, descriptor.clone()));
                     }
                 }
             });
         if let Some((idx, descriptor)) = activate {
-            self.search.select(Some(idx));
+            if track_selection {
+                self.search.select(Some(idx));
+            }
             self.queue(Command::OpenClass {
                 descriptor,
                 pin: false,
