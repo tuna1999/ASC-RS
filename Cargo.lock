@@ -187,10 +187,10 @@ dependencies = [
  "asc-dex",
  "asc-query",
  "asc-rebuild",
+ "droidsaw-dex",
  "serde",
  "serde_json",
  "smallvec",
- "tempfile",
  "thiserror 2.0.20",
  "zip",
 ]

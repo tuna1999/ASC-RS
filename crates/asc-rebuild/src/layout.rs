@@ -68,6 +68,20 @@ pub(crate) struct LayoutOut {
     pub call_site_arrays_off: u32,
     pub call_site_arrays_size: u32,
 
+    // Item counts for the map_list (map entries carry ITEM counts,
+    // never byte sizes — ART/d8 consumers iterate them; see
+    // `emit_map_list`).
+    pub string_data_count: u32,
+    pub interfaces_count: u32,
+    pub proto_type_list_count: u32,
+    pub static_values_count: u32,
+    pub debug_info_count: u32,
+    pub ann_item_count: u32,
+    pub ann_set_count: u32,
+    pub ann_ref_list_count: u32,
+    pub code_item_count: u32,
+    pub call_site_array_count: u32,
+
     pub string_ids_off: u32,
     pub type_ids_off: u32,
     pub proto_ids_off: u32,
@@ -134,6 +148,16 @@ impl Default for LayoutOut {
             method_handles_off: 0,
             class_defs_off: 0,
             map_off: 0,
+            string_data_count: 0,
+            interfaces_count: 0,
+            proto_type_list_count: 0,
+            static_values_count: 0,
+            debug_info_count: 0,
+            ann_item_count: 0,
+            ann_set_count: 0,
+            ann_ref_list_count: 0,
+            code_item_count: 0,
+            call_site_array_count: 0,
             target_new_type_idx: 0,
             kept_string_count: 0,
             kept_type_count: 0,
@@ -187,6 +211,7 @@ pub(crate) fn emit(
         push_raw_string_data(&mut out, &sref);
     }
     lo.string_data_size = (out.len() as u32) - lo.string_data_off;
+    lo.string_data_count = closure.strings.len() as u32;
 
     // ---------- type_list (interfaces) ----------
     let mut proto_params_off: Vec<u32> = vec![0; maps.protos.len() as usize];
@@ -220,6 +245,7 @@ pub(crate) fn emit(
                 out.extend_from_slice(&new_idx.to_le_bytes());
             }
             lo.interfaces_size = (out.len() as u32) - lo.interfaces_off;
+            lo.interfaces_count = 1;
         }
     }
 
@@ -247,6 +273,7 @@ pub(crate) fn emit(
             out.extend_from_slice(&new_t.to_le_bytes());
         }
         proto_params_off[new_idx as usize] = tl_off;
+        lo.proto_type_list_count += 1;
     }
     lo.proto_type_lists_size = if lo.proto_type_lists_off == out.len() as u32 {
         0
@@ -263,6 +290,7 @@ pub(crate) fn emit(
             let rewritten = rewrite_static_values(&arr.0, maps)?;
             out.extend_from_slice(&rewritten);
             lo.static_values_size = (out.len() as u32) - lo.static_values_off;
+            lo.static_values_count = 1;
         }
     }
 
@@ -328,6 +356,7 @@ pub(crate) fn emit(
                 new_item_off_map.insert(old_item_off, start);
             }
             lo.ann_items_size = (out.len() as u32) - lo.ann_items_off;
+            lo.ann_item_count = new_item_off_map.len() as u32;
 
             let mut set_offs: Vec<u32> = Vec::new();
             if dir.class_annotations_off != 0 {
@@ -360,6 +389,7 @@ pub(crate) fn emit(
                 new_set_off_map.insert(old_set_off, start);
             }
             lo.ann_sets_size = (out.len() as u32) - lo.ann_sets_off;
+            lo.ann_set_count = new_set_off_map.len() as u32;
 
             let mut param_ref_offs: Vec<u32> = Vec::new();
             for pa in &dir.parameters {
@@ -384,6 +414,7 @@ pub(crate) fn emit(
                 new_ref_off_map.insert(old_ref, start);
             }
             lo.ann_set_ref_lists_size = (out.len() as u32) - lo.ann_set_ref_lists_off;
+            lo.ann_ref_list_count = new_ref_off_map.len() as u32;
 
             align_to_4(&mut out);
             lo.ann_dir_off = out.len() as u32;
@@ -460,6 +491,7 @@ pub(crate) fn emit(
                 out.extend_from_slice(&rewritten);
                 let new_method_idx = maps.methods.lookup(old_method.0)?;
                 dbg_off_per_method[new_method_idx as usize] = off;
+                lo.debug_info_count += 1;
             }
             lo.debug_info_size = (out.len() as u32) - lo.debug_info_off;
         }
@@ -549,6 +581,7 @@ pub(crate) fn emit(
 
                 new_code_off_per_method[new_method_idx] = out.len() as u32;
                 out.extend_from_slice(&code_bytes);
+                lo.code_item_count += 1;
             }
             lo.code_items_size = (out.len() as u32) - lo.code_items_off;
         }
@@ -588,6 +621,7 @@ pub(crate) fn emit(
             call_site_data_offs[rank] = arr_off;
         }
         lo.call_site_arrays_size = (out.len() as u32) - lo.call_site_arrays_off;
+        lo.call_site_array_count = closure.call_sites.len() as u32;
     }
 
     // ---------- pool regions ----------
@@ -761,37 +795,34 @@ pub(crate) fn emit(
 }
 
 fn emit_map_list(out: &mut Vec<u8>, lo: &LayoutOut) -> Result<(), RebuildError> {
+    // Item type codes as emitted by ART/d8, verified against the
+    // map_list of every corpus DEX (workload/aurora/fdroid):
+    //   0x0000 header, 0x0001..0x0008 id tables / class_def,
+    //   0x1000 map_list, 0x1001 type_list, 0x1002 annotation_set_ref_list,
+    //   0x1003 annotation_set_item, 0x2000 class_data_item,
+    //   0x2001 code_item, 0x2002 string_data_item, 0x2003 debug_info_item,
+    //   0x2004 annotation_item, 0x2005 encoded_array_item,
+    //   0x2006 annotations_directory_item.
+    // Counts are ITEM counts (never byte sizes) and entries are sorted
+    // by ascending offset, both per spec; a wrong count/type made the
+    // droidsaw decompiler spin forever on our rebuilt DEX.
     let mut entries: Vec<(u16, u32, u32)> = Vec::new();
     entries.push((0x0000, 1, 0));
-    if lo.string_data_size > 0 {
-        entries.push((0x1002, lo.string_data_size, lo.string_data_off));
+    if lo.kept_string_count > 0 {
+        entries.push((0x0001, lo.kept_string_count, lo.string_ids_off));
     }
-    if lo.interfaces_size > 0 {
-        entries.push((0x1000, lo.interfaces_size, lo.interfaces_off));
+    if lo.kept_type_count > 0 {
+        entries.push((0x0002, lo.kept_type_count, lo.type_ids_off));
     }
-    if lo.code_items_size > 0 {
-        entries.push((0x2001, lo.code_items_size, lo.code_items_off));
+    if lo.kept_proto_count > 0 {
+        entries.push((0x0003, lo.kept_proto_count, lo.proto_ids_off));
     }
-    if lo.class_data_size > 0 {
-        entries.push((0x2002, lo.class_data_size, lo.class_data_off));
+    if lo.kept_field_count > 0 {
+        entries.push((0x0004, lo.kept_field_count, lo.field_ids_off));
     }
-    if lo.ann_sets_size > 0 {
-        entries.push((0x2003, lo.ann_sets_size, lo.ann_sets_off));
+    if lo.kept_method_count > 0 {
+        entries.push((0x0005, lo.kept_method_count, lo.method_ids_off));
     }
-    if lo.ann_set_ref_lists_size > 0 {
-        entries.push((0x2004, lo.ann_set_ref_lists_size, lo.ann_set_ref_lists_off));
-    }
-    if lo.debug_info_size > 0 {
-        entries.push((0x2005, lo.debug_info_size, lo.debug_info_off));
-    }
-    if lo.ann_dir_size > 0 {
-        entries.push((0x2006, lo.ann_dir_size, lo.ann_dir_off));
-    }
-    entries.push((0x0001, lo.kept_string_count, lo.string_ids_off));
-    entries.push((0x0002, lo.kept_type_count, lo.type_ids_off));
-    entries.push((0x0003, lo.kept_proto_count, lo.proto_ids_off));
-    entries.push((0x0004, lo.kept_field_count, lo.field_ids_off));
-    entries.push((0x0005, lo.kept_method_count, lo.method_ids_off));
     entries.push((0x0006, 1, lo.class_defs_off));
     if lo.kept_call_site_count > 0 {
         entries.push((0x0007, lo.kept_call_site_count, lo.call_site_ids_off));
@@ -799,6 +830,54 @@ fn emit_map_list(out: &mut Vec<u8>, lo: &LayoutOut) -> Result<(), RebuildError> 
     if lo.kept_method_handle_count > 0 {
         entries.push((0x0008, lo.kept_method_handle_count, lo.method_handles_off));
     }
+    // type_lists: interfaces list + per-proto parameter lists, emitted
+    // as two runs; one map entry at the first run's offset.
+    let type_list_count = lo.interfaces_count + lo.proto_type_list_count;
+    if type_list_count > 0 {
+        let first = if lo.interfaces_off != 0 {
+            lo.interfaces_off
+        } else {
+            lo.proto_type_lists_off
+        };
+        entries.push((0x1001, type_list_count, first));
+    }
+    if lo.ann_ref_list_count > 0 {
+        entries.push((0x1002, lo.ann_ref_list_count, lo.ann_set_ref_lists_off));
+    }
+    if lo.ann_set_count > 0 {
+        entries.push((0x1003, lo.ann_set_count, lo.ann_sets_off));
+    }
+    if lo.class_data_size > 0 {
+        entries.push((0x2000, 1, lo.class_data_off));
+    }
+    if lo.code_item_count > 0 {
+        entries.push((0x2001, lo.code_item_count, lo.code_items_off));
+    }
+    if lo.string_data_count > 0 {
+        entries.push((0x2002, lo.string_data_count, lo.string_data_off));
+    }
+    if lo.debug_info_count > 0 {
+        entries.push((0x2003, lo.debug_info_count, lo.debug_info_off));
+    }
+    if lo.ann_item_count > 0 {
+        entries.push((0x2004, lo.ann_item_count, lo.ann_items_off));
+    }
+    // encoded_arrays: static_values run + call-site payload arrays.
+    let encoded_array_count = lo.static_values_count + lo.call_site_array_count;
+    if encoded_array_count > 0 {
+        let first = if lo.static_values_off != 0 {
+            lo.static_values_off
+        } else {
+            lo.call_site_arrays_off
+        };
+        entries.push((0x2005, encoded_array_count, first));
+    }
+    if lo.ann_dir_size > 0 {
+        entries.push((0x2006, 1, lo.ann_dir_off));
+    }
+    entries.push((0x1000, 1, lo.map_off));
+    // Spec: map items appear in ascending offset order.
+    entries.sort_by_key(|&(_ty, _size, off)| off);
     let total = entries.len() as u32;
     out.extend_from_slice(&total.to_le_bytes());
     for (ty, size, off) in &entries {
