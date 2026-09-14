@@ -81,8 +81,10 @@ impl TaskKind {
 /// What a worker thread produced for one task.
 #[derive(Debug)]
 pub enum TaskOutcome {
-    /// Successful `run_getclass`.
-    Decompiled { dex_name: String, source: String },
+    /// Successful `run_getclass`: a fully built document (source,
+    /// line index, spans, outline — all computed here on the worker
+    /// thread, never on the UI thread).
+    Decompiled(std::sync::Arc<crate::state::documents::Document>),
     /// Successful `run_findrefs`.
     Search(asc_core::SearchReport),
     /// Engine error or worker panic, as a display string.
@@ -333,9 +335,11 @@ impl TaskManager {
     }
 }
 
-/// Run one getclass engine job (worker-thread body).
-fn run_getclass_job(apk: &Path, target: &str) -> TaskOutcome {
-    let normalized = match asc_core::normalize_class_name(target) {
+/// Run one getclass engine job (worker-thread body): decompile, then
+/// build the document (tokenize + outline) here so the UI thread
+/// never pays for it.
+fn run_getclass_job(apk: &Path, descriptor: &str) -> TaskOutcome {
+    let normalized = match asc_core::normalize_class_name(descriptor) {
         Ok(t) => t,
         Err(e) => return TaskOutcome::Failed(e.to_string()),
     };
@@ -343,10 +347,9 @@ fn run_getclass_job(apk: &Path, target: &str) -> TaskOutcome {
         &GetClassJob::new(apk, normalized),
         &GetClassOptions::default(),
     ) {
-        Ok(r) => TaskOutcome::Decompiled {
-            dex_name: r.dex_name,
-            source: r.source,
-        },
+        Ok(r) => TaskOutcome::Decompiled(std::sync::Arc::new(
+            crate::state::documents::Document::new(descriptor.to_string(), r.dex_name, r.source),
+        )),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
 }
@@ -366,8 +369,6 @@ fn run_findrefs_job(apk: &Path, query: &Query) -> TaskOutcome {
 fn core_error_string(e: &CoreError) -> String {
     e.to_string()
 }
-
-/// Best-effort panic payload → message.
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = panic.downcast_ref::<&str>() {
         format!("worker panicked: {s}")
@@ -416,10 +417,11 @@ mod tests {
     }
 
     fn ok_source(name: &str) -> TaskOutcome {
-        TaskOutcome::Decompiled {
-            dex_name: "classes.dex".into(),
-            source: format!("class {name} {{}}"),
-        }
+        TaskOutcome::Decompiled(std::sync::Arc::new(crate::state::documents::Document::new(
+            format!("L{name};"),
+            "classes.dex".into(),
+            format!("class {name} {{}}"),
+        )))
     }
 
     #[test]
