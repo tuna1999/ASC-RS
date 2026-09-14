@@ -5,14 +5,15 @@
 //! - `--selfcheck <apk>`: runs [`asc_gui::run_selfcheck`] and prints a
 //!   one-line summary of every step. Exits 0 on success, non-zero on
 //!   engine / IO errors.
-//! - (no flag): launches the eframe desktop GUI. The window opens
-//!   with the standard panel layout (class tree left, source tabs
-//!   center, findrefs right, status bar at the bottom).
+//! - (no flag): launches the eframe desktop GUI immediately — no APK
+//!   open happens before the window exists. A path argument (or the
+//!   native open dialog) is opened as a background task on the first
+//!   frame; the workspace shows an empty state until it lands.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use asc_gui::{AscApp, WorkspaceSession, run_selfcheck};
+use asc_gui::{AscApp, run_selfcheck};
 use eframe::egui;
 
 fn main() -> ExitCode {
@@ -28,10 +29,12 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("asc-gui — ASC-RS desktop UI");
+    println!("asc-gui — ASC-RS desktop workbench");
     println!();
     println!("USAGE:");
-    println!("  asc-gui [path.apk]            Open the GUI on the given APK (default: prompt).");
+    println!(
+        "  asc-gui [path.apk]            Open the GUI on the given APK (loaded in the background)."
+    );
     println!("  asc-gui --selfcheck <apk>     Run the headless selfcheck and exit.");
     println!("  asc-gui --help                Print this help.");
 }
@@ -60,37 +63,15 @@ fn run_selfcheck_mode(args: &[String]) -> ExitCode {
 }
 
 fn run_gui_mode(args: &[String]) -> ExitCode {
-    let apk_arg = args.iter().skip(1).find(|a| !a.starts_with("--"));
-    let session = match apk_arg {
-        Some(path) => match WorkspaceSession::open(&PathBuf::from(path)) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("asc-gui: cannot open {}: {e}", path);
-                return ExitCode::from(1);
-            }
-        },
-        None => {
-            // No argument: show a native file picker instead of bailing.
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("Android package", &["apk"])
-                .set_title("Open APK")
-                .pick_file()
-            else {
-                return ExitCode::SUCCESS; // user cancelled
-            };
-            match WorkspaceSession::open(&path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("asc-gui: cannot open {}: {e}", path.display());
-                    return ExitCode::from(1);
-                }
-            }
-        }
-    };
+    let initial = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with("--"))
+        .map(PathBuf::from);
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title(format!("asc-gui — {}", session.path().display()))
-        .with_inner_size([1200.0, 800.0]);
+        .with_title("asc-gui")
+        .with_inner_size([1280.0, 820.0]);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -99,7 +80,10 @@ fn run_gui_mode(args: &[String]) -> ExitCode {
     if let Err(e) = eframe::run_native(
         "asc-gui",
         options,
-        Box::new(move |_cc| Ok(Box::new(AscApp::new(session)))),
+        Box::new(move |cc| {
+            asc_gui::design::apply(&cc.egui_ctx);
+            Ok(Box::new(AscApp::new(initial)))
+        }),
     ) {
         eprintln!("eframe failed: {e}");
         return ExitCode::from(1);

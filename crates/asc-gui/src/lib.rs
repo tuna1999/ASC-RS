@@ -7,24 +7,33 @@
 //!
 //! ## Modules
 //!
-//! - [`session`] — the `WorkspaceSession` struct that holds the open
-//!   APK plus per-dex lazy caches (the GUI's caching license per
+//! - [`app`] — the eframe `App` shell: task pump + command dispatch.
+//! - [`command`] — the centralized command model (shortcuts → data).
+//! - [`design`] — design tokens + theme ("ASC Instant Workbench").
+//! - [`session`] — the `WorkspaceSession` handle: open APK plus
+//!   per-dex lazy class caches (the GUI's caching license per
 //!   `reference/BEHAVIOR.md` §36).
-//! - [`worker`] — background-thread plumbing for long-running engine
-//!   ops (`findrefs`, `getclass`).
+//! - [`state`] — headless controllers: documents, tabs, navigation,
+//!   search.
+//! - [`task`] — identity-stamped background tasks
+//!   (`TaskId`/`SessionGeneration` staleness gate).
+//! - [`ui`] — workspace surfaces (explorer/editor/inspector/bottom/
+//!   status/palette).
 //! - [`selfcheck`] — `--selfcheck` headless path used by the binary
 //!   and the integration test.
-//! - [`app`] — the eframe `App` implementation that draws the panels.
 
 use std::path::Path;
 
 pub mod app;
+pub mod command;
+pub mod design;
 pub mod highlight;
 pub mod package_tree;
 pub mod selfcheck;
 pub mod session;
 pub mod state;
 pub mod task;
+pub mod ui;
 
 pub use crate::app::AscApp;
 pub use crate::selfcheck::{SelfcheckReport, run_selfcheck};

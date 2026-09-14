@@ -62,6 +62,9 @@ impl SessionGeneration {
 /// What kind of engine work a task performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskKind {
+    /// Open an APK and enumerate classes (window paints before this
+    /// lands — redesign Phase "session/init").
+    LoadArtifact,
     /// `run_getclass` for one class descriptor.
     DecompileClass,
     /// `run_findrefs` for one query.
@@ -72,19 +75,32 @@ impl TaskKind {
     /// Short label for the Tasks view.
     pub fn label(self) -> &'static str {
         match self {
+            TaskKind::LoadArtifact => "open",
             TaskKind::DecompileClass => "decompile",
             TaskKind::FindRefs => "findrefs",
         }
     }
 }
 
+/// Successful APK open: everything the workspace needs to become
+/// usable, computed off the UI thread.
+pub struct LoadedArtifact {
+    pub session: crate::session::WorkspaceSession,
+    pub manifest: Option<asc_manifest::ManifestInfo>,
+    /// All classes (already sorted by descriptor).
+    pub classes: Vec<crate::session::ClassEntry>,
+    /// Per-DEX class counts, central-directory order.
+    pub dex_counts: Vec<(String, usize)>,
+}
+
 /// What a worker thread produced for one task.
-#[derive(Debug)]
 pub enum TaskOutcome {
     /// Successful `run_getclass`: a fully built document (source,
     /// line index, spans, outline — all computed here on the worker
     /// thread, never on the UI thread).
     Decompiled(std::sync::Arc<crate::state::documents::Document>),
+    /// Successful APK open.
+    Loaded(Box<LoadedArtifact>),
     /// Successful `run_findrefs`.
     Search(asc_core::SearchReport),
     /// Engine error or worker panic, as a display string.
@@ -94,7 +110,6 @@ pub enum TaskOutcome {
 /// Message sent from a worker thread back to the UI. Self-describing:
 /// carries enough identity for the UI to decide validity without any
 /// shared mutable state.
-#[derive(Debug)]
 pub struct TaskEnvelope {
     pub task_id: TaskId,
     pub generation: SessionGeneration,
@@ -104,7 +119,6 @@ pub struct TaskEnvelope {
 /// One completed task, as handed to the application layer. `stale`
 /// tasks must be ignored by state application (their result predates
 /// the current session generation, or they were superseded/cancelled).
-#[derive(Debug)]
 pub struct CompletedTask {
     pub id: TaskId,
     pub generation: SessionGeneration,
@@ -129,12 +143,25 @@ struct InFlight {
     discarded: Arc<AtomicBool>,
 }
 
+/// One entry of the bounded recent-task log (Tasks view).
+#[derive(Debug, Clone)]
+pub struct TaskLogEntry {
+    pub kind: TaskKind,
+    pub label: String,
+    /// `true` when the result was applied; false when it failed.
+    pub ok: bool,
+    /// `true` when the result was discarded (stale/superseded).
+    pub discarded: bool,
+    pub elapsed_ms: u64,
+}
+
 /// Owns all background tasks. Poll it once per frame from the eframe
 /// `update` callback; it never blocks.
 pub struct TaskManager {
     next_id: u64,
     generation: SessionGeneration,
     in_flight: Vec<InFlight>,
+    log: std::collections::VecDeque<TaskLogEntry>,
 }
 
 impl Default for TaskManager {
@@ -142,13 +169,13 @@ impl Default for TaskManager {
         Self::new()
     }
 }
-
 impl TaskManager {
     pub fn new() -> Self {
         Self {
             next_id: 0,
             generation: SessionGeneration::INITIAL,
             in_flight: Vec::new(),
+            log: std::collections::VecDeque::new(),
         }
     }
 
@@ -237,6 +264,25 @@ impl TaskManager {
         )
     }
 
+    /// Spawn an APK-open task: mmap, per-DEX class enumeration and
+    /// manifest parse all happen off the UI thread so the window is
+    /// interactive immediately (redesign §7: progressive artifact
+    /// metadata). Supersedes any previous open.
+    pub fn spawn_load(&mut self, apk: &Path, ctx: &egui::Context) -> TaskId {
+        for t in &mut self.in_flight {
+            if t.kind == TaskKind::LoadArtifact {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        self.submit(
+            TaskKind::LoadArtifact,
+            apk.display().to_string(),
+            move || run_load_job(&apk),
+            ctx,
+        )
+    }
+
     /// Spawn a `run_findrefs` task. Supersedes any previous findrefs:
     /// the old task's result is discarded on arrival (it cannot block
     /// or replace this one).
@@ -269,9 +315,31 @@ impl TaskManager {
             .map(|t| t.id)
     }
 
+    /// Mark every in-flight task of one kind cancelled (e.g. Esc on a
+    /// running search). Results are discarded on arrival.
+    pub fn cancel_kind(&mut self, kind: TaskKind) {
+        for t in &mut self.in_flight {
+            if t.kind == kind {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// Mark one task cancelled; its result will be discarded.
+    pub fn cancel(&mut self, id: TaskId) {
+        if let Some(t) = self.in_flight.iter_mut().find(|t| t.id == id) {
+            t.discarded.store(true, Ordering::Release);
+        }
+    }
+
     /// Whether a findrefs task is currently running.
     pub fn findrefs_running(&self) -> bool {
         self.in_flight.iter().any(|t| t.kind == TaskKind::FindRefs)
+    }
+
+    /// Recent completed tasks (Tasks view), newest first.
+    pub fn recent(&self) -> impl Iterator<Item = &TaskLogEntry> {
+        self.log.iter().rev()
     }
 
     /// Whether anything is in flight.
@@ -282,13 +350,6 @@ impl TaskManager {
     /// In-flight count (for the Tasks view).
     pub fn in_flight_count(&self) -> usize {
         self.in_flight.len()
-    }
-
-    /// Mark one task cancelled; its result will be discarded.
-    pub fn cancel(&mut self, id: TaskId) {
-        if let Some(t) = self.in_flight.iter_mut().find(|t| t.id == id) {
-            t.discarded.store(true, Ordering::Release);
-        }
     }
 
     /// Drain every task whose result has arrived. Never blocks.
@@ -330,6 +391,18 @@ impl TaskManager {
                 }
             }
         }
+        for t in &done {
+            self.log.push_back(TaskLogEntry {
+                kind: t.kind,
+                label: t.label.clone(),
+                ok: !matches!(t.outcome, TaskOutcome::Failed(_)) && !t.stale,
+                discarded: t.stale,
+                elapsed_ms: t.elapsed.as_millis() as u64,
+            });
+        }
+        while self.log.len() > 32 {
+            self.log.pop_front();
+        }
         self.in_flight = still_pending;
         done
     }
@@ -352,6 +425,44 @@ fn run_getclass_job(apk: &Path, descriptor: &str) -> TaskOutcome {
         )),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
+}
+
+/// Run one APK-open job (worker-thread body): open the session,
+/// enumerate every DEX's classes, parse the manifest.
+fn run_load_job(apk: &Path) -> TaskOutcome {
+    let session = match crate::session::WorkspaceSession::open(apk) {
+        Ok(s) => s,
+        Err(e) => return TaskOutcome::Failed(e.to_string()),
+    };
+    let manifest = asc_manifest::parse_from_apk(session.path()).ok();
+    let dex_order: Vec<(String, usize)> = session
+        .dex_entries()
+        .iter()
+        .map(|e| (e.name.clone(), 0usize))
+        .collect();
+    match session.all_classes() {
+        Ok(classes) => TaskOutcome::Loaded(Box::new(LoadedArtifact {
+            dex_counts: per_dex_counts(&classes, dex_order),
+            session,
+            manifest,
+            classes,
+        })),
+        Err(e) => TaskOutcome::Failed(e.to_string()),
+    }
+}
+
+/// Count classes per DEX (preserving central-directory order) from the
+/// full class list.
+fn per_dex_counts(
+    classes: &[crate::session::ClassEntry],
+    mut order: Vec<(String, usize)>,
+) -> Vec<(String, usize)> {
+    for c in classes {
+        if let Some((_, n)) = order.iter_mut().find(|(name, _)| *name == c.dex_name) {
+            *n += 1;
+        }
+    }
+    order
 }
 
 /// Run one findrefs engine job (worker-thread body).
@@ -565,10 +676,13 @@ mod tests {
         }
         assert_eq!(done.len(), 1);
         assert!(!done[0].stale);
+        let outcome = std::mem::replace(
+            &mut done.into_iter().next().unwrap().outcome,
+            TaskOutcome::Failed(String::new()),
+        );
         assert!(
-            matches!(&done[0].outcome, TaskOutcome::Failed(m) if m.contains("kaboom")),
-            "panic must surface as Failed, got {:?}",
-            done[0].outcome
+            matches!(&outcome, TaskOutcome::Failed(m) if m.contains("kaboom")),
+            "panic must surface as a Failed task containing the panic message"
         );
     }
 

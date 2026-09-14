@@ -11,8 +11,6 @@
 //! methods, nested classes) with their line numbers for the right-hand
 //! outline panel and click-to-jump navigation.
 
-use eframe::egui;
-
 /// Syntax flavor of a token span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -241,20 +239,6 @@ fn find_block_close(b: &[u8], from: usize) -> Option<usize> {
 
 fn is_ident_byte(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
-}
-
-/// Map a token flavor to a color (jadx-like dark palette).
-pub fn token_color(tok: Token) -> egui::Color32 {
-    match tok {
-        Token::Keyword => egui::Color32::from_rgb(0xCC, 0x78, 0x33), // orange
-        Token::Modifier => egui::Color32::from_rgb(0xCC, 0x78, 0x33),
-        Token::Type => egui::Color32::from_rgb(0xA9, 0xB7, 0xC6), // bright type name
-        Token::Annotation => egui::Color32::from_rgb(0xBB, 0xB5, 0x29), // yellow
-        Token::String => egui::Color32::from_rgb(0x6A, 0xA7, 0x5E), // green
-        Token::Number => egui::Color32::from_rgb(0x2A, 0xA1, 0x98), // teal
-        Token::Comment => egui::Color32::from_rgb(0x80, 0x80, 0x80), // gray
-        Token::Plain => egui::Color32::from_rgb(0xC8, 0xC8, 0xC8),
-    }
 }
 
 /// One outline entry (method / field / nested class) with its line.
