@@ -28,6 +28,7 @@ pub mod app;
 pub mod command;
 pub mod design;
 pub mod highlight;
+pub mod icons;
 pub mod package_tree;
 pub mod selfcheck;
 pub mod session;

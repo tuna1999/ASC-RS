@@ -172,6 +172,7 @@ mod tests {
     fn entry(desc: &str) -> ClassEntry {
         ClassEntry {
             descriptor: desc.to_string(),
+            kind: crate::session::ClassKind::Class,
             dex_name: "classes.dex".to_string(),
         }
     }
