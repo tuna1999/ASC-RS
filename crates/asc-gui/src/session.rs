@@ -57,6 +57,39 @@ pub type SessionResult<T> = Result<T, SessionError>;
 pub struct ClassEntry {
     pub descriptor: String,
     pub dex_name: String,
+    /// What the class-def's access flags say it is (drives the
+    /// jadx-style source-file icon).
+    pub kind: ClassKind,
+}
+
+/// Class taxonomy derived from `class_def.access_flags` — zero extra
+/// parsing, the flags are already loaded during enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClassKind {
+    #[default]
+    Class,
+    Interface,
+    Enum,
+    Annotation,
+}
+
+impl ClassKind {
+    /// Map Dalvik access flags to the coarse taxonomy (order matters:
+    /// annotation ⊂ interface, so test it first).
+    pub fn from_flags(flags: u32) -> Self {
+        const ACC_INTERFACE: u32 = 0x0200;
+        const ACC_ANNOTATION: u32 = 0x2000;
+        const ACC_ENUM: u32 = 0x4000;
+        if flags & ACC_ANNOTATION != 0 {
+            Self::Annotation
+        } else if flags & ACC_ENUM != 0 {
+            Self::Enum
+        } else if flags & ACC_INTERFACE != 0 {
+            Self::Interface
+        } else {
+            Self::Class
+        }
+    }
 }
 
 /// One history entry — a query that was actually run to completion.
@@ -223,6 +256,7 @@ fn build_class_list(dex_name: &str, bytes: &[u8]) -> SessionResult<Vec<ClassEntr
         out.push(ClassEntry {
             descriptor: sref.decode_lossy().into_owned(),
             dex_name: dex_name.to_string(),
+            kind: ClassKind::from_flags(def.access_flags),
         });
     }
     Ok(out)

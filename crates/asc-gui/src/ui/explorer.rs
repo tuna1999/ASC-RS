@@ -6,6 +6,7 @@ use eframe::egui;
 use crate::app::AscApp;
 use crate::command::Command;
 use crate::design::DARK as T;
+use crate::session::ClassKind;
 use crate::state::NavOrigin;
 
 impl AscApp {
@@ -76,9 +77,10 @@ impl AscApp {
                     );
                     for leaf in hits.into_iter().take(500) {
                         let desc = self.tree.entry(leaf).descriptor.clone();
+                        let kind = self.tree.entry(leaf).kind;
                         let label = super::short_name(&desc);
                         let selected = self.selected_class.as_deref() == Some(desc.as_str());
-                        if self.class_row(ui, selected, &label) {
+                        if self.class_row(ui, selected, &label, kind) {
                             self.queue(Command::OpenClass {
                                 descriptor: desc,
                                 pin: false,
@@ -102,9 +104,10 @@ impl AscApp {
                 n.label.clone(),
                 n.path.clone(),
                 !n.children.is_empty(),
-                n.class_leaves
-                    .first()
-                    .map(|&l| self.tree.entry(l).descriptor.clone()),
+                n.class_leaves.first().map(|&l| {
+                    let e = self.tree.entry(l);
+                    (e.descriptor.clone(), e.kind)
+                }),
             )
         };
         let is_open = self.expanded.contains(&path);
@@ -131,13 +134,22 @@ impl AscApp {
                 {
                     toggled = true;
                 }
-                ui.add_space(2.0);
             } else {
-                ui.label(" ");
+                ui.add_space(12.0);
             }
-            if let Some(desc) = own_desc {
+            // Folder icon (open/closed) — jadx-style package marker.
+            if let Some(icons) = self.icons.as_ref() {
+                let folder = if is_open {
+                    &icons.folder_open
+                } else {
+                    &icons.folder_closed
+                };
+                crate::icons::icon_ui(ui, folder);
+                ui.add_space(3.0);
+            }
+            if let Some((desc, kind)) = own_desc {
                 let selected = self.selected_class.as_deref() == Some(desc.as_str());
-                if self.class_row(ui, selected, &label) {
+                if self.class_row(ui, selected, &label, kind) {
                     let pin = ui.input(|i| {
                         i.pointer
                             .button_double_clicked(egui::PointerButton::Primary)
@@ -181,11 +193,10 @@ impl AscApp {
         }
     }
 
-    /// A clickable class row; returns true when clicked. Filled
-    /// diamond (class-leaf motif, design §3) — the hollow ◇ reads as
-    /// a stray square outline at 12.5 px. Selected row gets the
+    /// A clickable class row; returns true when clicked. Source-file
+    /// icon by class kind (jadx-style) + selected row gets the
     /// spec'd accent-tinted background.
-    fn class_row(&self, ui: &mut egui::Ui, selected: bool, label: &str) -> bool {
+    fn class_row(&self, ui: &mut egui::Ui, selected: bool, label: &str, kind: ClassKind) -> bool {
         let row_frame = if selected {
             egui::Frame::new().fill(T.accent.linear_multiply(0.12))
         } else {
@@ -195,12 +206,10 @@ impl AscApp {
         row_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(T.row_tree - 4.0);
-                ui.label(
-                    egui::RichText::new("◆")
-                        .monospace()
-                        .size(11.0)
-                        .color(if selected { T.accent } else { T.text_disabled }),
-                );
+                if let Some(icons) = self.icons.as_ref() {
+                    crate::icons::icon_ui(ui, icons.doc(kind));
+                    ui.add_space(3.0);
+                }
                 clicked = ui
                     .selectable_label(
                         selected,

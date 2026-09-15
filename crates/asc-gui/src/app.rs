@@ -82,6 +82,9 @@ pub struct AscApp {
     /// Last "references to selected class" report (Analysis menu) —
     /// shown in the REFERENCES bottom tab.
     pub(crate) references: Option<SearchResults>,
+    /// Jadx-style workspace icons (folders / source files), uploaded
+    /// once on the first frame that has a context.
+    pub(crate) icons: Option<crate::icons::Icons>,
 }
 
 impl AscApp {
@@ -125,6 +128,7 @@ impl AscApp {
             window_title: "asc-gui".to_string(),
             palette_sel: 0,
             references: None,
+            icons: None,
         }
     }
 
@@ -626,6 +630,11 @@ impl eframe::App for AscApp {
             let path = self.initial_path.take().unwrap();
             self.open_path(&path, ctx);
         }
+
+        // Upload workspace icon textures once (folders / source
+        // files; see `icons.rs`).
+        self.icons
+            .get_or_insert_with(|| crate::icons::Icons::load(ctx));
 
         // 1. Drain worker results first so this frame sees them.
         self.poll_workers(ctx);
@@ -1432,6 +1441,15 @@ mod tests {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Expand exactly like the user's screenshot: info →
+        // guardianproject → netcipher, so class rows with doc icons
+        // are in frame.
+        {
+            let app = h.state_mut();
+            app.expanded.insert("info".into());
+            app.expanded.insert("info.guardianproject".into());
+            app.expanded.insert("info.guardianproject.netcipher".into());
         }
         for _ in 0..3 {
             h.step();
