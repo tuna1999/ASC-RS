@@ -27,6 +27,10 @@ egui_kittest = { version = "0.33", features = ["wgpu"] }
 # pattern matches the (kittest-enabled) egui build in tests.
 eframe = { version = "0.33", features = ["accesskit"] }
 
+[build-dependencies]
+# Embed the app icon + version resource into the Windows executable.
+winresource = "0.1"
+
 [[bin]]
 name = "asc-gui"
 path = "src/main.rs"
