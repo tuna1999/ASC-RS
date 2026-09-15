@@ -170,13 +170,37 @@ impl AscApp {
         }
     }
 
-    /// A clickable class row; returns true when clicked.
+    /// A clickable class row; returns true when clicked. Filled
+    /// diamond (class-leaf motif, design §3) — the hollow ◇ reads as
+    /// a stray square outline at 12.5 px. Selected row gets the
+    /// spec'd accent-tinted background.
     fn class_row(&self, ui: &mut egui::Ui, selected: bool, label: &str) -> bool {
-        let text = egui::RichText::new(format!("◇ {label}"))
-            .monospace()
-            .size(12.5)
-            .color(if selected { T.text } else { T.text_secondary });
-        let text = if selected { text.strong() } else { text };
-        ui.selectable_label(selected, text).clicked()
+        let row_frame = if selected {
+            egui::Frame::new().fill(T.accent.linear_multiply(0.12))
+        } else {
+            egui::Frame::new()
+        };
+        let mut clicked = false;
+        row_frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(T.row_tree - 4.0);
+                ui.label(
+                    egui::RichText::new("◆")
+                        .monospace()
+                        .size(11.0)
+                        .color(if selected { T.accent } else { T.text_disabled }),
+                );
+                clicked = ui
+                    .selectable_label(
+                        selected,
+                        egui::RichText::new(label)
+                            .monospace()
+                            .size(12.5)
+                            .color(if selected { T.text } else { T.text_secondary }),
+                    )
+                    .clicked();
+            });
+        });
+        clicked
     }
 }
