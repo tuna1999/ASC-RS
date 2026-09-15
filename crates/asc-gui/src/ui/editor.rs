@@ -194,7 +194,7 @@ impl AscApp {
             if entered {
                 self.find_step(true);
             }
-            if ui.button("✕").clicked() {
+            if ui.button("×").clicked() {
                 self.show_find = false;
             }
         });

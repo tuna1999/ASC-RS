@@ -1356,6 +1356,75 @@ mod tests {
         save(&mut h, "08_references");
     }
 
+    /// Objective font-coverage audit via egui's own font atlas
+    /// (`FontsView::has_glyph`). Any glyph the UI uses must be covered
+    /// by the default font stack — otherwise it renders as tofu.
+    #[test]
+    fn glyph_coverage() {
+        // The full inventory of glyphs the UI renders (keep in sync
+        // with src/*: grep non-ASCII string literals).
+        const USED: &[&str] = &[
+            "◀", "▶", "←", "→", "↑", "↓", "◆", "▾", "▸", "×", "●", "⌘", "▲", "▼", "✔", "⚠", "🔍",
+            "▤", "☰", "·", "…", "≡", "⚙", "A", "b", "1",
+        ];
+        // Known-uncovered in egui default fonts — never use these.
+        // (◇ IS covered but reads as a stray square outline at small
+        // sizes — avoided for legibility, not coverage.)
+        const BANNED: &[&str] = &["✕", "⌕", "✓", "⧉", "⋮"];
+        let ctx = egui::Context::default();
+        // Fonts exist only after a run() — do one empty pass.
+        let _ = ctx.run(Default::default(), |_| {});
+        let mut missing: Vec<char> = Vec::new();
+        ctx.fonts_mut(|f| {
+            for cand in USED.iter().chain(BANNED) {
+                let ch = cand.chars().next().unwrap();
+                let covered = f.has_glyph(&egui::FontId::monospace(20.0), ch);
+                let banned = BANNED.contains(cand);
+                if banned && covered {
+                    panic!("banned glyph {ch:?} is now covered — move it to USED");
+                }
+                if !banned && !covered {
+                    missing.push(ch);
+                }
+            }
+        });
+        let tofu = missing;
+        for c in &tofu {
+            eprintln!("TOFU: {c:?} U+{:04X}", *c as u32);
+        }
+        assert!(tofu.is_empty(), "uncovered glyphs present: {tofu:?}");
+    }
+
+    /// Pixel-level tofu detection: render each glyph ISOLATED at 48px
+    /// monospace (the exact tree-row style family). Tofu glyphs all
+    /// rasterize to the identical box — so any candidate whose PNG is
+    /// byte-identical to a known-tofu control (⌕) is tofu. This
+    /// catches what `has_glyph` chain semantics might hide.
+    #[test]
+    fn glyph_pixel_audit() {
+        if std::env::var("ASC_GUI_SHOTS").is_err() {
+            eprintln!("ASC_GUI_SHOTS not set; skipping");
+            return;
+        }
+        const GLYPHS: &[&str] = &["◇", "◆", "▸", "▾", "×", "◀", "▶", "⌘", "●", "⌕"];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (i, g) in GLYPHS.iter().enumerate() {
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(64.0, 64.0))
+                .build_ui(|ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.monospace(egui::RichText::new(*g).size(48.0));
+                    });
+                });
+            h.run();
+            let img = h.render().expect("render");
+            let path = dir.join(format!("glyph_{i:02}.png"));
+            img.save(&path).unwrap();
+            eprintln!("px: {}", path.display());
+        }
+    }
+
     /// Rasterize candidate glyphs so font coverage can be verified by
     /// eye: `ASC_GUI_SHOTS=1 cargo test -p asc-gui --lib glyph_probe`.
     /// Each row is `NNN` + one candidate glyph.
