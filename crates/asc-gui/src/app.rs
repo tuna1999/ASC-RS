@@ -658,11 +658,21 @@ impl eframe::App for AscApp {
                     }
                 });
                 ui.menu_button("Navigate", |ui| {
-                    if ui.button("Back  (Alt+←)").clicked() {
+                    if ui
+                        .button(egui::RichText::new("Back  (Alt+←)").monospace().size(12.5))
+                        .clicked()
+                    {
                         ui.close();
                         self.queue(Command::NavigateBack);
                     }
-                    if ui.button("Forward  (Alt+→)").clicked() {
+                    if ui
+                        .button(
+                            egui::RichText::new("Forward  (Alt+→)")
+                                .monospace()
+                                .size(12.5),
+                        )
+                        .clicked()
+                    {
                         ui.close();
                         self.queue(Command::NavigateForward);
                     }
@@ -726,11 +736,21 @@ impl eframe::App for AscApp {
             .frame(egui::Frame::new().fill(design::DARK.surface))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let back = ui.button("◀").on_hover_text("back (Alt+←)");
+                    // ◀/▶ exist in both families; monospace keeps the
+                    // toolbar's code-face consistent.
+                    let back = ui
+                        .button(egui::RichText::new("◀").monospace().size(12.0))
+                        .on_hover_text(egui::RichText::new("back (Alt+←)").monospace().size(12.0));
                     if back.clicked() {
                         self.queue(Command::NavigateBack);
                     }
-                    let fwd = ui.button("▶").on_hover_text("forward (Alt+→)");
+                    let fwd = ui
+                        .button(egui::RichText::new("▶").monospace().size(12.0))
+                        .on_hover_text(
+                            egui::RichText::new("forward (Alt+→)")
+                                .monospace()
+                                .size(12.0),
+                        );
                     if fwd.clicked() {
                         self.queue(Command::NavigateForward);
                     }
@@ -835,11 +855,13 @@ impl eframe::App for AscApp {
                                           active: bool,
                                           hint: &'static str|
                              -> bool {
-                                let rich = egui::RichText::new(label).size(15.0).color(if active {
-                                    design::DARK.accent
-                                } else {
-                                    design::DARK.text_secondary
-                                });
+                                let rich = egui::RichText::new(label).monospace().size(15.0).color(
+                                    if active {
+                                        design::DARK.accent
+                                    } else {
+                                        design::DARK.text_secondary
+                                    },
+                                );
                                 let btn = egui::Button::new(rich).frame(false);
                                 let resp = ui
                                     .add(btn)
@@ -1356,6 +1378,70 @@ mod tests {
         save(&mut h, "08_references");
     }
 
+    /// Reproduce the user-reported sidebar state (fdroid corpus,
+    /// NetCipher open, tree expanded to it) and save zoomable crops.
+    #[test]
+    fn sidebar_repro() {
+        if std::env::var("ASC_GUI_SHOTS").is_err() {
+            eprintln!("ASC_GUI_SHOTS not set; skipping");
+            return;
+        }
+        let apk = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/apk/org.fdroid.fdroid_1016000.apk");
+        if !apk.exists() {
+            eprintln!("fdroid fixture missing; skipping");
+            return;
+        }
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .wgpu()
+            .build_state(
+                |ctx, app: &mut AscApp| {
+                    let mut frame = eframe::Frame::_new_kittest();
+                    app.update(ctx, &mut frame);
+                },
+                AscApp::new(None),
+            );
+        crate::design::apply(&h.ctx);
+        let ctx0 = h.ctx.clone();
+        h.state_mut().open_path(&apk, &ctx0);
+        for _ in 0..400 {
+            h.step();
+            if h.state().session.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        // Expand exactly like the user: info/guardianproject/netcipher,
+        // open NetCipher as preview.
+        {
+            let app = h.state_mut();
+            app.queue(Command::OpenClass {
+                descriptor: "Linfo/guardianproject/netcipher/NetCipher;".into(),
+                pin: false,
+                line: None,
+                origin: NavOrigin::Tree,
+            });
+        }
+        for _ in 0..400 {
+            h.step();
+            if h.state().active_doc.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..3 {
+            h.step();
+        }
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+        let img = h.render().expect("render");
+        img.save(dir.join("repro_full.png")).unwrap();
+        eprintln!("repro saved");
+    }
+
     /// Objective font-coverage audit via egui's own font atlas
     /// (`FontsView::has_glyph`). Any glyph the UI uses must be covered
     /// by the default font stack — otherwise it renders as tofu.
@@ -1369,36 +1455,78 @@ mod tests {
         ];
         // Known-uncovered in egui default fonts — never use these.
         // (◇ IS covered but reads as a stray square outline at small
-        // sizes — avoided for legibility, not coverage.)
-        const BANNED: &[&str] = &["✕", "⌕", "✓", "⧉", "⋮"];
+        // sizes — avoided for legibility, not coverage.) Held as
+        // codepoints so the source scan below never sees the literal
+        // characters themselves.
+        const BANNED_CP: &[u32] = &[0x2715, 0x2315, 0x2713, 0x29C9, 0x22EE];
+        let banned_chars: Vec<char> = BANNED_CP
+            .iter()
+            .map(|cp| char::from_u32(*cp).unwrap())
+            .collect();
+        let banned = |c: char| banned_chars.contains(&c);
         let ctx = egui::Context::default();
         // Fonts exist only after a run() — do one empty pass.
         let _ = ctx.run(Default::default(), |_| {});
-        let mut missing: Vec<char> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
         ctx.fonts_mut(|f| {
-            for cand in USED.iter().chain(BANNED) {
-                let ch = cand.chars().next().unwrap();
-                let covered = f.has_glyph(&egui::FontId::monospace(20.0), ch);
-                let banned = BANNED.contains(cand);
-                if banned && covered {
-                    panic!("banned glyph {ch:?} is now covered — move it to USED");
-                }
-                if !banned && !covered {
-                    missing.push(ch);
+            for ch in USED
+                .iter()
+                .map(|c| c.chars().next().unwrap())
+                .chain(banned_chars.iter().copied())
+            {
+                let banned = banned(ch);
+                // All glyph sites render through the Monospace family
+                // (Proportional lacks ▸▾▲▼●◆▤ etc. — the tree-toggle
+                // tofu bug). Assert mono coverage for USED and that
+                // BANNED glyphs stay uncovered (in either family).
+                for (family_name, font_id) in [
+                    ("mono", egui::FontId::monospace(20.0)),
+                    ("prop", egui::FontId::proportional(20.0)),
+                ] {
+                    let covered = f.has_glyph(&font_id, ch);
+                    if banned && covered {
+                        panic!("banned glyph {ch:?} is now covered — move it to USED");
+                    }
+                    if !banned && family_name == "mono" && !covered {
+                        missing.push(format!("{ch:?} in {family_name}"));
+                    }
                 }
             }
         });
-        let tofu = missing;
-        for c in &tofu {
-            eprintln!("TOFU: {c:?} U+{:04X}", *c as u32);
+        // Static guard: banned glyphs must not appear anywhere in the
+        // crate source (catches copy-paste regressions pre-render).
+        for file in [
+            "src/app.rs",
+            "src/ui/explorer.rs",
+            "src/ui/editor.rs",
+            "src/ui/inspector.rs",
+            "src/ui/bottom_panel.rs",
+            "src/ui/status_bar.rs",
+            "src/ui/palette.rs",
+            "src/ui/mod.rs",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for ch in &banned_chars {
+                if src.contains(*ch) {
+                    panic!("{file} contains banned glyph {ch:?}");
+                }
+            }
         }
+        for m in &missing {
+            eprintln!("TOFU: {m}");
+        }
+        let tofu = missing;
+
         assert!(tofu.is_empty(), "uncovered glyphs present: {tofu:?}");
     }
 
     /// Pixel-level tofu detection: render each glyph ISOLATED at 48px
     /// monospace (the exact tree-row style family). Tofu glyphs all
     /// rasterize to the identical box — so any candidate whose PNG is
-    /// byte-identical to a known-tofu control (⌕) is tofu. This
+    /// byte-identical to a known-tofu control (U+2315) is tofu. This
     /// catches what `has_glyph` chain semantics might hide.
     #[test]
     fn glyph_pixel_audit() {
@@ -1406,10 +1534,19 @@ mod tests {
             eprintln!("ASC_GUI_SHOTS not set; skipping");
             return;
         }
-        const GLYPHS: &[&str] = &["◇", "◆", "▸", "▾", "×", "◀", "▶", "⌘", "●", "⌕"];
+        // The control (0x2315) is held as a codepoint so the
+        // glyph_coverage source scan never sees the literal.
+        const GLYPHS: &[&str] = &["◇", "◆", "▸", "▾", "×", "◀", "▶", "⌘", "●"];
+        const CONTROL_CP: u32 = 0x2315;
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
         std::fs::create_dir_all(&dir).unwrap();
-        for (i, g) in GLYPHS.iter().enumerate() {
+        let control = char::from_u32(CONTROL_CP).unwrap().to_string();
+        let all: Vec<&str> = GLYPHS
+            .iter()
+            .copied()
+            .chain(std::iter::once(control.as_str()))
+            .collect();
+        for (i, g) in all.iter().enumerate() {
             let mut h = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(64.0, 64.0))
                 .build_ui(|ui| {
