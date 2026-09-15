@@ -184,10 +184,13 @@ impl AscApp {
                     .small()
                     .color(T.text_secondary),
             );
-            if ui.button("▲").clicked() {
+            // ▲/▼ only exist in the monospace family.
+            let prev = egui::Button::new(egui::RichText::new("▲").monospace().size(11.0));
+            if ui.add(prev).clicked() {
                 self.find_step(false);
             }
-            if ui.button("▼").clicked() {
+            let next = egui::Button::new(egui::RichText::new("▼").monospace().size(11.0));
+            if ui.add(next).clicked() {
                 self.find_step(true);
             }
             let entered = ui.input(|i| i.key_pressed(egui::Key::Enter) && self.show_find);

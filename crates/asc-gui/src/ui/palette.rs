@@ -198,6 +198,7 @@ impl AscApp {
                         }
                     ))
                     .small()
+                    .monospace()
                     .color(T.text_disabled),
                 );
             });

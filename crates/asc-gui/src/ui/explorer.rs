@@ -113,14 +113,25 @@ impl AscApp {
             ui.set_min_height(T.row_tree);
             ui.add_space(depth as f32 * 12.0);
             if has_children {
+                // ▸/▾ are covered only by the MONOSPACE family — the
+                // Button default (Proportional) renders tofu boxes.
                 let glyph = if is_open { "▾" } else { "▸" };
+                let toggle = egui::Button::new(
+                    egui::RichText::new(glyph)
+                        .monospace()
+                        .size(11.0)
+                        .color(T.text_secondary),
+                )
+                .small()
+                .frame(false);
                 if ui
-                    .small_button(glyph)
+                    .add(toggle)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
                     toggled = true;
                 }
+                ui.add_space(2.0);
             } else {
                 ui.label(" ");
             }
