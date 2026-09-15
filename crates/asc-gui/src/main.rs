@@ -16,6 +16,11 @@ use std::process::ExitCode;
 use asc_gui::{AscApp, run_selfcheck};
 use eframe::egui;
 
+/// 32×32 RGBA window icon (same design as `assets/icon.ico`, which
+/// the build script embeds into the executable resource section for
+/// the shell/taskbar).
+const ICON_32_RGBA: &[u8] = include_bytes!("../assets/icon_32.rgba");
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--selfcheck") {
@@ -71,7 +76,12 @@ fn run_gui_mode(args: &[String]) -> ExitCode {
 
     let viewport = egui::ViewportBuilder::default()
         .with_title("asc-gui")
-        .with_inner_size([1280.0, 820.0]);
+        .with_inner_size([1280.0, 820.0])
+        .with_icon(std::sync::Arc::new(egui::IconData {
+            rgba: ICON_32_RGBA.to_vec(),
+            width: 32,
+            height: 32,
+        }));
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
