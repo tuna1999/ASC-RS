@@ -89,7 +89,7 @@ fn findrefs_history_caps_at_max() {
     let h = session.findrefs_history();
     assert_eq!(h.len(), MAX_FINDREFS_HISTORY);
     // The most-recent entries survived; the oldest were evicted.
-    assert_eq!(h.first().unwrap().label, format!("q-5"));
+    assert_eq!(h.first().unwrap().label, "q-5".to_string());
     assert_eq!(
         h.last().unwrap().label,
         format!("q-{}", MAX_FINDREFS_HISTORY + 4)
