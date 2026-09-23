@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch on a new push.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-build-test:
+    name: lint + build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: asc-rs-linux-x64
+          - os: windows-2022
+            artifact: asc-rs-windows-x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Reference oracle lives at reference/asc/ but is gitignored.
+          # Golden fixtures are committed; corpus APKs are downloaded below.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config
+
+      - name: Download corpus APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p corpus/apk corpus/dex
+          curl -fL -A 'curl/8' -o corpus/apk/com.aurora.store_60.apk \
+            https://f-droid.org/repo/com.aurora.store_60.apk
+          curl -fL -A 'curl/8' -o corpus/apk/org.fdroid.fdroid_1016000.apk \
+            https://f-droid.org/repo/org.fdroid.fdroid_1016000.apk
+
+      - name: Build workload.apk from frozen oracle
+        # workload.apk is a deterministic synthetic ZIP that wraps the
+        # classes.dex extracted from MG1937/asc @ ccc6bae (oracle freeze).
+        # See corpus/MANIFEST.md and reference/FREEZE.md.
+        shell: bash
+        env:
+          WORKLOAD_SRC: ${{ runner.temp }}/oracle
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/MG1937/asc.git "$WORKLOAD_SRC"
+          git -C "$WORKLOAD_SRC" checkout --quiet ccc6bae7704f5c5ef1a7271e27314837079621fb
+          WORKLOAD_SRC="$WORKLOAD_SRC" python3 - <<'PY'
+          import os, zipfile, pathlib
+          src = pathlib.Path(os.environ['WORKLOAD_SRC']) / 'tests/fixtures/reference-workload.zip'
+          dex = zipfile.ZipFile(src).read('classes.dex')
+          out_apk = pathlib.Path('corpus/apk/workload.apk')
+          out_dex = pathlib.Path('corpus/dex/workload_classes.dex')
+          with zipfile.ZipFile(out_apk, 'w', compression=zipfile.ZIP_STORED) as z:
+              z.writestr('classes.dex', dex)
+          out_dex.write_bytes(dex)
+          print(f'workload.apk={out_apk.stat().st_size} dex={len(dex)}')
+          PY
+          ls -la corpus/apk
+
+      - name: Extract DEX fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import zipfile
+          for apk, prefix in [
+              ('corpus/apk/com.aurora.store_60.apk', 'aurora'),
+              ('corpus/apk/org.fdroid.fdroid_1016000.apk', 'fdroid'),
+          ]:
+              with zipfile.ZipFile(apk) as z:
+                  for n in [x for x in z.namelist() if x.endswith('.dex')]:
+                      data = z.read(n)
+                      out = f'corpus/dex/{prefix}_{n}'
+                      with open(out, 'wb') as f:
+                          f.write(data)
+                      print(out, len(data))
+          PY
+
+      - name: rustfmt --check
+        run: cargo fmt --all -- --check
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test (debug)
+        run: cargo test --workspace
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Selfcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/asc-gui${{ runner.os == 'Windows' && '.exe' || '' }} \
+            --selfcheck corpus/apk/workload.apk
+
+      - name: Differential parity (golden fixtures)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/differential/run_differential.py \
+            target/release/asc-rs${{ runner.os == 'Windows' && '.exe' || '' }}
+
+      - name: perf_compare selftest
+        shell: bash
+        run: python benches/perf_compare.py --selftest
+
+      - name: Upload release binaries
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/release/asc-rs${{ runner.os == 'Windows' && '.exe' || '' }}
+            target/release/asc-gui${{ runner.os == 'Windows' && '.exe' || '' }}
+          if-no-files-found: error
