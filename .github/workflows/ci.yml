@@ -38,7 +38,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85
+          # Workspace Cargo.toml declares rust-version = "1.85" but
+          # transitive deps (droidsaw-dex@1.0.0 → rustc 1.93,
+          # eframe/egui@0.33 → rustc 1.88) have moved past that floor.
+          # Use whatever stable rustup ships so cargo can build them.
           components: rustfmt, clippy
 
       - name: Cache cargo registry & build artifacts
