@@ -14,7 +14,11 @@ asc-query.workspace = true
 thiserror.workspace = true
 # eframe pulls in winit + wgpu + accesskit + egui. Pinned locally per
 # Lead's standing approval (do NOT move into [workspace.dependencies]).
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+# `accesskit` MUST stay on the main feature list (not just dev-deps):
+# it transitively enables `accesskit_winit` whose `default` feature pulls
+# in `winit/x11` and `winit/wayland`. Without it, release builds hit
+# winit's "platform not supported" compile_error on Linux.
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence", "accesskit"] }
 # parking_lot gives us a non-poisoning Mutex/RwLock — preferred over
 # std::sync::Mutex in the GUI's hot path (see CLAUDE rule rs-parking-lot).
 parking_lot = "0.12"
