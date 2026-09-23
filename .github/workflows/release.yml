@@ -163,19 +163,29 @@ jobs:
 
       - name: Strip + zip binaries
         shell: bash
+        env:
+          BIN_PREFIX: ${{ matrix.bin_prefix }}
+          ARTIFACT: ${{ matrix.artifact }}
+          RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
           BIN_DIR="target/release"
           mkdir -p dist
-          cp "$BIN_DIR/asc-rs${{ matrix.bin_prefix }}" dist/
-          cp "$BIN_DIR/asc-gui${{ matrix.bin_prefix }}" dist/
+          cp "$BIN_DIR/asc-rs${BIN_PREFIX}" dist/
+          cp "$BIN_DIR/asc-gui${BIN_PREFIX}" dist/
           if [ "$RUNNER_OS" = "Linux" ]; then
             strip dist/asc-rs dist/asc-gui
           fi
           cd dist
-          zip -9 "../${{ matrix.artifact }}.zip" asc-rs${{ matrix.bin_prefix }} asc-gui${{ matrix.bin_prefix }}
-        env:
-          RUNNER_OS: ${{ runner.os }}
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # git-bash on Windows runners doesn't ship `zip`; use PowerShell.
+            powershell.exe -NoProfile -Command \
+              "Compress-Archive -Force -CompressionLevel Optimal \
+               -Path 'asc-rs${BIN_PREFIX}','asc-gui${BIN_PREFIX}' \
+               -DestinationPath '..\\${ARTIFACT}.zip'"
+          else
+            zip -9 "../${ARTIFACT}.zip" asc-rs${BIN_PREFIX} asc-gui${BIN_PREFIX}
+          fi
 
       - name: Upload release archive
         uses: actions/upload-artifact@v4
