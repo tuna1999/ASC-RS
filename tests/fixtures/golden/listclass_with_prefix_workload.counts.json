@@ -1,0 +1,14 @@
+{
+  "apk": "workload.apk",
+  "case_id": "listclass_with_prefix_workload",
+  "exit_code": 0,
+  "expect_error": false,
+  "query": [
+    "--prefix",
+    "com.google"
+  ],
+  "stderr_byte_count": 0,
+  "stdout_byte_count": 92811,
+  "stdout_line_count": 1297,
+  "subcommand": "listclass"
+}

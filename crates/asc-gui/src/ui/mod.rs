@@ -12,8 +12,6 @@ pub mod status_bar;
 
 use eframe::egui;
 
-use crate::design::DARK as T;
-
 /// `Lcom/foo/Bar$Baz;` → `Bar$Baz`.
 pub(crate) fn short_name(descriptor: &str) -> String {
     let d = descriptor.trim_start_matches('L');
@@ -25,7 +23,15 @@ pub(crate) fn short_name(descriptor: &str) -> String {
 }
 
 /// Convert per-line syntax spans + text into an egui `LayoutJob`.
-pub(crate) fn spans_to_job(line: &str, spans: &[crate::highlight::Span]) -> egui::text::LayoutJob {
+/// `sym` are line-local byte ranges of the selected symbol — they get
+/// the selection tint as background.
+pub(crate) fn spans_to_job(
+    line: &str,
+    spans: &[crate::highlight::Span],
+    sym: &[(usize, usize)],
+) -> egui::text::LayoutJob {
+    #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+    let T = crate::design::tokens();
     use crate::highlight::Token;
     let font = egui::FontId::monospace(T.code_size);
     let plain = egui::TextFormat {
@@ -39,15 +45,31 @@ pub(crate) fn spans_to_job(line: &str, spans: &[crate::highlight::Span]) -> egui
         if *start > cursor {
             job.append(&line[cursor..*start], 0.0, plain.clone());
         }
-        job.append(
-            &line[*start..*end],
-            0.0,
-            egui::TextFormat {
+        // Split the span wherever the in-symbol state changes so the
+        // occurrence ranges get the selection background.
+        let mut cuts = vec![*start, *end];
+        for (s, e) in sym {
+            if *s > *start && *s < *end {
+                cuts.push(*s);
+            }
+            if *e > *start && *e < *end {
+                cuts.push(*e);
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let mut fmt = egui::TextFormat {
                 font_id: font.clone(),
                 color: crate::design::token_color(*tok),
                 ..Default::default()
-            },
-        );
+            };
+            if sym.iter().any(|(s, e)| a >= *s && a < *e) {
+                fmt.background = T.row_sel_bg;
+            }
+            job.append(&line[a..b], 0.0, fmt);
+        }
         cursor = *end;
     }
     if cursor < line.len() {

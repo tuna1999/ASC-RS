@@ -4,10 +4,11 @@
 use eframe::egui;
 
 use crate::app::AscApp;
-use crate::design::DARK as T;
 
 impl AscApp {
     pub(crate) fn draw_status_bar(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         ui.horizontal(|ui| {
             // State dot.
             let (dot, color) = if self.tasks.has_in_flight() {

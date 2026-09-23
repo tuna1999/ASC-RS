@@ -6,11 +6,12 @@ use eframe::egui;
 
 use crate::app::AscApp;
 use crate::command::Command;
-use crate::design::DARK as T;
 use crate::state::{NavOrigin, TabStatus};
 
 impl AscApp {
     pub(crate) fn draw_inspector(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         ui.label(
             egui::RichText::new("INSPECTOR")
                 .small()
@@ -27,6 +28,8 @@ impl AscApp {
     }
 
     fn inspector_symbol(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let active = self.tabs.active_descriptor().map(str::to_string);
         let status = self
             .tabs
@@ -81,6 +84,8 @@ impl AscApp {
     /// STRUCTURE: the computed document outline (methods and fields,
     /// with line numbers). Clicking jumps to the line in the editor.
     fn inspector_outline(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let entries: Vec<(String, usize, bool)> = self
             .active_doc
             .as_ref()
@@ -143,6 +148,8 @@ impl AscApp {
     }
 
     fn inspector_dex(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         egui::CollapsingHeader::new(
             egui::RichText::new("DEX")
                 .small()
@@ -175,6 +182,8 @@ impl AscApp {
     }
 
     fn inspector_references(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         egui::CollapsingHeader::new(
             egui::RichText::new("REFERENCES")
                 .small()
@@ -201,6 +210,8 @@ impl AscApp {
     }
 
     fn inspector_metadata(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         egui::CollapsingHeader::new(
             egui::RichText::new("METADATA")
                 .small()
@@ -217,10 +228,244 @@ impl AscApp {
                     let ver = m.version_code.map(|v| format!(" v{v}")).unwrap_or_default();
                     let _ = ui.monospace(format!("{pkg}{ver}"));
                 }
+                let rows = metadata_rows(m);
+                if rows.is_empty() {
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for row in &rows {
+                            match row {
+                                MetadataRow::Field(s) => {
+                                    let _ = ui.monospace(
+                                        egui::RichText::new(s).small().color(T.text_secondary),
+                                    );
+                                }
+                                MetadataRow::Permission(s) => {
+                                    let _ =
+                                        ui.monospace(egui::RichText::new(s).small().color(T.text));
+                                }
+                                MetadataRow::Provider(s) => {
+                                    let _ = ui.monospace(
+                                        egui::RichText::new(s).small().color(T.text_disabled),
+                                    );
+                                }
+                            }
+                        }
+                    });
             }
             None => {
                 let _ = ui.weak("no manifest (synthetic corpus?)");
             }
         });
+    }
+}
+
+/// One row in the inspector's METADATA section. `Field` is a label/value
+/// pair like `versionName 1.2.3`; the lists (`Permission`, `Provider`)
+/// render as one monospace row each. Kept `pub(crate)` so the inline
+/// tests can assert on the produced rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MetadataRow {
+    Field(String),
+    Permission(String),
+    Provider(String),
+}
+
+/// Build the additional METADATA rows rendered below the package line.
+///
+/// Returned in source order: version_name, sdk range, components
+/// summary, then one row per permission / provider. Empty manifest
+/// returns an empty `Vec` (the caller then skips the scroll area).
+pub(crate) fn metadata_rows(m: &asc_manifest::ManifestInfo) -> Vec<MetadataRow> {
+    use MetadataRow::*;
+    let mut out = Vec::new();
+    if let Some(vn) = &m.version_name {
+        out.push(Field(format!("versionName {vn}")));
+    }
+    match (m.min_sdk, m.target_sdk) {
+        (Some(a), Some(b)) => out.push(Field(format!("sdk min {a} · target {b}"))),
+        (Some(a), None) => out.push(Field(format!("sdk min {a}"))),
+        (None, Some(b)) => out.push(Field(format!("sdk target {b}"))),
+        (None, None) => {}
+    }
+    let n_act = m.activities.len();
+    let n_svc = m.services.len();
+    let n_recv = m.receivers.len();
+    if n_act + n_svc + n_recv > 0 {
+        out.push(Field(format!(
+            "{n_act} activities · {n_svc} services · {n_recv} receivers"
+        )));
+    }
+    for p in &m.permissions {
+        out.push(Permission(p.name.clone()));
+    }
+    for p in &m.providers {
+        let line = match &p.authorities {
+            Some(a) if !a.is_empty() => format!("{} · {a}", p.name),
+            _ => p.name.clone(),
+        };
+        out.push(Provider(line));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asc_manifest::{ComponentEntry, ManifestInfo, PermissionEntry, ProviderEntry};
+
+    fn populated_manifest() -> ManifestInfo {
+        ManifestInfo {
+            package: Some("com.example.app".into()),
+            version_code: Some(42),
+            version_name: Some("1.2.3".into()),
+            min_sdk: Some(21),
+            target_sdk: Some(33),
+            permissions: vec![
+                PermissionEntry {
+                    name: "android.permission.INTERNET".into(),
+                    protection_level: None,
+                    label: None,
+                },
+                PermissionEntry {
+                    name: "android.permission.ACCESS_NETWORK_STATE".into(),
+                    protection_level: None,
+                    label: None,
+                },
+            ],
+            activities: vec![ComponentEntry {
+                name: "com.example.app.Main".into(),
+                exported: true,
+                permission: None,
+                label: None,
+                intent_filters: Vec::new(),
+            }],
+            services: vec![ComponentEntry {
+                name: "com.example.app.Svc".into(),
+                exported: false,
+                permission: None,
+                label: None,
+                intent_filters: Vec::new(),
+            }],
+            receivers: vec![ComponentEntry {
+                name: "com.example.app.R".into(),
+                exported: true,
+                permission: None,
+                label: None,
+                intent_filters: Vec::new(),
+            }],
+            providers: vec![ProviderEntry {
+                name: "com.example.app.Data".into(),
+                authorities: Some("com.example.app.data".into()),
+                exported: false,
+                permission: None,
+                grant_uri_permissions: false,
+                label: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn metadata_rows_emits_expected_sections() {
+        let rows = metadata_rows(&populated_manifest());
+        // version_name line.
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, MetadataRow::Field(s) if s == "versionName 1.2.3")),
+            "rows: {rows:?}"
+        );
+        // sdk range line.
+        assert!(
+            rows.iter().any(|r| matches!(r, MetadataRow::Field(s)
+                if s == "sdk min 21 · target 33")),
+            "rows: {rows:?}"
+        );
+        // components summary line.
+        assert!(
+            rows.iter().any(|r| matches!(r, MetadataRow::Field(s)
+                if s == "1 activities · 1 services · 1 receivers")),
+            "rows: {rows:?}"
+        );
+        // INTERNET permission is present (the row the user looks for).
+        assert!(
+            rows.iter().any(|r| matches!(r, MetadataRow::Permission(s)
+                if s == "android.permission.INTERNET")),
+            "rows: {rows:?}"
+        );
+        // Second permission also surfaces.
+        assert!(
+            rows.iter().any(|r| matches!(r, MetadataRow::Permission(s)
+                if s == "android.permission.ACCESS_NETWORK_STATE")),
+            "rows: {rows:?}"
+        );
+        // Provider line carries authorities.
+        assert!(
+            rows.iter().any(|r| matches!(r, MetadataRow::Provider(s)
+                if s.contains("com.example.app.Data")
+                    && s.contains("com.example.app.data"))),
+            "rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_rows_empty_when_manifest_has_only_pkg() {
+        let m = ManifestInfo {
+            package: Some("com.example".into()),
+            ..Default::default()
+        };
+        assert!(metadata_rows(&m).is_empty());
+    }
+
+    #[test]
+    fn metadata_rows_omits_components_summary_when_zero() {
+        // No activities/services/receivers → no summary line.
+        let m = ManifestInfo {
+            package: Some("com.example".into()),
+            version_name: Some("1.0".into()),
+            permissions: vec![PermissionEntry {
+                name: "android.permission.INTERNET".into(),
+                protection_level: None,
+                label: None,
+            }],
+            ..Default::default()
+        };
+        let rows = metadata_rows(&m);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, MetadataRow::Field(s) if s == "versionName 1.0"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, MetadataRow::Field(s) if s.contains("activities"))),
+            "no components summary when counts are zero: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r, MetadataRow::Permission(_)))
+                .count(),
+            1
+        );
+    }
+
+    /// Render smoke: drive `draw_inspector` headlessly with a populated
+    /// manifest; catches any rendering-side regression without needing
+    /// a native window. Mirrors the harness pattern in
+    /// `app::render_all_panels_smoke`.
+    #[test]
+    fn inspector_metadata_renders_with_populated_manifest() {
+        let mut app = crate::app::AscApp::new(None);
+        app.manifest = Some(populated_manifest());
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::SidePanel::right("inspector-test").show(ctx, |ui| app.draw_inspector(ui));
+            });
+        }
+        assert!(app.last_error.is_none(), "{:?}", app.last_error);
     }
 }

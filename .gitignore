@@ -33,3 +33,4 @@ gui-check*.png
 rebuilt-*.dex
 *.heap
 probe*.rs
+.tmp_*.py

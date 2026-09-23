@@ -1,0 +1,11 @@
+{
+  "apk": "workload.apk",
+  "case_id": "listclass_workload",
+  "exit_code": 0,
+  "expect_error": false,
+  "query": [],
+  "stderr_byte_count": 0,
+  "stdout_byte_count": 351714,
+  "stdout_line_count": 6220,
+  "subcommand": "listclass"
+}

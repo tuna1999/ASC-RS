@@ -32,6 +32,7 @@ pub mod icons;
 pub mod package_tree;
 pub mod selfcheck;
 pub mod session;
+pub mod source_edit;
 pub mod state;
 pub mod task;
 pub mod ui;

@@ -17,6 +17,115 @@ use std::sync::Arc;
 
 use crate::highlight::{self, OutlineEntry, Span};
 
+/// Decode Java-style `\uXXXX` escapes in a decompiled source.
+///
+/// Mirrors the oracle `text_utils.decode_java_unicode_escapes`:
+/// a valid UTF-16 surrogate pair `\uD800-\uDBFF\uDC00-\uDFFF`
+/// collapses to the combined non-BMP `char`; lone / invalid
+/// surrogates and malformed escapes are preserved verbatim.
+/// Applied as the first step of [`Document::new`] so all downstream
+/// artifacts (line offsets, spans, outline) see decoded text.
+pub(crate) fn decode_java_unicode_escapes(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    // A buffered high surrogate waiting for its low half. We track
+    // only the start byte offset so flushing can splice raw text out
+    // of `s` without a second copy.
+    let mut pending_high: Option<u32> = None;
+    let mut pending_high_start: usize = 0;
+    while i < n {
+        let b = bytes[i];
+        // Not the start of `\u` — literal char (or boundary).
+        if b != b'\\' || i + 1 >= n || bytes[i + 1] != b'u' {
+            if pending_high.take().is_some() {
+                out.push_str(&s[pending_high_start..i]);
+            }
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        // Skip the leading `u`s (oracle allows `\uu0041` and similar).
+        let escape_start = i;
+        let mut j = i + 1;
+        while j < n && bytes[j] == b'u' {
+            j += 1;
+        }
+        // Fewer than 4 hex chars follow — treat the `\` as a literal.
+        if j + 4 > n {
+            if pending_high.take().is_some() {
+                out.push_str(&s[pending_high_start..i]);
+            }
+            out.push('\\');
+            i += 1;
+            continue;
+        }
+        let code_unit = match u32::from_str_radix(&s[j..j + 4], 16) {
+            Ok(v) => v,
+            Err(_) => {
+                if pending_high.take().is_some() {
+                    out.push_str(&s[pending_high_start..i]);
+                }
+                out.push('\\');
+                i += 1;
+                continue;
+            }
+        };
+        let escape_end = j + 4;
+        let raw_escape = &s[escape_start..escape_end];
+        i = escape_end;
+        // 0xFFFD — U+FFFD REPLACEMENT CHARACTER: oracle preserves raw.
+        if code_unit == 0xFFFD {
+            if pending_high.take().is_some() {
+                out.push_str(&s[pending_high_start..escape_start]);
+            }
+            out.push_str(raw_escape);
+            continue;
+        }
+        // High surrogate: buffer for a possible pair.
+        if (0xD800..=0xDBFF).contains(&code_unit) {
+            if pending_high.take().is_some() {
+                out.push_str(&s[pending_high_start..escape_start]);
+            }
+            pending_high = Some(code_unit);
+            pending_high_start = escape_start;
+            continue;
+        }
+        // Try to close a pending pair.
+        if let Some(high) = pending_high.take() {
+            if (0xDC00..=0xDFFF).contains(&code_unit) {
+                let cp = 0x10000 + ((high - 0xD800) << 10) + (code_unit - 0xDC00);
+                if let Some(ch) = char::from_u32(cp) {
+                    out.push(ch);
+                    continue;
+                }
+            }
+            // Lone low / invalid pair — splice high raw, then fall through.
+            out.push_str(&s[pending_high_start..escape_start]);
+        }
+        // Lone low surrogate: preserve raw.
+        if (0xDC00..=0xDFFF).contains(&code_unit) {
+            out.push_str(raw_escape);
+            continue;
+        }
+        // BMP code point.
+        if let Some(ch) = char::from_u32(code_unit) {
+            out.push(ch);
+        } else {
+            out.push_str(raw_escape);
+        }
+    }
+    if pending_high.take().is_some() {
+        out.push_str(&s[pending_high_start..]);
+    }
+    out
+}
+
 /// One immutable decompiled class plus its derived artifacts.
 /// Addressed by descriptor (unique within a session).
 #[derive(Debug)]
@@ -42,6 +151,10 @@ impl Document {
     /// Build a document from a decompile result. Tokenizes the whole
     /// source and extracts the outline — do this on a worker thread.
     pub fn new(descriptor: String, dex_name: String, source: String) -> Self {
+        // Oracle applies `\uXXXX` decoding to the whole decompile
+        // output before display (app.py:927) so line offsets, spans,
+        // and outline reflect the text the user sees.
+        let source = decode_java_unicode_escapes(&source);
         let mut line_offsets: Vec<u32> = Vec::with_capacity(source.len() / 32 + 1);
         let mut spans: Vec<Vec<Span>> = Vec::new();
         let mut in_block = false;
@@ -320,5 +433,93 @@ mod tests {
             cache.contains("LA;"),
             "soft budget never drops the last document"
         );
+    }
+
+    // ---- F28: Java \uXXXX decoding ----
+
+    #[test]
+    fn decode_ascii_passthrough() {
+        assert_eq!(decode_java_unicode_escapes("hello world"), "hello world");
+    }
+
+    #[test]
+    fn decode_simple_escape() {
+        assert_eq!(
+            decode_java_unicode_escapes(r"hello \u0041 world"),
+            "hello A world"
+        );
+        // Multiple escapes in one string.
+        assert_eq!(
+            decode_java_unicode_escapes(r"\u00e9 \u00e8 \u00ea"),
+            "é è ê"
+        );
+    }
+
+    #[test]
+    fn decode_surrogate_pair_to_non_bmp() {
+        // U+1F600 GRINNING FACE = \uD83D\uDE00 in UTF-16.
+        let decoded = decode_java_unicode_escapes(r"\uD83D\uDE00");
+        assert_eq!(decoded.chars().count(), 1, "pair collapses to one char");
+        assert_eq!(decoded, "\u{1F600}");
+    }
+
+    #[test]
+    fn decode_bad_hex_preserved_verbatim() {
+        // Non-hex chars: oracle preserves raw `\` and continues from `u`.
+        assert_eq!(
+            decode_java_unicode_escapes(r"foo \uXYZW bar"),
+            "foo \\uXYZW bar"
+        );
+    }
+
+    #[test]
+    fn decode_lone_surrogate_preserved_verbatim() {
+        // High surrogate without a low half.
+        assert_eq!(
+            decode_java_unicode_escapes(r"foo \uD83D bar"),
+            "foo \\uD83D bar"
+        );
+        // Low surrogate without a high half.
+        assert_eq!(
+            decode_java_unicode_escapes(r"foo \uDE00 bar"),
+            "foo \\uDE00 bar"
+        );
+        // Two high surrogates back-to-back: both preserved.
+        assert_eq!(
+            decode_java_unicode_escapes(r"\uD83D\uD83D"),
+            "\\uD83D\\uD83D"
+        );
+    }
+
+    #[test]
+    fn decode_escape_at_end_of_string() {
+        // Complete escape at the end.
+        assert_eq!(
+            decode_java_unicode_escapes(r"trailing \u0041"),
+            "trailing A"
+        );
+        // Incomplete `\u` with no hex chars after.
+        assert_eq!(
+            decode_java_unicode_escapes(r"incomplete \u"),
+            "incomplete \\u"
+        );
+        // Lone high surrogate as the very last escape.
+        assert_eq!(decode_java_unicode_escapes(r"end \uD83D"), "end \\uD83D");
+    }
+
+    #[test]
+    fn decode_empty_input() {
+        assert_eq!(decode_java_unicode_escapes(""), "");
+    }
+
+    #[test]
+    fn document_new_applies_unicode_decoding_first() {
+        // Whole-source decode: line offsets / spans / outline reflect
+        // the decoded text (matches oracle app.py:927 behavior).
+        let src = String::from("// \u{00e9}\nclass C { int x; }\n");
+        let encoded = src.replace("é", r"\u00e9");
+        let doc = Document::new("LA;".into(), "classes.dex".into(), encoded);
+        assert_eq!(doc.source.as_ref(), src);
+        assert_eq!(doc.line(0), Some("// é"));
     }
 }

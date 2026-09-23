@@ -1,15 +1,17 @@
 //! # asc-cli
 //!
-//! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>` and
-//! `asc-rs findrefs <apk> {string|type|method|field} ...` with `--format
-//! text|json`, `-o/--output`, `--threads`, `--debug`.
+//! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
+//! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
+//! `asc-rs listclass <apk> [--prefix P]` with `--format text|json`,
+//! `-o/--output`, `--threads`, `--debug`.
 //!
 //! All engine logic lives in `asc-core`; this binary is a thin
 //! arg-parsing / output-routing wrapper. Exit codes:
 //!
 //! - 0 — success (findrefs with zero hits is still success).
 //! - 1 — class-not-found (getclass), or input validation error
-//!   (`findrefs method` with neither name nor `--class`, etc.).
+//!   (`findrefs method` with neither name nor `--class`, empty
+//!   `listclass --prefix`, etc.).
 //! - 2 — internal / unexpected error (APK parse, rebuild, decompile).
 
 use std::io::Write as _;
@@ -20,8 +22,9 @@ use std::time::Instant;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use asc_core::{
-    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, format_getclass_text,
-    format_search_report_json, format_search_report_text, run_findrefs, run_getclass,
+    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
+    ListClassesOptions, format_getclass_text, format_listclasses_text, format_search_report_json,
+    format_search_report_text, run_findrefs, run_getclass, run_listclasses,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -110,6 +113,25 @@ enum Cmd {
         #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+    /// List every class defined in the APK (in DEX-definition order).
+    Listclass {
+        /// Path to the APK.
+        apk: PathBuf,
+        /// Only emit classes whose descriptor starts with this prefix.
+        /// Accepts `Lcom/foo`, `Lcom/foo/Bar;`, `com.foo`, `com.foo.Bar;`.
+        #[arg(long = "prefix")]
+        prefix: Option<String>,
+        /// Write the result to this file in addition to stdout.
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+        /// Number of worker threads (default 8). Reserved for future
+        /// parallel enumeration; currently unused.
+        #[arg(long = "threads", default_value_t = 8)]
+        threads: usize,
+        /// Emit per-stage timing information to stderr.
+        #[arg(long = "debug", default_value_t = false)]
+        debug: bool,
+    },
 }
 
 /// The four findrefs query kinds.
@@ -165,6 +187,13 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             debug,
             format,
         } => run_findrefs_cmd(apk, kind, output.as_deref(), *threads, *debug, *format),
+        Cmd::Listclass {
+            apk,
+            prefix,
+            output,
+            threads,
+            debug,
+        } => run_listclass_cmd(apk, prefix.as_deref(), output.as_deref(), *threads, *debug),
     }
 }
 
@@ -253,6 +282,70 @@ fn run_findrefs_cmd(
         // Print errors to stderr in debug mode.
         for e in &report.errors {
             eprintln!("[DEBUG] {e}");
+        }
+    }
+    Ok(())
+}
+
+fn run_listclass_cmd(
+    apk: &std::path::Path,
+    prefix: Option<&str>,
+    output: Option<&std::path::Path>,
+    threads: usize,
+    debug: bool,
+) -> Result<(), CoreError> {
+    let started = Instant::now();
+    // The oracle rejects `--threads 0` with exit 1
+    // (`apk_handler.list_classes`: `if self.max_workers <= 0`).
+    if threads == 0 {
+        return Err(CoreError::Usage(
+            "Worker count must be greater than zero".into(),
+        ));
+    }
+    // `ListClassesJob::new` rejects empty prefixes via
+    // `DecompileError::ClassNotFound`; map that into a clean exit-1
+    // `CoreError::Usage` so the CLI prints `Error: ...` like the oracle.
+    let job = match ListClassesJob::new(apk.to_path_buf(), prefix) {
+        Ok(j) => j,
+        Err(_) if prefix == Some("") || prefix.map(str::trim) == Some("") => {
+            return Err(CoreError::Usage("Class prefix cannot be empty".into()));
+        }
+        Err(e) => return Err(CoreError::Class(e)),
+    };
+    let opts = ListClassesOptions { threads, debug };
+    let result = run_listclasses(&job, &opts)?;
+    let text = format_listclasses_text(&result);
+    // `format_listclasses_text` strips the trailing newline; the CLI
+    // writes one trailing newline. Empty results emit nothing (matches
+    // the oracle's zero-iteration writer in `cli.py:_handle_listclass`).
+    let rendered = if text.is_empty() {
+        String::new()
+    } else {
+        text + "\n"
+    };
+
+    if debug {
+        for (entry, n) in &result.per_dex_counts {
+            eprintln!("[APK] '{entry}' class_count={n}");
+        }
+        eprintln!(
+            "[APK] listclass total={} us count={}",
+            started.elapsed().as_micros(),
+            result.names.len()
+        );
+        eprintln!("----------------------------------------");
+    }
+
+    // Oracle: when `-o` is set, output goes to the file *instead of*
+    // stdout (`cli.py:99`: `out = output_fp if output_fp is not None
+    // else sys.stdout`). We honor that contract — `-o` is exclusive,
+    // not additive.
+    match output {
+        Some(out_path) => std::fs::write(out_path, rendered.as_bytes())
+            .map_err(|e| CoreError::Usage(format!("write {out_path:?}: {e}")))?,
+        None => {
+            print!("{rendered}");
+            std::io::stdout().flush().ok();
         }
     }
     Ok(())
