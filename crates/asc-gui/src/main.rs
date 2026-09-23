@@ -21,10 +21,17 @@ use eframe::egui;
 /// the shell/taskbar).
 const ICON_32_RGBA: &[u8] = include_bytes!("../assets/icon_32.rgba");
 
+/// Stamped from `Cargo.toml` at build time via `env!("CARGO_PKG_VERSION")`.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--selfcheck") {
         return run_selfcheck_mode(&args);
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("asc-gui {VERSION}");
+        return ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
@@ -34,13 +41,14 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("asc-gui — ASC-RS desktop workbench");
+    println!("asc-gui {VERSION} — ASC-RS desktop workbench");
     println!();
     println!("USAGE:");
     println!(
         "  asc-gui [path.apk]            Open the GUI on the given APK (loaded in the background)."
     );
     println!("  asc-gui --selfcheck <apk>     Run the headless selfcheck and exit.");
+    println!("  asc-gui --version             Print version and exit.");
     println!("  asc-gui --help                Print this help.");
 }
 
@@ -75,7 +83,7 @@ fn run_gui_mode(args: &[String]) -> ExitCode {
         .map(PathBuf::from);
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title("asc-gui")
+        .with_title(format!("asc-gui {VERSION}"))
         .with_inner_size([1280.0, 820.0])
         .with_icon(std::sync::Arc::new(egui::IconData {
             rgba: ICON_32_RGBA.to_vec(),
