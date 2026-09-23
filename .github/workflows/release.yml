@@ -1,0 +1,253 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.0). Required for workflow_dispatch.'
+        required: true
+
+# Refuse to run two release builds in parallel — they would clobber the GitHub
+# release assets and waste a matrix slot.
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config
+
+      - name: Download corpus APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p corpus/apk corpus/dex
+          curl -fL -A 'curl/8' -o corpus/apk/com.aurora.store_60.apk \
+            https://f-droid.org/repo/com.aurora.store_60.apk
+          curl -fL -A 'curl/8' -o corpus/apk/org.fdroid.fdroid_1016000.apk \
+            https://f-droid.org/repo/org.fdroid.fdroid_1016000.apk
+
+      - name: Build workload.apk from frozen oracle
+        shell: bash
+        env:
+          WORKLOAD_SRC: ${{ runner.temp }}/oracle
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/MG1937/asc.git "$WORKLOAD_SRC"
+          git -C "$WORKLOAD_SRC" checkout --quiet ccc6bae7704f5c5ef1a7271e27314837079621fb
+          WORKLOAD_SRC="$WORKLOAD_SRC" python3 - <<'PY'
+          import os, zipfile, pathlib
+          src = pathlib.Path(os.environ['WORKLOAD_SRC']) / 'tests/fixtures/reference-workload.zip'
+          dex = zipfile.ZipFile(src).read('classes.dex')
+          out_apk = pathlib.Path('corpus/apk/workload.apk')
+          out_dex = pathlib.Path('corpus/dex/workload_classes.dex')
+          with zipfile.ZipFile(out_apk, 'w', compression=zipfile.ZIP_STORED) as z:
+              z.writestr('classes.dex', dex)
+          out_dex.write_bytes(dex)
+          print(f'workload.apk={out_apk.stat().st_size} dex={len(dex)}')
+          PY
+
+      - name: Extract DEX fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import zipfile
+          for apk, prefix in [
+              ('corpus/apk/com.aurora.store_60.apk', 'aurora'),
+              ('corpus/apk/org.fdroid.fdroid_1016000.apk', 'fdroid'),
+          ]:
+              with zipfile.ZipFile(apk) as z:
+                  for n in [x for x in z.namelist() if x.endswith('.dex')]:
+                      data = z.read(n)
+                      out = f'corpus/dex/{prefix}_{n}'
+                      with open(out, 'wb') as f:
+                          f.write(data)
+          PY
+
+      - name: rustfmt --check
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Selfcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/asc-gui${{ runner.os == 'Windows' && '.exe' || '' }} \
+            --selfcheck corpus/apk/workload.apk
+
+      - name: Differential parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/differential/run_differential.py \
+            target/release/asc-rs${{ runner.os == 'Windows' && '.exe' || '' }}
+
+  binaries:
+    name: binaries (${{ matrix.label }})
+    needs: gates
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x64
+            bin_prefix: ''
+            artifact: asc-rs-linux-x64
+          - os: windows-2022
+            label: windows-x64
+            bin_prefix: '.exe'
+            artifact: asc-rs-windows-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Strip + zip binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_DIR="target/release"
+          mkdir -p dist
+          cp "$BIN_DIR/asc-rs${{ matrix.bin_prefix }}" dist/
+          cp "$BIN_DIR/asc-gui${{ matrix.bin_prefix }}" dist/
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            strip dist/asc-rs dist/asc-gui
+          fi
+          cd dist
+          zip -9 "../${{ matrix.artifact }}.zip" asc-rs${{ matrix.bin_prefix }} asc-gui${{ matrix.bin_prefix }}
+        env:
+          RUNNER_OS: ${{ runner.os }}
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  source-archive:
+    name: source archive
+    needs: gates
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build byte-reproducible source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          # scripts/build_release.py derives its file list from `git ls-files`,
+          # so this also acts as a sanity check that every file we'd ship is
+          # actually tracked.
+          mkdir -p dist
+          python scripts/build_release.py "${{ github.ref_name }}" --output dist
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-archive
+          path: |
+            dist/*-source.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: [binaries, source-archive]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: '*'
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -maxdepth 3 -type f | sort
+
+      - name: Compute combined SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          : > SHA256SUMS
+          for f in $(find . -type f \( -name '*.zip' -o -name '*.exe' \) | sort); do
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/*.zip
+            artifacts/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
