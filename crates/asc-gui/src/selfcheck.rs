@@ -103,7 +103,7 @@ pub enum SelfcheckError {
 
 impl std::fmt::Display for SelfcheckReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "asc-gui selfcheck:")?;
+        writeln!(f, "asc-gui {} selfcheck:", env!("CARGO_PKG_VERSION"))?;
         writeln!(f, "  apk               = {}", self.apk)?;
         writeln!(f, "  dex_count         = {}", self.dex_count)?;
         writeln!(f, "  class_count       = {}", self.class_count)?;
