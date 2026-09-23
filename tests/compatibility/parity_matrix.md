@@ -28,14 +28,15 @@ main.py findrefs <apk> field  [name] [--class X [--fuzzy-class]] [-o out] [--thr
 
 ## Planned asc-rs CLI
 
-The parity target for the first cut is:
+The parity target is:
 
 ```
-asc-rs getclass <apk> <class> [-o out] [--threads N] [--debug]
-asc-rs findrefs <apk> string <value> [-o out] [--threads N] [--debug]
-asc-rs findrefs <apk> type   <value> [-o out] [--threads N] [--debug]
-asc-rs findrefs <apk> method [name] [--class X [--fuzzy-class]] [-o out] [--threads N] [--debug]
-asc-rs findrefs <apk> field  [name] [--class X [--fuzzy-class]] [-o out] [--threads N] [--debug]
+asc-rs getclass   <apk> <class>                                    [-o out] [--threads N] [--debug]
+asc-rs findrefs   <apk> string <value>                              [-o out] [--threads N] [--debug] [--format text|json]
+asc-rs findrefs   <apk> type   <value>                              [-o out] [--threads N] [--debug] [--format text|json]
+asc-rs findrefs   <apk> method [name] [--class X [--fuzzy-class]]   [-o out] [--threads N] [--debug] [--format text|json]
+asc-rs findrefs   <apk> field  [name] [--class X [--fuzzy-class]]   [-o out] [--threads N] [--debug] [--format text|json]
+asc-rs listclass  <apk> [--prefix P]                               [-o out] [--threads N] [--debug]
 ```
 
 Key constraints:
@@ -75,6 +76,27 @@ runtime; the harness substitutes it for `<asc-rs>` in this table).
 |-------------------------------|------------------------------------------------------------------------------|------------------------------------------------------------------------------|----------------|--------------------------------------------------------|
 | getclass_clockface_workload   | `python main.py getclass corpus/apk/workload.apk Lcom/google/android/material/timepicker/ClockFaceView;` | `asc-rs getclass corpus/apk/workload.apk Lcom/google/android/material/timepicker/ClockFaceView;` | `workload.apk` | exit 0; decompiled Java source on stdout |
 | getclass_notfound             | `python main.py getclass corpus/apk/workload.apk Lno/such/Class;`             | `asc-rs getclass corpus/apk/workload.apk Lno/such/Class;`                   | `workload.apk` | exit 1; stderr `Error: Class Lno/such/Class; not found in APK.`; no stdout source |
+
+### listclass cases
+
+The frozen Python oracle at `reference/asc @ ccc6bae` does **not**
+include the `listclass` subcommand (it was added in MG1937/ASC commit
+`752477e`, which sits ahead of the freeze). The two golden fixtures
+below were hand-captured from `target/release/asc-rs.exe` itself and
+are reproducible byte-for-byte. They are NOT in `cases.json` (the
+differential harness ignores them) and the differential runner will
+continue to PASS even when these outputs drift.
+
+To promote them to full oracle-driven parity, bump
+`reference/asc` past `5395f17`, add matching `Case(...)` entries to
+`tests/fixtures/capture_golden.py`, re-run the capture, and remove the
+hand-captured `.txt`/`.counts.json` in favor of the regenerated ones.
+
+| case_id                          | asc-rs invocation (planned)                                                | fixture APK    | expects                                                                                       |
+|----------------------------------|----------------------------------------------------------------------------|----------------|-----------------------------------------------------------------------------------------------|
+| listclass_workload               | `asc-rs listclass corpus/apk/workload.apk`                                  | `workload.apk` | exit 0; 6,220 descriptors in DEX-definition order, one per line                              |
+| listclass_with_prefix_workload   | `asc-rs listclass corpus/apk/workload.apk --prefix com.google`              | `workload.apk` | exit 0; 1,297 descriptors matching `Lcom/google*`, dotted and `L…` prefixes normalized identically |
+
 
 ## Edge cases the parity check expects to surface
 

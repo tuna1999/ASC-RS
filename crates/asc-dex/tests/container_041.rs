@@ -66,3 +66,39 @@ fn parse_at_finds_second_logical_dex() {
     assert_eq!(view.version().as_str(), "041");
     assert_eq!(view.string_count(), 3);
 }
+
+/// Regression: the Python oracle builds DEX-041 logical headers with
+/// `header_size == 0x78` (see `MG1937/ASC @ 5395f17 tests/test_listclass.py`).
+/// Earlier this crate hard-rejected any header other than `0x70`, silently
+/// dropping every real-world 041 logical member. This test patches the
+/// magic to 041 and the header_size to 0x78, and asserts that
+/// `DexView::parse` succeeds.
+#[test]
+fn parse_accepts_dex041_logical_header_size_0x78() {
+    use asc_dex::header::DexHeader;
+    let mut buf = tiny_dex();
+    buf[0..8].copy_from_slice(b"dex\n041\0");
+    // Re-stamp file_size (unchanged) and bump header_size from 0x70 to 0x78.
+    let file_size = u32::from_le_bytes(buf[0x20..0x24].try_into().unwrap());
+    buf[0x24..0x28].copy_from_slice(&0x78u32.to_le_bytes());
+    // The body offsets are all below 0x70 so they remain valid under a
+    // 0x78-byte header.
+    let _ = file_size;
+    let view = DexView::parse(&buf).expect("0x78 DEX-041 header must parse");
+    assert_eq!(view.version().as_str(), "041");
+    assert_eq!(
+        DexHeader::SIZE_041,
+        0x78,
+        "DexHeader::SIZE_041 should be 0x78"
+    );
+}
+
+/// Regression: a `header_size` that is neither 0x70 nor 0x78 must still
+/// be rejected as `InvalidHeader` (no silent acceptance of arbitrary
+/// values).
+#[test]
+fn parse_rejects_unknown_header_size() {
+    let mut buf = tiny_dex();
+    buf[0x24..0x28].copy_from_slice(&0x80u32.to_le_bytes());
+    assert!(DexView::parse(&buf).is_err());
+}

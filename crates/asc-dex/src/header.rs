@@ -117,8 +117,13 @@ pub struct DexHeader {
 }
 
 impl DexHeader {
-    /// Expected header size, in bytes.
+    /// Expected minimal header size, in bytes. All fields the parser reads
+    /// fit within `0x70` bytes; the parser additionally accepts a 0x78-byte
+    /// header (DEX-041 logical members with the next-header pointer in
+    /// `header_off + 0x70`).
     pub const SIZE: usize = 0x70;
+    /// DEX-041 logical-header size, in bytes.
+    pub const SIZE_041: usize = 0x78;
 
     /// Expected endian tag (`0x12345678`).
     pub const ENDIAN_TAG: u32 = 0x12345678;
@@ -150,10 +155,16 @@ impl DexHeader {
         let header_size = crate::read::read_u32(bytes, header_off + 0x24)?;
         let endian_tag = crate::read::read_u32(bytes, header_off + 0x28)?;
 
-        if header_size != Self::SIZE as u32 {
+        if header_size != Self::SIZE as u32 && header_size != Self::SIZE_041 as u32 {
             return Err(DexError::InvalidHeader {
                 off: header_off + 0x24,
-                message: "header_size != 0x70",
+                message: "header_size != 0x70 and != 0x78",
+            });
+        }
+        if header_size as usize > bytes.len().saturating_sub(header_off) {
+            return Err(DexError::InvalidHeader {
+                off: header_off + 0x24,
+                message: "header_size exceeds buffer",
             });
         }
         if endian_tag != Self::ENDIAN_TAG {

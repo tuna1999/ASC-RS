@@ -15,6 +15,9 @@
 //!   `std::thread` pool with `AtomicUsize` work cursor + `AtomicBool`
 //!   "found" flag + `OnceLock` winner cell. Winner's DEX goes through
 //!   [`asc_rebuild::rebuild`] → [`asc_decompile::ClassDecompiler`].
+//! - [`pipeline::run_listclasses`] — enumerate every class descriptor
+//!   across all DEX entries (DEX-041-aware, optional ASCII prefix
+//!   filter). Mirrors the oracle's `droidasc listclass` subcommand.
 //! - [`report`] — the [`report::SearchReport`] / [`report::DexResults`]
 //!   / [`report::SearchError`] public types and their serde shape.
 //! - [`format`] — `text` and `json` emitters used by the CLI.
@@ -42,11 +45,13 @@ pub mod worker;
 
 pub use crate::class_name::normalize_class_name;
 pub use crate::format::{
-    JsonReport, format_getclass_text, format_search_report_json, format_search_report_text,
+    JsonReport, format_getclass_text, format_listclasses_text, format_search_report_json,
+    format_search_report_text,
 };
 pub use crate::pipeline::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult,
-    run_findrefs, run_getclass,
+    ListClassesJob, ListClassesOptions, ListClassesResult, run_findrefs, run_getclass,
+    run_listclasses,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::worker::{WorkerOutcome, WorkerPool};

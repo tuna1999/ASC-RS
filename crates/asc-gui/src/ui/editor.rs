@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-use crate::app::AscApp;
+use crate::app::{AscApp, SymbolSelection};
 use crate::command::Command;
-use crate::design::DARK as T;
 use crate::state::{Document, NavOrigin, TabKind, TabStatus};
 
 impl AscApp {
     pub(crate) fn draw_editor(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         egui::TopBottomPanel::top("editor_tabs")
             .frame(egui::Frame::new().fill(T.surface))
             .show_inside(ui, |ui| {
@@ -22,6 +23,20 @@ impl AscApp {
                 .frame(egui::Frame::new().fill(T.panel_bg))
                 .show_inside(ui, |ui| {
                     self.draw_find_bar(ui);
+                });
+        }
+        if self.show_rename {
+            egui::TopBottomPanel::top("editor_rename")
+                .frame(egui::Frame::new().fill(T.panel_bg))
+                .show_inside(ui, |ui| {
+                    self.draw_rename_bar(ui);
+                });
+        }
+        if self.comment_target.is_some() {
+            egui::TopBottomPanel::top("editor_comment")
+                .frame(egui::Frame::new().fill(T.panel_bg))
+                .show_inside(ui, |ui| {
+                    self.draw_comment_bar(ui);
                 });
         }
         egui::CentralPanel::default()
@@ -35,6 +50,8 @@ impl AscApp {
     /// underline; close button appears on hover; status glyph sits
     /// inside the tab, before the label.
     fn draw_tab_strip(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let mut clicked: Option<String> = None;
         let mut closed: Option<String> = None;
         let mut pinned: Option<String> = None;
@@ -79,7 +96,7 @@ impl AscApp {
                         }
 
                         let frame_fill = if is_active {
-                            T.surface.linear_multiply(1.25)
+                            T.tab_active_bg
                         } else {
                             T.surface
                         };
@@ -165,6 +182,8 @@ impl AscApp {
     /// Find-in-document bar (Ctrl+F). Substring, case-insensitive,
     /// next/prev over cached match lines.
     fn draw_find_bar(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("find").small().color(T.text_secondary));
             let changed = ui
@@ -244,6 +263,8 @@ impl AscApp {
     /// Empty-state hints. One composed block, secondary text — the
     /// editor never renders dead chrome.
     fn draw_editor_empty_state(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         ui.centered_and_justified(|ui| {
             egui::Grid::new("empty_state")
                 .num_columns(2)
@@ -305,8 +326,91 @@ impl AscApp {
         });
     }
 
+    /// Rename bar (F25): method-scoped rename of the clicked symbol.
+    fn draw_rename_bar(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("rename")
+                    .small()
+                    .color(T.text_secondary),
+            );
+            if let Some(sel) = &self.symbol_sel {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} · {} refs in method",
+                        sel.token,
+                        sel.occurrences.len()
+                    ))
+                    .small()
+                    .color(T.text_disabled),
+                );
+            }
+            let edit = egui::TextEdit::singleline(&mut self.rename_input)
+                .hint_text("new name")
+                .desired_width(160.0);
+            let resp = ui.add(edit);
+            if !resp.has_focus() {
+                resp.request_focus();
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let new_name = self.rename_input.trim().to_string();
+                self.queue(Command::RenameSymbol { new_name });
+            }
+            ui.label(
+                egui::RichText::new("Enter apply · Esc cancel")
+                    .small()
+                    .color(T.text_secondary),
+            );
+        });
+    }
+
+    /// Line-comment bar (F26): append a `// note` to the clicked line.
+    fn draw_comment_bar(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
+        let target = self.comment_target;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("comment")
+                    .small()
+                    .color(T.text_secondary),
+            );
+            if let Some(line) = target {
+                ui.label(
+                    egui::RichText::new(format!("line {}", line + 1))
+                        .small()
+                        .color(T.text_disabled),
+                );
+            }
+            let edit = egui::TextEdit::singleline(&mut self.comment_input)
+                .hint_text("note")
+                .desired_width(280.0);
+            let resp = ui.add(edit);
+            if !resp.has_focus() {
+                resp.request_focus();
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let text = self.comment_input.clone();
+                if let Some(line) = target {
+                    self.queue(Command::SetLineComment { line, text });
+                }
+            }
+            ui.label(
+                egui::RichText::new("Enter save · Esc cancel")
+                    .small()
+                    .color(T.text_secondary),
+            );
+        });
+    }
+
     fn draw_code(&mut self, ui: &mut egui::Ui, doc: &Arc<Document>) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        let fid = egui::FontId::monospace(T.code_size);
+        let advance = ui.fonts_mut(|f| f.glyph_width(&fid, 'M')).max(1.0);
 
         // Highlight the find match / navigation target line.
         let scroll_target = self.nav_or_find_line();
@@ -317,11 +421,31 @@ impl AscApp {
         if let Some(line) = pending {
             scroll = scroll.vertical_scroll_offset(line as f32 * row_h);
         }
+        // Symbol selection (F24): byte offsets are valid only for
+        // this document; clone out to release the borrow.
+        let sym_occ: Vec<(usize, usize)> = self
+            .symbol_sel
+            .as_ref()
+            .filter(|s| s.descriptor == doc.descriptor)
+            .map(|s| s.occurrences.clone())
+            .unwrap_or_default();
+        let mut hovered = false;
         scroll.show_rows(ui, row_h, doc.line_count(), |ui, range| {
             for idx in range {
                 let line = doc.line(idx).unwrap_or("");
+                let line_abs = line.as_ptr() as usize - doc.source.as_ptr() as usize;
+                let line_end = line_abs + line.len();
                 let empty: Vec<crate::highlight::Span> = Vec::new();
                 let spans = doc.spans.get(idx).unwrap_or(&empty);
+                // Line-local slices of the symbol occurrence ranges.
+                let sym_local: Vec<(usize, usize)> = sym_occ
+                    .iter()
+                    .filter_map(|&(s, e)| {
+                        let a = s.max(line_abs) - line_abs;
+                        let b = e.min(line_end) - line_abs;
+                        (a < b).then_some((a, b))
+                    })
+                    .collect();
                 let is_target = scroll_target == Some(idx);
                 let is_find_match = self.show_find && self.find_matches.contains(&idx);
                 let is_current = is_target && self.show_find;
@@ -351,14 +475,54 @@ impl AscApp {
                             .selectable(false),
                         );
                         ui.add_space(6.0);
-                        ui.add(
-                            egui::Label::new(super::spans_to_job(line, spans))
+                        let resp = ui.add(
+                            egui::Label::new(super::spans_to_job(line, spans, &sym_local))
                                 .selectable(true)
                                 .wrap_mode(egui::TextWrapMode::Extend),
                         );
+                        if resp.clicked() {
+                            self.last_clicked_line = Some(idx);
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                // Monospace: column from glyph advance.
+                                let col = (((pos.x - resp.rect.left()) / advance).round() as i64)
+                                    .clamp(0, line.chars().count() as i64)
+                                    as usize;
+                                let byte = line
+                                    .char_indices()
+                                    .nth(col)
+                                    .map(|(b, _)| b)
+                                    .unwrap_or(line.len());
+                                self.symbol_sel = symbol_selection_for(
+                                    &doc.descriptor,
+                                    &doc.source,
+                                    line_abs + byte,
+                                );
+                            }
+                        }
+                        hovered |= resp.hovered();
                     });
                 });
             }
         });
+        self.code_hovered = hovered;
     }
+}
+
+/// Selection model for the identifier at `byte` (F24): token,
+/// enclosing-method byte range, code-state occurrences.
+pub(crate) fn symbol_selection_for(
+    descriptor: &str,
+    source: &str,
+    byte: usize,
+) -> Option<SymbolSelection> {
+    let (s, e) = crate::source_edit::token_at(source, byte)?;
+    let token = source[s..e].to_string();
+    let method = crate::source_edit::find_method_range(source, byte)?;
+    let occurrences = crate::source_edit::occurrences_in_range(source, method.0, method.1, &token);
+    Some(SymbolSelection {
+        descriptor: descriptor.to_string(),
+        token,
+        method,
+        occurrences,
+    })
 }

@@ -5,7 +5,6 @@ use eframe::egui;
 
 use crate::app::AscApp;
 use crate::command::Command;
-use crate::design::DARK as T;
 use crate::state::{NavOrigin, SearchKind};
 
 /// Which bottom view is shown.
@@ -37,6 +36,8 @@ const BOTTOM_TABS: [BottomTab; 4] = [
 
 impl AscApp {
     pub(crate) fn draw_bottom_panel(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         self.draw_search_bar(ui);
         ui.add_space(2.0);
 
@@ -211,6 +212,8 @@ impl AscApp {
         rows: Vec<(String, String, String, String)>,
         track_selection: bool,
     ) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let row_h = T.row_list;
         let selected = self.search.selected();
         let mut activate: Option<(usize, String)> = None;
@@ -221,7 +224,7 @@ impl AscApp {
                     let (dex, caller, descriptor, matched) = &rows[idx];
                     let is_sel = track_selection && selected == Some(idx);
                     let frame = if is_sel {
-                        egui::Frame::new().fill(T.accent.linear_multiply(0.15))
+                        egui::Frame::new().fill(T.row_sel_bg)
                     } else {
                         egui::Frame::new().fill(T.panel_bg)
                     };
@@ -267,6 +270,8 @@ impl AscApp {
 
     /// Problems: engine errors from the last search / session.
     fn draw_problems(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let errors: Vec<String> = self
             .search
             .results()
@@ -292,6 +297,8 @@ impl AscApp {
 
     /// Tasks: in-flight + recent completed tasks.
     fn draw_tasks(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let recent: Vec<(String, String, bool, bool, u64)> = self
             .tasks
             .recent()

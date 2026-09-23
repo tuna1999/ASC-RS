@@ -35,6 +35,17 @@ pub(crate) struct StatusLine {
     pub(crate) ok: bool,
 }
 
+/// Clicked-identifier selection (rename/comment analysis aid): the
+/// token, its enclosing method's byte range, and code-state
+/// occurrences — valid for one document version only.
+#[derive(Debug, Clone)]
+pub(crate) struct SymbolSelection {
+    pub(crate) descriptor: String,
+    pub(crate) token: String,
+    pub(crate) method: (usize, usize),
+    pub(crate) occurrences: Vec<(usize, usize)>,
+}
+
 /// Main application shell.
 pub struct AscApp {
     // --- session / engine ---
@@ -66,6 +77,17 @@ pub struct AscApp {
     pub(crate) find_input: String,
     pub(crate) find_matches: Vec<usize>,
     pub(crate) find_index: Option<usize>,
+    pub(crate) show_rename: bool,
+    pub(crate) rename_input: String,
+    /// Line the pending line-comment targets (0-based).
+    pub(crate) comment_target: Option<usize>,
+    pub(crate) comment_input: String,
+    /// Last line clicked in the code area (comment anchor).
+    pub(crate) last_clicked_line: Option<usize>,
+    /// Identifier selection from the last code click (rename anchor).
+    pub(crate) symbol_sel: Option<SymbolSelection>,
+    /// Pointer over the code surface this frame (bare-key scope).
+    pub(crate) code_hovered: bool,
     pub(crate) bottom_tab: BottomTab,
     pub(crate) focus_search: bool,
     pub(crate) palette: Option<PaletteMode>,
@@ -116,6 +138,13 @@ impl AscApp {
             find_input: String::new(),
             find_matches: Vec::new(),
             find_index: None,
+            show_rename: false,
+            rename_input: String::new(),
+            comment_target: None,
+            comment_input: String::new(),
+            last_clicked_line: None,
+            symbol_sel: None,
+            code_hovered: false,
             bottom_tab: BottomTab::Results,
             focus_search: false,
             palette: None,
@@ -201,6 +230,10 @@ impl AscApp {
         self.selected_class = None;
         self.active_doc = None;
         self.pending_scroll = None;
+        self.symbol_sel = None;
+        self.last_clicked_line = None;
+        self.show_rename = false;
+        self.comment_target = None;
         self.loading_artifact = false;
         self.window_title = if title.is_empty() {
             "asc-gui".to_string()
@@ -208,6 +241,62 @@ impl AscApp {
             format!("asc-gui — {title}")
         };
         self.set_status("artifact ready", true);
+    }
+
+    /// Replace the active document's source (rename / comment edit):
+    /// rebuild derived artifacts, refresh the cache, and drop the
+    /// symbol selection (its byte offsets are stale after the edit).
+    fn replace_active_document(&mut self, descriptor: String, dex_name: String, source: String) {
+        let doc = Arc::new(Document::new(descriptor, dex_name, source));
+        self.active_doc = Some(doc.clone());
+        self.documents.put(doc);
+        self.symbol_sel = None;
+    }
+
+    /// Apply a method-scoped rename of the selected symbol (F25).
+    fn apply_symbol_rename(&mut self, new_name: &str) {
+        let Some(sel) = self.symbol_sel.clone() else {
+            return;
+        };
+        if !crate::source_edit::is_identifier(new_name) {
+            self.last_error = Some(format!("'{new_name}' is not a valid identifier"));
+            return;
+        }
+        let Some(doc) = self.active_doc.clone() else {
+            return;
+        };
+        if doc.descriptor != sel.descriptor {
+            return;
+        }
+        if let Some(src) = crate::source_edit::rename_in_range(
+            &doc.source,
+            sel.method.0,
+            sel.method.1,
+            &sel.token,
+            new_name,
+        ) {
+            self.replace_active_document(doc.descriptor.clone(), doc.dex_name.clone(), src);
+            self.set_status(
+                format!("renamed {} → {new_name} (in method)", sel.token),
+                true,
+            );
+        }
+    }
+
+    /// Append a `// note` to a source line and rebuild (F26).
+    fn apply_line_comment(&mut self, line: usize, text: &str) {
+        let Some(doc) = self.active_doc.clone() else {
+            return;
+        };
+        let Some(line_start) = doc
+            .line(line)
+            .map(|l| l.as_ptr() as usize - doc.source.as_ptr() as usize)
+        else {
+            return;
+        };
+        let src = crate::source_edit::append_line_comment(&doc.source, line_start, text);
+        self.replace_active_document(doc.descriptor.clone(), doc.dex_name.clone(), src);
+        self.set_status(format!("commented line {}", line + 1), true);
     }
 
     // ----------------------------------------------------------------
@@ -532,6 +621,37 @@ impl AscApp {
             Command::ToggleExplorer => self.show_explorer = !self.show_explorer,
             Command::ToggleInspector => self.show_inspector = !self.show_inspector,
             Command::ToggleBottomPanel => self.show_bottom = !self.show_bottom,
+            Command::ToggleTheme => {
+                let next = match design::theme() {
+                    design::Theme::Dark => design::Theme::Light,
+                    design::Theme::Light => design::Theme::Dark,
+                };
+                design::set_theme(next);
+                design::apply(ctx);
+            }
+            Command::BeginRenameSymbol => {
+                if let Some(sel) = self.symbol_sel.as_ref() {
+                    self.rename_input = sel.token.clone();
+                    self.show_rename = true;
+                }
+            }
+            Command::RenameSymbol { new_name } => {
+                self.show_rename = false;
+                self.apply_symbol_rename(&new_name);
+            }
+            Command::BeginLineComment => {
+                if self.last_clicked_line.is_some() {
+                    self.comment_input.clear();
+                    self.comment_target = self.last_clicked_line;
+                }
+            }
+            Command::SetLineComment { line, text } => {
+                self.comment_target = None;
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    self.apply_line_comment(line, &text);
+                }
+            }
             Command::CancelTask => {
                 self.tasks.cancel_kind(TaskKind::FindRefs);
                 self.set_status("search cancelled", false);
@@ -563,6 +683,10 @@ impl AscApp {
             if self.palette.is_some() {
                 self.palette = None;
                 self.palette_input.clear();
+            } else if self.show_rename {
+                self.show_rename = false;
+            } else if self.comment_target.is_some() {
+                self.comment_target = None;
             } else if self.show_find {
                 self.show_find = false;
             } else {
@@ -597,6 +721,20 @@ impl AscApp {
         } else if pressed(ctx, alt, egui::Key::ArrowRight) {
             self.queue(Command::NavigateForward);
         }
+        // Source-edit keys (oracle `n` / `;`): only when the code
+        // surface is hovered, a document is open, and no text input
+        // owns the keyboard.
+        if self.code_hovered && self.active_doc.is_some() && !ctx.wants_keyboard_input() {
+            if pressed(ctx, egui::Modifiers::default(), egui::Key::N) {
+                self.queue(Command::BeginRenameSymbol);
+            } else if ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Text(s) if s == ";"))
+            }) {
+                self.queue(Command::BeginLineComment);
+            }
+        }
     }
 }
 
@@ -626,6 +764,8 @@ fn count_per_dex(
 
 impl eframe::App for AscApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let tokens = design::tokens();
+
         if self.initial_path.is_some() {
             let path = self.initial_path.take().unwrap();
             self.open_path(&path, ctx);
@@ -723,11 +863,40 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::FindReferences);
                     }
+                    ui.separator();
+                    let sel_ok = self.symbol_sel.is_some();
+                    if ui
+                        .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))
+                        .on_disabled_hover_text("click an identifier in the editor first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::BeginRenameSymbol);
+                    }
+                    let line_ok = self.last_clicked_line.is_some();
+                    if ui
+                        .add_enabled(line_ok, egui::Button::new("Comment line  (;)"))
+                        .on_disabled_hover_text("click a code line first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::BeginLineComment);
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     ui.toggle_value(&mut self.show_explorer, "Explorer  (Ctrl+1)");
                     ui.toggle_value(&mut self.show_inspector, "Inspector  (Ctrl+2)");
                     ui.toggle_value(&mut self.show_bottom, "Bottom panel  (Ctrl+3)");
+                    ui.separator();
+                    let next = if design::theme() == design::Theme::Dark {
+                        "light"
+                    } else {
+                        "dark"
+                    };
+                    if ui.button(format!("Switch to {next} theme")).clicked() {
+                        ui.close();
+                        self.queue(Command::ToggleTheme);
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("ASC Instant Workbench");
@@ -742,7 +911,7 @@ impl eframe::App for AscApp {
 
         // 4. Toolbar: back/forward, artifact search, meta.
         egui::TopBottomPanel::top("toolbar")
-            .frame(egui::Frame::new().fill(design::DARK.surface))
+            .frame(egui::Frame::new().fill(tokens.surface))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     // ◀/▶ exist in both families; monospace keeps the
@@ -812,7 +981,7 @@ impl eframe::App for AscApp {
                         ui.monospace(
                             egui::RichText::new(format!("{pkg}{ver}"))
                                 .small()
-                                .color(design::DARK.text_secondary),
+                                .color(tokens.text_secondary),
                         );
                     });
                 });
@@ -822,8 +991,8 @@ impl eframe::App for AscApp {
         if self.show_bottom {
             egui::TopBottomPanel::bottom("bottom_panel")
                 .resizable(true)
-                .default_height(design::DARK.bottom_default)
-                .frame(egui::Frame::new().fill(design::DARK.panel_bg))
+                .default_height(tokens.bottom_default)
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
                 .show(ctx, |ui| {
                     self.draw_bottom_panel(ui);
                 });
@@ -831,7 +1000,7 @@ impl eframe::App for AscApp {
 
         // 6. Status bar.
         egui::TopBottomPanel::bottom("statusbar")
-            .frame(egui::Frame::new().fill(design::DARK.panel_bg))
+            .frame(egui::Frame::new().fill(tokens.panel_bg))
             .show(ctx, |ui| {
                 self.draw_status_bar(ui);
             });
@@ -840,8 +1009,8 @@ impl eframe::App for AscApp {
         if self.show_inspector {
             egui::SidePanel::right("inspector")
                 .resizable(true)
-                .default_width(design::DARK.inspector_default)
-                .frame(egui::Frame::new().fill(design::DARK.panel_bg))
+                .default_width(tokens.inspector_default)
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         self.draw_inspector(ui);
@@ -853,7 +1022,7 @@ impl eframe::App for AscApp {
         {
             egui::SidePanel::left("activity_bar")
                 .exact_width(36.0)
-                .frame(egui::Frame::new().fill(design::DARK.panel_bg))
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
                 .show(ctx, |ui| {
                     ui.with_layout(
                         egui::Layout::top_down_justified(egui::Align::Center),
@@ -866,9 +1035,9 @@ impl eframe::App for AscApp {
                              -> bool {
                                 let rich = egui::RichText::new(label).monospace().size(15.0).color(
                                     if active {
-                                        design::DARK.accent
+                                        tokens.accent
                                     } else {
-                                        design::DARK.text_secondary
+                                        tokens.text_secondary
                                     },
                                 );
                                 let btn = egui::Button::new(rich).frame(false);
@@ -909,8 +1078,8 @@ impl eframe::App for AscApp {
         if self.show_explorer {
             egui::SidePanel::left("explorer")
                 .resizable(true)
-                .default_width(design::DARK.explorer_default)
-                .frame(egui::Frame::new().fill(design::DARK.panel_bg))
+                .default_width(tokens.explorer_default)
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
                 .show(ctx, |ui| {
                     self.draw_explorer(ui);
                 });
@@ -918,7 +1087,7 @@ impl eframe::App for AscApp {
 
         // 9. Editor (center).
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(design::DARK.app_bg))
+            .frame(egui::Frame::new().fill(tokens.app_bg))
             .show(ctx, |ui| {
                 self.draw_editor(ui);
             });
@@ -1610,5 +1779,57 @@ mod tests {
             .join("../../target/shots/09_glyph_probe.png");
         img.save(&out).unwrap();
         eprintln!("probe: {}", out.display());
+    }
+
+    /// F24/F25/F26: symbol selection drives a method-scoped rename
+    /// and a per-line comment; both rebuild the active document.
+    #[test]
+    fn rename_and_comment_edit_flow() {
+        let src = "public class A {\n    int field;\n    void run(int px) {\n        int q = px + 1;\n    }\n}\n";
+        let mut app = empty_app();
+        let doc = Arc::new(Document::new(
+            "LA;".into(),
+            "classes.dex".into(),
+            src.into(),
+        ));
+        app.active_doc = Some(doc.clone());
+        app.documents.put(doc);
+
+        // Select the `px` use in the method body.
+        let byte = src.find("px + 1").unwrap() + 1;
+        let sel = crate::ui::editor::symbol_selection_for("LA;", src, byte).unwrap();
+        assert_eq!(sel.token, "px");
+        assert_eq!(sel.occurrences.len(), 2, "param decl + body use");
+        app.symbol_sel = Some(sel);
+
+        // Rename via dispatch: only inside the method, code-state only.
+        app.dispatch(
+            Command::RenameSymbol {
+                new_name: "width".into(),
+            },
+            &egui::Context::default(),
+        );
+
+        let doc = app.active_doc.clone().expect("doc kept");
+        assert!(doc.source.contains("void run(int width)"), "param renamed");
+        assert!(doc.source.contains("int q = width + 1;"), "body renamed");
+        assert!(!doc.source.contains("(int px)"), "no stale param");
+        assert!(app.symbol_sel.is_none(), "selection dropped after edit");
+        assert!(app.documents.peek("LA;").is_some(), "cache entry replaced");
+
+        // Line comment on the signature line (2, 0-based) via dispatch.
+        app.dispatch(
+            Command::SetLineComment {
+                line: 2,
+                text: "entry point".into(),
+            },
+            &egui::Context::default(),
+        );
+        let doc = app.active_doc.clone().expect("doc kept");
+        assert!(
+            doc.source.contains("void run(int width) {  // entry point"),
+            "comment appended to the line"
+        );
+        assert!(doc.source.ends_with("}\n"), "tail preserved");
     }
 }

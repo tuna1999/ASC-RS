@@ -29,6 +29,19 @@ pub enum Command {
     RunSearch,
     FindReferences,
     FindInDocument,
+    /// Open the rename bar for the clicked symbol (`n`).
+    BeginRenameSymbol,
+    /// Apply a method-scoped rename and rebuild the document.
+    RenameSymbol {
+        new_name: String,
+    },
+    /// Open the line-comment bar for the last clicked line (`;`).
+    BeginLineComment,
+    /// Attach a `// note` to a line and rebuild the document.
+    SetLineComment {
+        line: usize,
+        text: String,
+    },
     QuickOpen,
 
     // --- tabs ---
@@ -41,6 +54,7 @@ pub enum Command {
     ToggleExplorer,
     ToggleInspector,
     ToggleBottomPanel,
+    ToggleTheme,
 
     // --- tasks ---
     CancelTask,

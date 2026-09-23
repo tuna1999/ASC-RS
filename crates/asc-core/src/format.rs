@@ -28,6 +28,7 @@
 
 use serde::Serialize;
 
+use crate::pipeline::ListClassesResult;
 use crate::report::{DexResults, SearchReport};
 
 /// Format a [`SearchReport`] into the oracle's per-DEX text format.
@@ -161,4 +162,31 @@ pub fn total_line_count(report: &SearchReport) -> usize {
         .iter()
         .map(|d: &DexResults| d.matches.len())
         .sum()
+}
+
+/// Format a [`ListClassesResult`] as the oracle's text emitter:
+///
+/// - One descriptor per line.
+/// - No trailing newline on the final descriptor (the CLI handles
+///   the outer trailing newline).
+/// - Empty result emits the empty string (matching the oracle, which
+///   emits nothing when the APK contains zero matching classes).
+///
+/// Mirrors `droidasc/cli.py:_handle_listclass` — the oracle writes
+/// chunks of up to 8192 descriptors per `"\n".join` call. The chunked
+/// write is a streaming optimization and produces byte-identical
+/// output to a single pass; we use a single pass for simplicity.
+pub fn format_listclasses_text(result: &ListClassesResult) -> String {
+    let total: usize = result.names.iter().map(|n| n.len() + 1).sum();
+    let mut out = String::with_capacity(total);
+    for name in &result.names {
+        out.push_str(name);
+        out.push('\n');
+    }
+    // Strip the trailing newline so the CLI can re-add exactly one
+    // (matches how `format_search_report_text` is consumed).
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }

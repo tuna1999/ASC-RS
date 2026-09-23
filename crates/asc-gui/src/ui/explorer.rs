@@ -5,12 +5,13 @@ use eframe::egui;
 
 use crate::app::AscApp;
 use crate::command::Command;
-use crate::design::DARK as T;
 use crate::session::ClassKind;
 use crate::state::NavOrigin;
 
 impl AscApp {
     pub(crate) fn draw_explorer(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("EXPLORER")
@@ -97,6 +98,8 @@ impl AscApp {
 
     /// One package/class node.
     fn draw_tree_node(&mut self, ui: &mut egui::Ui, idx: usize, depth: usize) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         // Clone the small bits we need so `self` is free to mutate.
         let (label, path, has_children, own_desc) = {
             let n = self.tree.node(idx);
@@ -197,8 +200,10 @@ impl AscApp {
     /// icon by class kind (jadx-style) + selected row gets the
     /// spec'd accent-tinted background.
     fn class_row(&self, ui: &mut egui::Ui, selected: bool, label: &str, kind: ClassKind) -> bool {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let row_frame = if selected {
-            egui::Frame::new().fill(T.accent.linear_multiply(0.12))
+            egui::Frame::new().fill(T.row_sel_bg)
         } else {
             egui::Frame::new()
         };

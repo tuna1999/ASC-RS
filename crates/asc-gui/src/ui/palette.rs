@@ -4,7 +4,6 @@ use eframe::egui;
 
 use crate::app::AscApp;
 use crate::command::Command;
-use crate::design::DARK as T;
 use crate::state::NavOrigin;
 
 /// Palette mode.
@@ -24,6 +23,8 @@ enum PaletteAction {
 
 impl AscApp {
     pub(crate) fn draw_palette(&mut self, ctx: &egui::Context) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
         let Some(mode) = self.palette else { return };
 
         // Build entries once from the current input.
@@ -143,7 +144,7 @@ impl AscApp {
                             let (label, sub, action) = &entries[idx];
                             let is_sel = idx == self.palette_sel;
                             let row_frame = if is_sel {
-                                egui::Frame::new().fill(T.accent.linear_multiply(0.16))
+                                egui::Frame::new().fill(T.row_sel_bg)
                             } else {
                                 egui::Frame::new()
                             };

@@ -1,6 +1,6 @@
 [package]
 name = "asc-core"
-description = "Orchestration for ASC-RS: getclass/findrefs pipelines, bounded parallelism, cancellation"
+description = "Orchestration for ASC-RS: getclass/findrefs/listclass pipelines, bounded parallelism, cancellation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
