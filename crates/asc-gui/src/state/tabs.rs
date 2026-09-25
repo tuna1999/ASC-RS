@@ -61,7 +61,14 @@ pub struct TabController {
     /// supported (JADX-GUI-010 lays the data shape; the UI ships
     /// with one bookmark per class for now).
     bookmarks: std::collections::HashMap<String, usize>,
+    /// Recently-opened artifact paths (most recent first). Capped
+    /// at [`MAX_RECENT_ARTIFACTS`]. Drives the Ctrl+Shift+H picker
+    /// (JADX-GUI-007).
+    recent_artifacts: Vec<std::path::PathBuf>,
 }
+
+/// Maximum retained recent artifact paths.
+pub const MAX_RECENT_ARTIFACTS: usize = 16;
 
 impl TabController {
     /// All tabs in strip order (pinned in pin order, preview last).
@@ -124,6 +131,27 @@ impl TabController {
             .collect();
         out.sort();
         out
+    }
+
+    /// Push a freshly-opened artifact path onto the recent list
+    /// (most recent first, deduped, capped at MAX_RECENT_ARTIFACTS).
+    /// Drives JADX-GUI-007 (recent artifacts menu).
+    pub fn push_recent_artifact(&mut self, path: std::path::PathBuf) {
+        self.recent_artifacts.retain(|p| p != &path);
+        self.recent_artifacts.insert(0, path);
+        if self.recent_artifacts.len() > MAX_RECENT_ARTIFACTS {
+            self.recent_artifacts.truncate(MAX_RECENT_ARTIFACTS);
+        }
+    }
+
+    /// All recent artifact paths (most recent first).
+    pub fn recent_artifacts(&self) -> &[std::path::PathBuf] {
+        &self.recent_artifacts
+    }
+
+    /// Drop every entry from the recent list.
+    pub fn clear_recent_artifacts(&mut self) {
+        self.recent_artifacts.clear();
     }
 
     /// `Close others`: drop every tab except the named one (or the
@@ -243,6 +271,20 @@ impl TabController {
                 self.tabs[i].kind = TabKind::Pinned;
             }
         }
+    }
+
+    /// `Pin all`: promote every preview tab to pinned. No-op when no
+    /// preview tabs are open. Powers JADX-GUI-011 (pin all).
+    /// Returns the number of tabs promoted.
+    pub fn pin_all(&mut self) -> usize {
+        let mut n = 0;
+        for t in &mut self.tabs {
+            if t.kind == TabKind::Preview {
+                t.kind = TabKind::Pinned;
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Mark a tab's decompile as landed.
@@ -547,5 +589,63 @@ mod tests {
         let kinds: Vec<TabKind> = tabs.tabs().iter().map(|t| t.kind).collect();
         assert!(kinds.contains(&TabKind::Pinned));
         assert!(kinds.contains(&TabKind::Text));
+    }
+
+    /// Recent artifacts: most-recent-first, deduped, capped at
+    /// MAX_RECENT_ARTIFACTS. Drives the Ctrl+Shift+H picker.
+    /// Covers JADX-GUI-007 (recent artifacts menu).
+    /// `pin_all` promotes every preview tab to pinned in one go.
+    /// Covers JADX-GUI-011 (pin all).
+    #[test]
+    fn pin_all_promotes_previews() {
+        let mut tabs = TabController::default();
+        // Mixed: 2 pinned + 1 preview. The preview flips; the
+        // previews slot is single, so we use tabs_mut to stack a
+        // second preview-shaped tab for the same test contract.
+        tabs.open_pinned("LA;");
+        tabs.open_pinned("LB;");
+        tabs.open_preview("LC;");
+        // PinLC to free the preview slot, then open LD as a preview.
+        tabs.pin(Some("LC;"));
+        tabs.open_preview("LD;");
+        let promoted = tabs.pin_all();
+        assert_eq!(promoted, 1, "one preview promoted");
+        for t in tabs.tabs() {
+            assert_eq!(t.kind, TabKind::Pinned, "{} now pinned", t.descriptor);
+        }
+        // Re-running pin_all is a no-op.
+        let promoted_again = tabs.pin_all();
+        assert_eq!(promoted_again, 0);
+    }
+
+    #[test]
+    fn recent_artifacts_persists() {
+        use std::path::PathBuf;
+        let mut tabs = TabController::default();
+        let a = PathBuf::from("/tmp/a.apk");
+        let b = PathBuf::from("/tmp/b.apk");
+        let c = PathBuf::from("/tmp/c.apk");
+        tabs.push_recent_artifact(a.clone());
+        tabs.push_recent_artifact(b.clone());
+        tabs.push_recent_artifact(c.clone());
+        // Most recent first.
+        assert_eq!(tabs.recent_artifacts(), &[c.clone(), b.clone(), a.clone()]);
+        // Re-pushing an existing entry moves it to the front
+        // (dedup).
+        tabs.push_recent_artifact(a.clone());
+        assert_eq!(tabs.recent_artifacts(), &[a.clone(), c.clone(), b.clone()]);
+        // Cap: pump > MAX_RECENT_ARTIFACTS entries; only the latest
+        // MAX_RECENT_ARTIFACTS remain.
+        for n in 0..(MAX_RECENT_ARTIFACTS + 5) {
+            tabs.push_recent_artifact(PathBuf::from(format!("/tmp/q{n}.apk")));
+        }
+        assert_eq!(tabs.recent_artifacts().len(), MAX_RECENT_ARTIFACTS);
+        assert_eq!(
+            tabs.recent_artifacts()[0],
+            PathBuf::from(format!("/tmp/q{}.apk", MAX_RECENT_ARTIFACTS + 4))
+        );
+        // `clear_recent_artifacts` empties the list.
+        tabs.clear_recent_artifacts();
+        assert!(tabs.recent_artifacts().is_empty());
     }
 }

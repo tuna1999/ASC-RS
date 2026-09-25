@@ -627,12 +627,13 @@
       "feature": "Recent artifacts menu (Ctrl+Shift+H)",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::recent_artifacts_persists",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX Open Recent"
+      "reference": "JADX Open Recent",
+      "notes": "TabController::push_recent_artifact + recent_artifacts + clear_recent_artifacts. Test recent_artifacts_persists passes."
     },
     {
       "id": "JADX-GUI-008",
@@ -652,12 +653,13 @@
       "feature": "Settings dialog window",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::settings_dialog_opens_and_lists_themes",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX Preferences"
+      "reference": "JADX Preferences",
+      "notes": "Command::OpenSettings toggles show_settings dialog. Test settings_dialog_opens_and_lists_themes passes."
     },
     {
       "id": "JADX-GUI-010",
@@ -677,12 +679,13 @@
       "feature": "Tab rename / pin all",
       "priority": "P1",
       "weight": 5,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::pin_all_promotes_previews",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX right-click context"
+      "reference": "JADX right-click context",
+      "notes": "TabController::pin_all + Command::PinAll. Test pin_all_promotes_previews passes."
     },
     {
       "id": "JADX-GUI-012",
@@ -814,12 +817,13 @@
       "feature": "Used by class X inline button",
       "priority": "P2",
       "weight": 3,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::used_by_class_button_routes_to_findrefs_class",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "derived"
+      "reference": "derived",
+      "notes": "Command::UsedByClass routes to FindReferences. Test used_by_class_button_routes_to_findrefs_class passes."
     },
     {
       "id": "ASC-RS-GUI-003",

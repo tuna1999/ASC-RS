@@ -28,6 +28,12 @@ pub enum Command {
     /// Run the current search-controller inputs.
     RunSearch,
     FindReferences,
+    /// "Used by this class" inline button: same engine as
+    /// `FindReferences` (type-query on the descriptor) but the
+    /// caller is bound to the active class and the resulting rows
+    /// land in the bottom-panel REFERENCES tab. Powers
+    /// `ASC-RS-GUI-002` (used by class X inline button).
+    UsedByClass,
     /// Member-scoped find triggered by `X` on the clicked identifier.
     /// Wraps `RunSearch` with `SearchKind::Method` and the click's
     /// token + descriptor pre-filled (workflow B).
@@ -59,6 +65,8 @@ pub enum Command {
     /// Close every tab.
     CloseAll,
     PinTab,
+    /// Pin every preview tab. Drives JADX-GUI-011.
+    PinAll,
     NextTab,
     PreviousTab,
     /// Ctrl+1..9 → jump to the n-th tab (1-indexed, clamped).
@@ -91,4 +99,9 @@ pub enum Command {
     /// Open the goto-line input (Ctrl+G). Bound by the keyboard
     /// dispatcher; the input bar lives in the editor surface.
     GotoLine,
+
+    // --- settings ---
+    /// Open the settings dialog (JADX-GUI-009 / ASC-GUI-025).
+    /// Lists themes; selecting a theme is wired by the picker itself.
+    OpenSettings,
 }
