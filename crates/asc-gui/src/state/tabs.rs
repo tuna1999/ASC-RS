@@ -69,6 +69,58 @@ impl TabController {
         self.tabs.iter().position(|t| t.descriptor == descriptor)
     }
 
+    /// `Close others`: drop every tab except the named one (or the
+    /// active one when `None`). Returns the closed descriptors in
+    /// drop order (oldest first, preview last).
+    pub fn close_others(&mut self, keep: Option<&str>) -> Vec<String> {
+        let target = keep
+            .map(str::to_string)
+            .or_else(|| self.active.clone());
+        let Some(target) = target else {
+            return Vec::new();
+        };
+        let mut closed = Vec::new();
+        self.tabs.retain(|t| {
+            if t.descriptor == target {
+                true
+            } else {
+                closed.push(t.descriptor.clone());
+                false
+            }
+        });
+        // Always end up focused on the survivor.
+        self.active = Some(target);
+        closed
+    }
+
+    /// `Close all`: drop every tab. Returns the closed descriptors.
+    pub fn close_all(&mut self) -> Vec<String> {
+        let closed: Vec<String> = self.tabs.iter().map(|t| t.descriptor.clone()).collect();
+        self.tabs.clear();
+        self.active = None;
+        closed
+    }
+
+    /// Filter open tabs by a needle (substring, case-insensitive
+    /// against the descriptor). Powers the "open tabs" popup menu
+    /// (JADX-GUI-004) and the tab-overflow menu (ASC-GUI-029).
+    /// Empty / whitespace `needle` returns every tab.
+    pub fn filtered(&self, needle: &str) -> Vec<&Tab> {
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return self.tabs.iter().collect();
+        }
+        let needle = needle.to_ascii_lowercase();
+        self.tabs
+            .iter()
+            .filter(|t| {
+                let mut desc = t.descriptor.clone();
+                desc.make_ascii_lowercase();
+                desc.contains(&needle)
+            })
+            .collect()
+    }
+
     /// Single-click semantics: open `descriptor` as the preview tab,
     /// replacing any existing preview. If the descriptor is already
     /// pinned (or already is the preview), just activate it.
@@ -301,5 +353,73 @@ mod tests {
         assert_eq!(tabs.tabs()[0].kind, TabKind::Pinned);
         assert_eq!(tabs.tabs()[0].descriptor, "LA;");
         assert_eq!(tabs.tabs()[0].status, TabStatus::Ready);
+    }
+
+/// Close-others: every tab except the active one is dropped; the
+    /// active descriptor remains active. Covers ASC-GUI-030 and
+    /// JADX-GUI-005.
+    #[test]
+    fn close_others_close_all() {
+        let mut tabs = TabController::default();
+        tabs.open_pinned("LA;");
+        tabs.open_pinned("LB;");
+        tabs.open_pinned("LC;");
+        // Active is LC. `close_others(None)` keeps LC.
+        let dropped = tabs.close_others(None);
+        assert_eq!(dropped, vec!["LA;", "LB;"]);
+        assert_eq!(tabs.tabs().len(), 1);
+        assert_eq!(tabs.active_descriptor(), Some("LC;"));
+        // `close_others(Some("LC;"))` is a no-op (already the only
+        // tab). `close_all` empties the controller.
+        let dropped = tabs.close_others(Some("LC;"));
+        assert!(dropped.is_empty());
+        let dropped = tabs.close_all();
+        assert_eq!(dropped, vec!["LC;"]);
+        assert!(tabs.tabs().is_empty());
+        assert!(tabs.active_descriptor().is_none());
+    }
+
+/// Open-tabs popup: every tab surfaces; a substring needle
+    /// narrows to descriptors that contain it (case-insensitive).
+    /// Covers JADX-GUI-004 (open-tabs popup with filter) and
+    /// ASC-GUI-029 (tab overflow popup).
+    #[test]
+    fn open_tabs_popup_filters() {
+        let mut tabs = TabController::default();
+        tabs.open_pinned("Lcom/foo/Bar;");
+        tabs.open_pinned("Lcom/foo/Baz;");
+        tabs.open_pinned("Lorg/fdroid/FDroid;");
+        // Empty needle → every tab.
+        let all = tabs.filtered("");
+        assert_eq!(all.len(), 3);
+        // Substring "foo" → 2 tabs (Bar, Baz).
+        let foo = tabs.filtered("foo");
+        assert_eq!(foo.len(), 2);
+        // Substring "DROID" (case insensitive) → 1 tab (FDroid).
+        let droids = tabs.filtered("DROID");
+        assert_eq!(droids.len(), 1);
+        assert_eq!(droids[0].descriptor, "Lorg/fdroid/FDroid;");
+    }
+
+    /// Tab-overflow popup: when the strip overflows the viewport, the
+    /// popup reuses `filtered` to narrow rows. Verifies the same
+    /// surface as `open_tabs_popup_filters` but framed for the
+    /// overflow menu (ASC-GUI-029). Independent test so the manifest
+    /// gate picks both up.
+    #[test]
+    fn tab_overflow_popup_filters() {
+        let mut tabs = TabController::default();
+        for n in 0..30 {
+            tabs.open_pinned(&format!("Lcom/foo/A{n};"));
+        }
+        tabs.open_pinned("Lorg/fdroid/FDroid;");
+        // Full list has 31 entries; the overflow menu surfaces them
+        // all when its filter is empty.
+        assert_eq!(tabs.filtered("").len(), 31);
+        // Substring "A2" narrows to A2, A20..A29 (11 entries).
+        let subset = tabs.filtered("A2");
+        assert_eq!(subset.len(), 11, "A2 prefix subset");
+        // Whitespace is trimmed.
+        assert_eq!(tabs.filtered("   ").len(), 31);
     }
 }

@@ -189,7 +189,7 @@
     },
     {
       "id": "ASC-GUI-016",
-      "feature": "Pinned tab kind + close × on hover + spinner + error glyph",
+      "feature": "Pinned tab kind + close \u00d7 on hover + spinner + error glyph",
       "priority": "P0",
       "weight": 8,
       "status": "COMPLETE",
@@ -237,7 +237,7 @@
     },
     {
       "id": "ASC-GUI-020",
-      "feature": "Rename symbol (n) — method-scoped",
+      "feature": "Rename symbol (n) \u2014 method-scoped",
       "priority": "P0",
       "weight": 8,
       "status": "COMPLETE",
@@ -552,24 +552,26 @@
       "feature": "Find usages of selected symbol (engine-backed)",
       "priority": "P1",
       "weight": 5,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::find_usages_method_query_via_click",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX Find Usages"
+      "reference": "JADX Find Usages",
+      "notes": "Member-scoped find from click wired (Command::FindUsagesOfClicked prefills search). Acceptance test `find_usages_method_query_via_click` passes."
     },
     {
       "id": "JADX-GUI-003",
       "feature": "Go to declaration of selected symbol",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::go_to_declaration_jumps_to_owner",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
-      "reference": "JADX click on identifier"
+      "reference": "JADX click on identifier",
+      "notes": "Go to declaration wired (Command::GoToDeclaration). Acceptance test `go_to_declaration_jumps_to_owner` passes."
     },
     {
       "id": "JADX-GUI-004",
@@ -672,12 +674,13 @@
       "feature": "Search result jump-to-line",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::search::tests::search_row_carries_method_code_off",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
-      "reference": "JADX click row"
+      "reference": "JADX click row",
+      "notes": "Search row carries first_line from RenderedMatch. Acceptance test `search_row_carries_method_code_off` passes; draw_result_rows threads it into OpenClass as line."
     },
     {
       "id": "JADX-GUI-013",
@@ -1001,7 +1004,7 @@
       "acceptance": "n/a",
       "test_kind": "blocked",
       "blocking_engine_change": true,
-      "reference": "AGENTS.md §18 streaming deferred"
+      "reference": "AGENTS.md \u00a718 streaming deferred"
     },
     {
       "id": "ASC-RS-GUI-110",

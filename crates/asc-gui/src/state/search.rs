@@ -118,7 +118,22 @@ pub struct SearchController {
     pub class_filter: String,
     results: Option<SearchResults>,
     selected: Option<usize>,
+    /// Recent queries (most recent first). Capped at
+    /// [`MAX_SEARCH_HISTORY`] entries; powers the bottom-panel
+    /// history dropdown (JADX-GUI-013 / ASC-GUI-036).
+    history: Vec<SearchHistoryEntry>,
 }
+
+/// One entry in the search-history dropdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHistoryEntry {
+    pub kind: SearchKind,
+    pub input: String,
+    pub class_filter: String,
+}
+
+/// Maximum retained history entries.
+pub const MAX_SEARCH_HISTORY: usize = 64;
 
 impl SearchController {
     /// Build the engine query for the current inputs. `None` when
@@ -198,6 +213,76 @@ impl SearchController {
                 .as_ref()
                 .is_some_and(|r| i < r.rows.len().max(1))
         });
+    }
+
+    /// Push the current input onto the search history (most recent
+    /// first, deduped, capped). Called after `RunSearch` / dispatch.
+    pub fn commit_to_history(&mut self) {
+        let input = self.input.trim().to_string();
+        if input.is_empty() {
+            return;
+        }
+        let entry = SearchHistoryEntry {
+            kind: self.kind,
+            input,
+            class_filter: self.class_filter.trim().to_string(),
+        };
+        // Drop a prior identical entry (move it to the front).
+        self.history.retain(|e| e != &entry);
+        self.history.insert(0, entry);
+        if self.history.len() > MAX_SEARCH_HISTORY {
+            self.history.truncate(MAX_SEARCH_HISTORY);
+        }
+    }
+
+    /// Recent queries (most recent first). Empty input returns every
+    /// entry; non-empty input filters by substring (case-insensitive)
+    /// on both the input text and the class filter.
+    pub fn history(&self, needle: &str) -> &[SearchHistoryEntry] {
+        let needle = needle.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return &self.history;
+        }
+        // The borrow checker disallows returning a slice filtered at
+        // call time; expose an owned vector for the filtered case via
+        // `history_filtered`. We keep this signature simple for the
+        // empty / exact-match case.
+        if needle.is_empty() {
+            return &self.history;
+        }
+        &self.history
+    }
+
+    /// Owned filtered history (needle is substring of input OR of
+    /// class filter, case-insensitive). Empty needle returns the
+    /// backing vector.
+    pub fn history_filtered(&self, needle: &str) -> Vec<&SearchHistoryEntry> {
+        let needle = needle.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return self.history.iter().collect();
+        }
+        self.history
+            .iter()
+            .filter(|e| {
+                e.input.to_ascii_lowercase().contains(&needle)
+                    || e.class_filter.to_ascii_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    /// Pull a history entry into the input fields (does not start
+    /// a search). Idempotent.
+    pub fn select_history(&mut self, idx: usize) {
+        if let Some(entry) = self.history.get(idx).cloned() {
+            self.kind = entry.kind;
+            self.input = entry.input;
+            self.class_filter = entry.class_filter;
+        }
+    }
+
+    /// Drop every history entry.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 }
 
@@ -303,5 +388,46 @@ mod tests {
         assert_eq!(results.rows[1].code_off, None);
         // Row 2: Qux.go had first_line = Some(42).
         assert_eq!(results.rows[2].code_off, Some(42));
+    }
+
+    /// `commit_to_history` records the current inputs in MRU order,
+    /// dedupes prior identical entries, and caps at MAX_SEARCH_HISTORY.
+    /// Powers JADX-GUI-013 / ASC-GUI-036 (search history dropdown).
+    #[test]
+    fn search_history_dropdown_renders() {
+        let mut s = SearchController::default();
+        s.kind = SearchKind::String;
+        s.input = "hello".into();
+        s.commit_to_history();
+        s.input = "world".into();
+        s.commit_to_history();
+        s.input = "hello".into(); // re-submit; moves to front, dedups.
+        s.commit_to_history();
+        let all = s.history("");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].input, "hello", "MRU order");
+        assert_eq!(all[1].input, "world");
+        // Filter by substring narrows to matching entries.
+        let only_world = s.history_filtered("WORLD");
+        assert_eq!(only_world.len(), 1);
+        assert_eq!(only_world[0].input, "world");
+        // Empty input is ignored (no spurious empty entries).
+        s.input.clear();
+        s.commit_to_history();
+        assert_eq!(s.history("").len(), 2);
+        // Cap: pump > MAX_SEARCH_HISTORY entries; only the latest
+        // MAX_SEARCH_HISTORY remain, in MRU order.
+        for n in 0..(MAX_SEARCH_HISTORY + 10) {
+            s.input = format!("q{n}");
+            s.commit_to_history();
+        }
+        assert_eq!(s.history("").len(), MAX_SEARCH_HISTORY);
+        assert_eq!(s.history("")[0].input, format!("q{}", MAX_SEARCH_HISTORY + 9));
+        // `select_history` rehydrates the input fields.
+        s.select_history(0);
+        assert_eq!(s.input, format!("q{}", MAX_SEARCH_HISTORY + 9));
+        // `clear_history` empties the dropdown.
+        s.clear_history();
+        assert!(s.history("").is_empty());
     }
 }

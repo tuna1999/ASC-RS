@@ -54,6 +54,10 @@ pub enum Command {
 
     // --- tabs ---
     CloseTab,
+    /// Close every tab except the active one.
+    CloseOthers,
+    /// Close every tab.
+    CloseAll,
     PinTab,
     NextTab,
     PreviousTab,

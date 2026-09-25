@@ -573,6 +573,13 @@ impl AscApp {
                         let apk = session.path().to_path_buf();
                         let label = self.search.label();
                         self.tasks.spawn_findrefs(&apk, query, label, ctx);
+                        // Record this query for the history dropdown
+                        // (JADX-GUI-013 / ASC-GUI-036). Only on
+                        // RunSearch — GlobalSearch is just a focus
+                        // toggle, not a query submission.
+                        if matches!(cmd, Command::RunSearch) {
+                            self.search.commit_to_history();
+                        }
                         self.set_status(format!("findrefs running: {}", self.search.input), true);
                     }
                 }
@@ -650,6 +657,23 @@ impl AscApp {
                 if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
                     self.close_tab(&d);
                 }
+            }
+            Command::CloseOthers => {
+                let dropped = self.tabs.close_others(None);
+                for d in &dropped {
+                    self.documents.remove(d);
+                }
+                self.set_status(
+                    format!("closed {} other tab(s)", dropped.len()),
+                    true,
+                );
+            }
+            Command::CloseAll => {
+                let dropped = self.tabs.close_all();
+                for d in &dropped {
+                    self.documents.remove(d);
+                }
+                self.set_status(format!("closed {} tab(s)", dropped.len()), true);
             }
             Command::PinTab => {
                 self.tabs.pin(None);
