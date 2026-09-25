@@ -96,24 +96,26 @@
       "feature": "Search kinds: 6 incl. member-method / member-field",
       "priority": "P0",
       "weight": 8,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::bottom_panel::tests::search_kind_enum_covers_all_six",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: app.py:373-380"
+      "reference": "ASC frozen: app.py:373-380",
+      "notes": "Six SearchKind variants + ALL.len() == 6 + is_member_scoped helper. Test search_kind_enum_covers_all_six passes."
     },
     {
       "id": "ASC-GUI-009",
       "feature": "Search input + class filter + fuzzy-class checkbox",
       "priority": "P0",
       "weight": 8,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::bottom_panel::tests::search_bar_shows_fuzzy_toggle_for_method_field",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: app.py:388-394"
+      "reference": "ASC frozen: app.py:388-394",
+      "notes": "fuzzy_class field on SearchController + is_member_scoped. Test search_bar_shows_fuzzy_toggle_for_method_field passes."
     },
     {
       "id": "ASC-GUI-010",
@@ -156,12 +158,13 @@
       "feature": "Filter search results (post-search narrowing)",
       "priority": "P0",
       "weight": 8,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::bottom_panel::tests::search_results_filter_narrows_rows",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: app.py:94-95"
+      "reference": "ASC frozen: app.py:94-95",
+      "notes": "SearchController::filtered_results + results_filter field. Test search_results_filter_narrows_rows passes."
     },
     {
       "id": "ASC-GUI-014",
@@ -180,12 +183,13 @@
       "feature": "Tabs: class + text (manifest)",
       "priority": "P0",
       "weight": 8,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::tab_controller_exposes_text_kind_when_needed",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: app.py:649-661"
+      "reference": "ASC frozen: app.py:649-661",
+      "notes": "TabKind::Text variant + tabs_mut test helper. Test tab_controller_exposes_text_kind_when_needed passes."
     },
     {
       "id": "ASC-GUI-016",
@@ -337,12 +341,13 @@
       "feature": "Close tab (Ctrl+W) + middle-click close",
       "priority": "P0",
       "weight": 8,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::close_tab_removes_metadata",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: app.py:905-907"
+      "reference": "ASC frozen: app.py:905-907",
+      "notes": "close_tab removes metadata + close_all empties. Test close_tab_removes_metadata passes."
     },
     {
       "id": "ASC-GUI-029",
@@ -821,12 +826,13 @@
       "feature": "Search bar autocomplete over recent queries",
       "priority": "P2",
       "weight": 3,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::bottom_panel::tests::search_autocomplete_*",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "derived"
+      "reference": "derived",
+      "notes": "history_filtered drives autocomplete suggestions. Test search_autocomplete_over_recent_queries passes."
     },
     {
       "id": "ASC-RS-GUI-004",

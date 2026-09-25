@@ -83,6 +83,7 @@ impl AscApp {
                         let prefix = match kind {
                             TabKind::Pinned => "◆ ",
                             TabKind::Preview => "",
+                            TabKind::Text => "≡ ",
                         };
                         let mut label = egui::RichText::new(format!("{prefix}{short}"))
                             .monospace()
@@ -90,6 +91,7 @@ impl AscApp {
                         label = match kind {
                             TabKind::Preview => label.italics().color(T.text_secondary),
                             TabKind::Pinned => label.color(T.text),
+                            TabKind::Text => label.color(T.text),
                         };
                         if is_active {
                             label = label.color(T.text).strong();

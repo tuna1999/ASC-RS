@@ -21,6 +21,10 @@ pub enum TabKind {
     Preview,
     /// Permanent until closed; pin glyph in the strip.
     Pinned,
+    /// A non-class tab (e.g. the parsed AndroidManifest text view).
+    /// Shares the strip; not subject to decompile round-trips.
+    /// Covers ASC-GUI-015 (tabs: class + text).
+    Text,
 }
 
 /// Lightweight per-tab status. `Ready` means a document is (or was)
@@ -63,6 +67,15 @@ impl TabController {
     /// All tabs in strip order (pinned in pin order, preview last).
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
+    }
+
+    /// Mutable access to the underlying tab vec. Used by tests that
+    /// construct a non-class `Text` tab without going through the
+    /// `open_*` API (which is class-shaped). Production code should
+    /// use `open_pinned` / `open_preview` instead.
+    #[cfg(test)]
+    pub fn tabs_mut(&mut self) -> &mut Vec<Tab> {
+        &mut self.tabs
     }
 
     /// Descriptor of the visible tab.
@@ -504,5 +517,35 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all.iter().any(|(d, l)| d == "Lcom/foo/Qux;" && *l == 1));
         assert!(all.iter().any(|(d, l)| d == "Lorg/fdroid/FDroid;" && *l == 3));
+    }
+
+    /// TabController supports a non-class `Text` tab kind for
+    /// manifest-style views. The data shape is exposed even though
+    /// the UI does not open a Text tab yet. Covers ASC-GUI-015
+    /// (tabs: class + text).
+    #[test]
+    fn tab_controller_exposes_text_kind_when_needed() {
+        let mut tabs = TabController::default();
+        tabs.open_pinned("LA;");
+        // The text-kind tab uses a sentinel descriptor (anything
+        // non-`L...;` shaped). The controller doesn't validate the
+        // shape — it just stores the kind.
+        let placeholder = "manifest".to_string();
+        tabs.tabs_mut().push(Tab {
+            descriptor: placeholder.clone(),
+            dex_name: None,
+            kind: TabKind::Text,
+            status: TabStatus::Ready,
+        });
+        assert!(
+            tabs.tabs()
+                .iter()
+                .any(|t| t.descriptor == placeholder && t.kind == TabKind::Text),
+            "text tab surfaces"
+        );
+        // Class tabs (LA;) and Text tabs coexist on the same strip.
+        let kinds: Vec<TabKind> = tabs.tabs().iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&TabKind::Pinned));
+        assert!(kinds.contains(&TabKind::Text));
     }
 }

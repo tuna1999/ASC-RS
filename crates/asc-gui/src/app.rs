@@ -813,6 +813,7 @@ impl AscApp {
     /// `pending_scroll` and offsets the scroll area accordingly.
     /// Public so the editor surface (or a future modal) can call
     /// it without duplicating the bounds check.
+    #[allow(dead_code)] // driven by tests today; UI binding lands next phase
     pub(crate) fn apply_goto_line(&mut self, line: usize) {
         if line == 0 {
             // Treat 0 as "no-op" (avoids underflowing the 1-indexed
@@ -2185,5 +2186,40 @@ mod tests {
             .unwrap_or_default();
         assert!(line.contains("opening"), "running hint: {line:?}");
         assert!(line.contains(&path.display().to_string()));
+    }
+
+    /// `close_tab` removes the tab's metadata (descriptor gone from
+    /// `tabs.tabs()`, neighbour activated). Covers ASC-GUI-028 (close
+    /// tab removes metadata).
+    #[test]
+    fn close_tab_removes_metadata() {
+        let mut app = empty_app();
+        app.tabs.open_pinned("LA;");
+        app.tabs.open_pinned("LB;");
+        app.tabs.open_pinned("LC;");
+        // Active is LC. Closing it surfaces LB.
+        app.close_tab("LC;");
+        assert!(
+            !app.tabs.tabs().iter().any(|t| t.descriptor == "LC;"),
+            "LC removed from tabs"
+        );
+        assert_eq!(app.tabs.active_descriptor(), Some("LB;"));
+        // The neighbour's metadata is intact.
+        let lb = app.tabs.tabs().iter().find(|t| t.descriptor == "LB;");
+        assert!(lb.is_some());
+    }
+
+    /// `Command::CloseAll` drops every tab (and forgets cached
+    /// documents for closed descriptors). Verified end-to-end through
+    /// dispatch.
+    #[test]
+    fn close_all_empties_tab_strip() {
+        let mut app = empty_app();
+        app.tabs.open_pinned("LA;");
+        app.tabs.open_pinned("LB;");
+        let ctx = egui::Context::default();
+        app.dispatch(Command::CloseAll, &ctx);
+        assert!(app.tabs.tabs().is_empty());
+        assert!(app.tabs.active_descriptor().is_none());
     }
 }
