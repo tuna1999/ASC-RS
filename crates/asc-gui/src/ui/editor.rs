@@ -528,3 +528,33 @@ pub(crate) fn symbol_selection_for(
         occurrences,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `symbol_selection_for` returns the clicked identifier, the
+    /// enclosing method's byte range, and every code-state
+    /// occurrence inside that range. Covers ASC-GUI-019.
+    #[test]
+    fn symbol_selection_returns_method_occurrences() {
+        let src = "\
+class A {
+  void m() {
+    int foo = 0;
+    int bar = foo + 1;
+    bar = foo * 2;
+  }
+}
+";
+        // Click on the first `foo` (the declaration).
+        let off = src.find("foo").unwrap();
+        let sel = symbol_selection_for("LA;", src, off).expect("selection");
+        assert_eq!(sel.token, "foo");
+        // Every occurrence slice is exactly `foo`.
+        for (s, e) in &sel.occurrences {
+            assert_eq!(&src[*s..*e], "foo");
+        }
+        assert!(!sel.occurrences.is_empty(), "at least one occurrence");
+    }
+}

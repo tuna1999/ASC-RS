@@ -113,8 +113,7 @@ mod tests {
         let mut app = AscApp::new(None);
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |ctx| {
-            egui::TopBottomPanel::bottom("sb-test")
-                .show(ctx, |ui| app.draw_status_bar(ui));
+            egui::TopBottomPanel::bottom("sb-test").show(ctx, |ui| app.draw_status_bar(ui));
         });
     }
 }

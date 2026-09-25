@@ -258,6 +258,7 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
 
 /// Package column for the quick-open palette. Public so tests can
 /// assert the descriptor→package mapping without driving the GUI.
+#[allow(dead_code)]
 pub(crate) fn package_of_descriptor(descriptor: &str) -> String {
     package_of(descriptor)
 }
@@ -284,8 +285,6 @@ mod tests {
         let mut app = crate::app::AscApp::new(None);
         // Empty palette → empty list.
         assert!(app.palette.is_none());
-        // Open the quick-open palette via the shortcut.
-        let ctx = egui::Context::default();
         // Set the palette directly (the dispatch path is private).
         app.palette = Some(PaletteMode::QuickOpen);
         assert!(matches!(app.palette, Some(PaletteMode::QuickOpen)));
@@ -311,7 +310,10 @@ mod tests {
         // package_of strips leading `L` and trailing `;`, joins `/`
         // with `.`, and trims the trailing simple name.
         assert_eq!(package_of_descriptor("Lcom/foo/Bar;"), "com.foo");
-        assert_eq!(package_of_descriptor("Landroid/app/Activity;"), "android.app");
+        assert_eq!(
+            package_of_descriptor("Landroid/app/Activity;"),
+            "android.app"
+        );
         // Default-package class (no `/`): package is empty; the
         // renderer substitutes "—" at draw time.
         assert_eq!(package_of_descriptor("LFoo;"), "");
@@ -333,6 +335,9 @@ mod tests {
             .collect();
         assert!(open_hits.len() >= 2);
         // "xyz" substring matches nothing.
-        assert!(cmds.iter().all(|(name, _)| !name.to_lowercase().contains("xyz")));
+        assert!(
+            cmds.iter()
+                .all(|(name, _)| !name.to_lowercase().contains("xyz"))
+        );
     }
 }

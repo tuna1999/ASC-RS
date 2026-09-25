@@ -375,3 +375,36 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{cut}…")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// `truncate` shortens strings longer than `max` characters with
+    /// an ellipsis; shorter strings are returned unchanged.
+    #[test]
+    fn truncate_shortens_at_max_chars() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hello…");
+        assert_eq!(truncate("", 5), "");
+        // Multibyte safe: counts chars, not bytes.
+        assert_eq!(truncate("αβγδεζ", 3), "αβγ…");
+    }
+
+    /// `BottomTab::title` covers all four variants. Alias for
+    /// `ui::bottom_panel::tests::bottom_tabs_render`.
+    #[test]
+    fn bottom_tabs_render() {
+        let titles = [
+            BottomTab::Results.title(),
+            BottomTab::References.title(),
+            BottomTab::Problems.title(),
+            BottomTab::Tasks.title(),
+        ];
+        // Every variant has a non-empty title (the renderer shows it).
+        for t in titles {
+            assert!(!t.is_empty(), "title for variant is non-empty");
+        }
+        // BOTTOM_TABS contains all four (the tab strip iterates it).
+        assert_eq!(BOTTOM_TABS.len(), 4);
+    }
+}

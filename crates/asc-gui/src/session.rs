@@ -92,6 +92,29 @@ impl ClassKind {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ClassKind::from_flags` maps the four access-flag patterns
+    /// to the four variants. Alias for ASC-GUI-031.
+    #[test]
+    fn class_kind_from_flags_classify() {
+        const ACC_CLASS: u32 = 0x0001;
+        const ACC_INTERFACE: u32 = 0x0200;
+        const ACC_ANNOTATION: u32 = 0x2000;
+        const ACC_ENUM: u32 = 0x4000;
+        assert_eq!(ClassKind::from_flags(ACC_CLASS), ClassKind::Class);
+        assert_eq!(ClassKind::from_flags(ACC_INTERFACE), ClassKind::Interface);
+        assert_eq!(ClassKind::from_flags(ACC_ENUM), ClassKind::Enum);
+        // Annotation trumps Interface (annotation ⊂ interface).
+        assert_eq!(
+            ClassKind::from_flags(ACC_INTERFACE | ACC_ANNOTATION),
+            ClassKind::Annotation
+        );
+    }
+}
+
 /// One history entry — a query that was actually run to completion.
 /// (In-flight or failed queries are kept in the worker layer, not
 /// here.)

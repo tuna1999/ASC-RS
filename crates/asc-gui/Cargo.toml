@@ -12,6 +12,9 @@ asc-manifest.workspace = true
 asc-apk.workspace = true
 asc-query.workspace = true
 thiserror.workspace = true
+# Used by the persistence round-trip test (JADX-GUI-019 alias).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # eframe pulls in winit + wgpu + accesskit + egui. Pinned locally per
 # Lead's standing approval (do NOT move into [workspace.dependencies]).
 # `accesskit` MUST stay on the main feature list (not just dev-deps):

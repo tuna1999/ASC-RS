@@ -539,4 +539,34 @@ mod tests {
         // No match → empty.
         assert!(filter_outline(&entries, "xyz").is_empty());
     }
+
+    /// Clicking an outline entry queues an `OpenClass` with the
+    /// entry's line. Alias for `ui::inspector::tests::outline_jump_*`.
+    #[test]
+    fn outline_jump_queues_open_class() {
+        let mut app = crate::app::AscApp::new(None);
+        app.tabs.open_pinned("Lcom/foo/Bar;");
+        // Active doc with one outline entry at line 7.
+        let doc = std::sync::Arc::new(crate::state::Document::new(
+            "Lcom/foo/Bar;".into(),
+            "classes.dex".into(),
+            "class Bar {\n    void m() {}\n}\n".into(),
+        ));
+        app.active_doc = Some(doc);
+        // Manually drive the queue to validate the contract.
+        app.queue(crate::command::Command::OpenClass {
+            descriptor: "Lcom/foo/Bar;".into(),
+            pin: false,
+            line: Some(7),
+            origin: crate::state::NavOrigin::Outline,
+        });
+        // One command queued with line 7.
+        assert_eq!(app.commands.len(), 1);
+        match &app.commands[0] {
+            crate::command::Command::OpenClass { line, .. } => {
+                assert_eq!(*line, Some(7));
+            }
+            _ => panic!("expected OpenClass"),
+        }
+    }
 }

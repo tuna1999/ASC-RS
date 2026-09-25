@@ -431,11 +431,7 @@ mod tests {
     /// `ASC-GUI-018` (document lines indexed).
     #[test]
     fn document_lines_indexed() {
-        let doc = Document::new(
-            "LA;".into(),
-            "classes.dex".into(),
-            "one\ntwo\nthree".into(),
-        );
+        let doc = Document::new("LA;".into(), "classes.dex".into(), "one\ntwo\nthree".into());
         assert_eq!(doc.line_count(), 3);
         assert_eq!(doc.line(0), Some("one"));
         assert_eq!(doc.line(1), Some("two"));
@@ -471,7 +467,11 @@ mod tests {
         // Case-insensitive: "ONCREATE" matches "void onCreate".
         let needle = "ONCREATE".to_ascii_lowercase();
         let hits: Vec<usize> = (0..doc.line_count())
-            .filter(|i| doc.line(*i).map(|l| l.to_ascii_lowercase().contains(&needle)).unwrap_or(false))
+            .filter(|i| {
+                doc.line(*i)
+                    .map(|l| l.to_ascii_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            })
             .collect();
         assert_eq!(hits, vec![0]);
     }
