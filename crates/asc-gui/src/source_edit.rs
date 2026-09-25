@@ -468,4 +468,24 @@ mod tests {
         assert!(out.contains("int q = px + 1;  // note\n"));
         assert!(out.ends_with("}\n"));
     }
+
+    /// Alias covering the manifest acceptance ID
+    /// `source_edit::tests::rename_in_method_range_replaces_occurrences`.
+    #[test]
+    fn rename_in_method_range_replaces_occurrences() {
+        let (start, end) = find_method_range(SRC, SRC.find("log(").unwrap()).unwrap();
+        let renamed = rename_in_range(SRC, start, end, "px", "width").unwrap();
+        assert!(renamed.contains("void run(int width)"));
+        assert!(!renamed.contains("(int px)"));
+    }
+
+    /// Alias covering the manifest acceptance ID
+    /// `source_edit::tests::append_line_comment_renders_note`.
+    #[test]
+    fn append_line_comment_renders_note() {
+        let line3 = SRC.lines().nth(3).unwrap();
+        let start = SRC.find(line3).unwrap();
+        let out = append_line_comment(SRC, start, "entry point");
+        assert!(out.contains("// entry point"));
+    }
 }

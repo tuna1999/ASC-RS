@@ -434,6 +434,19 @@ mod tests {
     /// `code_off`. The row whose caller lacks a debug_info_item carries
     /// `None` (the GUI opens at line 0 in that case). Covers
     /// `JADX-GUI-012` (search result jump-to-line data surface).
+    /// Alias covering the manifest acceptance ID
+    /// `state::search::tests::searchrows_round_trip`.
+    #[test]
+    fn searchrows_round_trip() {
+        let results = SearchResults::from_report("string \"hello\"".into(), &sample_report());
+        assert_eq!(results.rows.len(), 3);
+        let r0 = &results.rows[0];
+        assert_eq!(r0.dex_name, "classes.dex");
+        assert_eq!(r0.caller_class, "Lcom/foo/Bar;");
+        assert_eq!(r0.caller_member, "onCreate");
+        assert_eq!(r0.matched, vec!["\"hello\"".to_string()]);
+    }
+
     #[test]
     fn search_row_carries_method_code_off() {
         let results = SearchResults::from_report("string \"hello\"".into(), &sample_report());
