@@ -136,6 +136,58 @@ impl<'a> DexView<'a> {
             done: false,
         })
     }
+
+    /// Resolve a code-unit offset within `debug_info` at `off` to the
+    /// 1-indexed source line. Returns `Ok(None)` when `off == 0` (no
+    /// debug_info emitted for this code) or when the address falls
+    /// before any opcode that updates the line (still returns
+    /// `line_start` in that case).
+    pub fn line_for_code_unit(&self, off: u32, code_off: u32) -> Result<Option<u32>, DexError> {
+        let Some(header) = self.debug_info(off)? else {
+            return Ok(None);
+        };
+        let mut ops = self.debug_ops(off)?;
+        let mut pc: u32 = 0;
+        let mut line: i64 = header.line_start as i64;
+        // The first emitted source line is line_start; that is the
+        // answer for any code_off <= first opcode's address.
+        let mut best: u32 = header.line_start;
+        let target = code_off;
+        for op in ops.by_ref() {
+            let op = op?;
+            match op {
+                DebugOp::EndSequence => break,
+                DebugOp::AdvancePc { addr_diff } => pc = pc.saturating_add(addr_diff),
+                DebugOp::AdvanceLine { line_diff } => line = line.saturating_add(line_diff as i64),
+                DebugOp::Special {
+                    addr_diff,
+                    line_diff,
+                    ..
+                } => {
+                    pc = pc.saturating_add(addr_diff);
+                    line = line.saturating_add(line_diff as i64);
+                }
+                DebugOp::SetPrologueEnd
+                | DebugOp::SetEpilogueBegin
+                | DebugOp::StartLocal { .. }
+                | DebugOp::StartLocalExtended { .. }
+                | DebugOp::EndLocal { .. }
+                | DebugOp::RestartLocal { .. }
+                | DebugOp::SetFile { .. } => {}
+            }
+            if line <= 0 {
+                continue;
+            }
+            if pc > target {
+                break;
+            }
+            best = line as u32;
+            if pc == target {
+                break;
+            }
+        }
+        Ok(Some(best.max(1)))
+    }
 }
 
 /// Iterator over a debug opcode stream.

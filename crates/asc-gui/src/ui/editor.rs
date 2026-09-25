@@ -83,6 +83,7 @@ impl AscApp {
                         let prefix = match kind {
                             TabKind::Pinned => "◆ ",
                             TabKind::Preview => "",
+                            TabKind::Text => "≡ ",
                         };
                         let mut label = egui::RichText::new(format!("{prefix}{short}"))
                             .monospace()
@@ -90,6 +91,7 @@ impl AscApp {
                         label = match kind {
                             TabKind::Preview => label.italics().color(T.text_secondary),
                             TabKind::Pinned => label.color(T.text),
+                            TabKind::Text => label.color(T.text),
                         };
                         if is_active {
                             label = label.color(T.text).strong();
@@ -525,4 +527,34 @@ pub(crate) fn symbol_selection_for(
         method,
         occurrences,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `symbol_selection_for` returns the clicked identifier, the
+    /// enclosing method's byte range, and every code-state
+    /// occurrence inside that range. Covers ASC-GUI-019.
+    #[test]
+    fn symbol_selection_returns_method_occurrences() {
+        let src = "\
+class A {
+  void m() {
+    int foo = 0;
+    int bar = foo + 1;
+    bar = foo * 2;
+  }
+}
+";
+        // Click on the first `foo` (the declaration).
+        let off = src.find("foo").unwrap();
+        let sel = symbol_selection_for("LA;", src, off).expect("selection");
+        assert_eq!(sel.token, "foo");
+        // Every occurrence slice is exactly `foo`.
+        for (s, e) in &sel.occurrences {
+            assert_eq!(&src[*s..*e], "foo");
+        }
+        assert!(!sel.occurrences.is_empty(), "at least one occurrence");
+    }
 }

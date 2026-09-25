@@ -357,6 +357,8 @@ dependencies = [
  "egui_kittest",
  "parking_lot",
  "rfd",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "winresource",
 ]

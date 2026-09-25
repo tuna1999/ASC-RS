@@ -28,6 +28,20 @@ pub enum Command {
     /// Run the current search-controller inputs.
     RunSearch,
     FindReferences,
+    /// "Used by this class" inline button: same engine as
+    /// `FindReferences` (type-query on the descriptor) but the
+    /// caller is bound to the active class and the resulting rows
+    /// land in the bottom-panel REFERENCES tab. Powers
+    /// `ASC-RS-GUI-002` (used by class X inline button).
+    UsedByClass,
+    /// Member-scoped find triggered by `X` on the clicked identifier.
+    /// Wraps `RunSearch` with `SearchKind::Method` and the click's
+    /// token + descriptor pre-filled (workflow B).
+    FindUsagesOfClicked,
+    /// Ctrl+D / Ctrl+Click on an `L...;` descriptor: open the
+    /// resolved class. Used by the click + shortcut handlers
+    /// (workflow D).
+    GoToDeclaration,
     FindInDocument,
     /// Open the rename bar for the clicked symbol (`n`).
     BeginRenameSymbol,
@@ -46,9 +60,19 @@ pub enum Command {
 
     // --- tabs ---
     CloseTab,
+    /// Close every tab except the active one.
+    CloseOthers,
+    /// Close every tab.
+    CloseAll,
     PinTab,
+    /// Pin every preview tab. Drives JADX-GUI-011.
+    PinAll,
     NextTab,
     PreviousTab,
+    /// Ctrl+1..9 → jump to the n-th tab (1-indexed, clamped).
+    QuickSwitch {
+        n: u8,
+    },
 
     // --- layout ---
     ToggleExplorer,
@@ -61,4 +85,23 @@ pub enum Command {
 
     // --- palette ---
     ToggleCommandPalette,
+
+    // --- clipboard ---
+    /// Copy the active class's descriptor (`Lcom/foo/Bar;`) to the
+    /// system clipboard. The descriptor is the canonical reference
+    /// (JADX-GUI-006 / JADX-GUI-015).
+    CopyDescriptor,
+    /// Copy the active class's fully-qualified Java form
+    /// (`com.foo.Bar`) to the system clipboard.
+    CopyFqn,
+
+    // --- navigation helpers ---
+    /// Open the goto-line input (Ctrl+G). Bound by the keyboard
+    /// dispatcher; the input bar lives in the editor surface.
+    GotoLine,
+
+    // --- settings ---
+    /// Open the settings dialog (JADX-GUI-009 / ASC-GUI-025).
+    /// Lists themes; selecting a theme is wired by the picker itself.
+    OpenSettings,
 }

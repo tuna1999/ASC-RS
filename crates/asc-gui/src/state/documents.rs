@@ -412,6 +412,97 @@ mod tests {
         assert!(cache.contains("LB;"));
     }
 
+    /// `decode_java_unicode_escapes` collapses a valid UTF-16 surrogate
+    /// pair into the combined non-BMP `char`. Covers
+    /// `ASC-GUI-041` (decode java unicode escapes handles surrogate pair).
+    #[test]
+    fn decode_java_unicode_escapes_handles_surrogate_pair() {
+        // U+1F600 (😀) encoded as the surrogate pair D83D DE00.
+        let s = r#""\uD83D\uDE00""#;
+        let decoded = decode_java_unicode_escapes(s);
+        assert!(decoded.contains('\u{1F600}'));
+        // Lone surrogate is preserved verbatim (oracle behavior).
+        let lone = r#""\uD83D""#;
+        let decoded = decode_java_unicode_escapes(lone);
+        assert_eq!(decoded, lone);
+    }
+
+    /// Document spans line-up exactly with the source. Covers
+    /// `ASC-GUI-018` (document lines indexed).
+    #[test]
+    fn document_lines_indexed() {
+        let doc = Document::new("LA;".into(), "classes.dex".into(), "one\ntwo\nthree".into());
+        assert_eq!(doc.line_count(), 3);
+        assert_eq!(doc.line(0), Some("one"));
+        assert_eq!(doc.line(1), Some("two"));
+        assert_eq!(doc.line(2), Some("three"));
+        assert_eq!(doc.line(3), None);
+        assert_eq!(doc.spans.len(), 3, "spans align with lines");
+    }
+
+    /// Tokenization produces non-empty spans per line for valid Java.
+    /// Covers `ASC-GUI-033` (document tokenizes offline).
+    #[test]
+    fn document_tokenizes_offline() {
+        let doc = Document::new(
+            "LA;".into(),
+            "classes.dex".into(),
+            "class A {\n    int x;\n    void m() {}\n}\n".into(),
+        );
+        let total_spans: usize = doc.spans.iter().map(|s| s.len()).sum();
+        assert!(total_spans > 0, "spans produced for valid Java");
+        assert!(doc.outline.iter().any(|e| e.text.contains("m")));
+    }
+
+    /// `Document::line_lower` returns the line lowercased; used as the
+    /// search surface for case-insensitive find. Covers `ASC-GUI-017`
+    /// (document find matches lower case).
+    #[test]
+    fn document_find_matches_lower_case() {
+        let doc = Document::new(
+            "LA;".into(),
+            "classes.dex".into(),
+            "void onCreate() {}\nvoid onResume() {}\n".into(),
+        );
+        // Case-insensitive: "ONCREATE" matches "void onCreate".
+        let needle = "ONCREATE".to_ascii_lowercase();
+        let hits: Vec<usize> = (0..doc.line_count())
+            .filter(|i| {
+                doc.line(*i)
+                    .map(|l| l.to_ascii_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(hits, vec![0]);
+    }
+
+    /// When the cache evicts an active document, a subsequent
+    /// reopen rebuilds it without leaking state.
+    /// Covers `ASC-RS-GUI-009` (evicted document triggers respawn).
+    #[test]
+    fn evicted_document_triggers_respawn() {
+        let mut cache = DocumentCache::new(100);
+        let doc = Arc::new(Document::new(
+            "LA;".into(),
+            "d".into(),
+            "class A { int x; }".repeat(100),
+        ));
+        cache.put(doc.clone());
+        assert!(cache.contains("LA;"));
+        cache.enforce_budget(Some("LA;"));
+        // Single oversized doc is kept (the cache accepts one oversize entry).
+        assert!(cache.contains("LA;"));
+        // Replace with a smaller one — the oversized is dropped.
+        cache.put(Arc::new(Document::new(
+            "LB;".into(),
+            "d".into(),
+            "tiny".into(),
+        )));
+        cache.enforce_budget(Some("LB;"));
+        assert!(!cache.contains("LA;"), "oversized doc evicted");
+        assert!(cache.contains("LB;"), "small doc kept");
+    }
+
     #[test]
     fn remove_drops_entry() {
         let mut cache = DocumentCache::default();

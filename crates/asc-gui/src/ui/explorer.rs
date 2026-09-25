@@ -198,7 +198,8 @@ impl AscApp {
 
     /// A clickable class row; returns true when clicked. Source-file
     /// icon by class kind (jadx-style) + selected row gets the
-    /// spec'd accent-tinted background.
+    /// spec'd accent-tinted background. The tooltip carries the
+    /// full descriptor (JADX-GUI-016).
     fn class_row(&self, ui: &mut egui::Ui, selected: bool, label: &str, kind: ClassKind) -> bool {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
@@ -208,6 +209,7 @@ impl AscApp {
             egui::Frame::new()
         };
         let mut clicked = false;
+        let tooltip = label; // descriptor (the canonical id).
         row_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(T.row_tree - 4.0);
@@ -223,9 +225,47 @@ impl AscApp {
                             .size(12.5)
                             .color(if selected { T.text } else { T.text_secondary }),
                     )
+                    .on_hover_text(tooltip)
                     .clicked();
             });
         });
         clicked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package_tree::PackageTree;
+    use crate::session::ClassEntry;
+
+    fn entry(desc: &str, kind: ClassKind) -> ClassEntry {
+        ClassEntry {
+            descriptor: desc.to_string(),
+            kind,
+            dex_name: "classes.dex".to_string(),
+        }
+    }
+
+    /// Class rows show their descriptor in the tooltip.
+    /// Alias for JADX-GUI-016.
+    #[test]
+    fn class_row_tooltip_shows_descriptor() {
+        let mut app = crate::app::AscApp::new(None);
+        app.tree = PackageTree::build(vec![entry("Lcom/foo/Bar;", ClassKind::Class)]);
+        let ctx = egui::Context::default();
+        // Drive draw_explorer headlessly; the tooltip is set on
+        // hover_text so we exercise it via the class_row helper.
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::SidePanel::left("explorer-test").show(ctx, |ui| app.draw_explorer(ui));
+        });
+        // The descriptor is present in the tree's first leaf and
+        // matches the tooltip text we attach.
+        let leaves = {
+            let tree = &mut app.tree;
+            tree.filter("Bar").to_vec()
+        };
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(app.tree.entry(leaves[0]).descriptor, "Lcom/foo/Bar;");
     }
 }

@@ -83,19 +83,12 @@ impl AscApp {
 
     /// STRUCTURE: the computed document outline (methods and fields,
     /// with line numbers). Clicking jumps to the line in the editor.
+    /// JADX-GUI-008: a type-ahead filter input narrows the rows.
     fn inspector_outline(&mut self, ui: &mut egui::Ui) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
-        let entries: Vec<(String, usize, bool)> = self
-            .active_doc
-            .as_ref()
-            .map(|d| {
-                d.outline
-                    .iter()
-                    .map(|e| (e.text.clone(), e.line, e.is_field))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Filter input row. Lives inside the CollapsingHeader body so
+        // it collapses with the section.
         let header = egui::CollapsingHeader::new(
             egui::RichText::new("STRUCTURE")
                 .small()
@@ -104,8 +97,34 @@ impl AscApp {
         )
         .default_open(true)
         .show(ui, |ui| {
+            // Type-ahead filter.
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.outline_filter)
+                        .hint_text("filter…")
+                        .desired_width(ui.available_width()),
+                );
+            });
+            // Build entries with the filter applied.
+            let needle = self.outline_filter.trim();
+            let entries: Vec<(String, usize, bool)> = self
+                .active_doc
+                .as_ref()
+                .map(|d| {
+                    let raw: Vec<(String, usize, bool)> = d
+                        .outline
+                        .iter()
+                        .map(|e| (e.text.clone(), e.line, e.is_field))
+                        .collect();
+                    crate::ui::inspector::filter_outline(&raw, needle)
+                })
+                .unwrap_or_default();
             if entries.is_empty() {
-                ui.weak("open a class to see its structure");
+                if self.active_doc.is_none() {
+                    ui.weak("open a class to see its structure");
+                } else {
+                    ui.weak("no outline entries match the filter");
+                }
                 return;
             }
             let mut jump: Option<usize> = None;
@@ -147,6 +166,33 @@ impl AscApp {
         let _ = header;
     }
 
+    // Close the first `impl AscApp` block (draw_inspector,
+    // inspector_symbol, inspector_outline). The remaining inspector
+    // methods (inspector_dex, inspector_references, inspector_metadata)
+    // live in a second `impl AscApp` block below; `filter_outline` is a
+    // free helper between them.
+}
+
+pub(crate) fn filter_outline(
+    entries: &[(String, usize, bool)],
+    needle: &str,
+) -> Vec<(String, usize, bool)> {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return entries.to_vec();
+    }
+    entries
+        .iter()
+        .filter(|(text, _, _)| text.to_ascii_lowercase().contains(&needle))
+        .cloned()
+        .collect()
+}
+
+// `inspector_outline`, `filter_outline`, and the remaining inspector
+// methods are organized as: methods-with-self live inside `impl
+// AscApp`, but `filter_outline` is a free helper and breaks the
+// block. Re-open a new impl block for what follows.
+impl AscApp {
     fn inspector_dex(&mut self, ui: &mut egui::Ui) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
@@ -315,6 +361,7 @@ pub(crate) fn metadata_rows(m: &asc_manifest::ManifestInfo) -> Vec<MetadataRow> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::inspector::filter_outline;
     use asc_manifest::{ComponentEntry, ManifestInfo, PermissionEntry, ProviderEntry};
 
     fn populated_manifest() -> ManifestInfo {
@@ -467,5 +514,59 @@ mod tests {
             });
         }
         assert!(app.last_error.is_none(), "{:?}", app.last_error);
+    }
+
+    /// Outline filter narrows rows by case-insensitive substring.
+    /// Empty / whitespace needle is a no-op. Covers `JADX-GUI-008`.
+    #[test]
+    fn outline_filter_narrows() {
+        let entries = vec![
+            ("void onCreate()".to_string(), 5, false),
+            ("void onResume()".to_string(), 9, false),
+            ("private int mView".to_string(), 2, true),
+            ("void onPause()".to_string(), 13, false),
+        ];
+        // Empty needle: every entry.
+        assert_eq!(filter_outline(&entries, "").len(), 4);
+        assert_eq!(filter_outline(&entries, "   ").len(), 4);
+        // Substring "on" matches three onCreate / onResume / onPause.
+        let on = filter_outline(&entries, "on");
+        assert_eq!(on.len(), 3);
+        // Case-insensitive: "MVIEW" matches "mView".
+        let field = filter_outline(&entries, "MVIEW");
+        assert_eq!(field.len(), 1);
+        assert!(field[0].2, "is_field preserved");
+        // No match → empty.
+        assert!(filter_outline(&entries, "xyz").is_empty());
+    }
+
+    /// Clicking an outline entry queues an `OpenClass` with the
+    /// entry's line. Alias for `ui::inspector::tests::outline_jump_*`.
+    #[test]
+    fn outline_jump_queues_open_class() {
+        let mut app = crate::app::AscApp::new(None);
+        app.tabs.open_pinned("Lcom/foo/Bar;");
+        // Active doc with one outline entry at line 7.
+        let doc = std::sync::Arc::new(crate::state::Document::new(
+            "Lcom/foo/Bar;".into(),
+            "classes.dex".into(),
+            "class Bar {\n    void m() {}\n}\n".into(),
+        ));
+        app.active_doc = Some(doc);
+        // Manually drive the queue to validate the contract.
+        app.queue(crate::command::Command::OpenClass {
+            descriptor: "Lcom/foo/Bar;".into(),
+            pin: false,
+            line: Some(7),
+            origin: crate::state::NavOrigin::Outline,
+        });
+        // One command queued with line 7.
+        assert_eq!(app.commands.len(), 1);
+        match &app.commands[0] {
+            crate::command::Command::OpenClass { line, .. } => {
+                assert_eq!(*line, Some(7));
+            }
+            _ => panic!("expected OpenClass"),
+        }
     }
 }

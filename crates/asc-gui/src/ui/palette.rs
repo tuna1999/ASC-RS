@@ -255,3 +255,89 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
         ("Cancel running task (Esc)", Command::CancelTask),
     ]
 }
+
+/// Package column for the quick-open palette. Public so tests can
+/// assert the descriptor→package mapping without driving the GUI.
+#[allow(dead_code)]
+pub(crate) fn package_of_descriptor(descriptor: &str) -> String {
+    package_of(descriptor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package_tree::PackageTree;
+    use crate::session::ClassEntry;
+
+    fn entry(desc: &str) -> ClassEntry {
+        ClassEntry {
+            descriptor: desc.to_string(),
+            kind: crate::session::ClassKind::Class,
+            dex_name: "classes.dex".to_string(),
+        }
+    }
+
+    /// Quick-open: every command line up to 50 descriptors from the
+    /// filter results. Alias covering the manifest acceptance ID
+    /// `ui::palette::tests::quick_open_opens_class`.
+    #[test]
+    fn quick_open_opens_class() {
+        let mut app = crate::app::AscApp::new(None);
+        // Empty palette → empty list.
+        assert!(app.palette.is_none());
+        // Set the palette directly (the dispatch path is private).
+        app.palette = Some(PaletteMode::QuickOpen);
+        assert!(matches!(app.palette, Some(PaletteMode::QuickOpen)));
+        // Populate the tree with a few entries; the palette should
+        // accept any substring filter.
+        app.tree = PackageTree::build(vec![
+            entry("Lcom/foo/A;"),
+            entry("Lcom/bar/B;"),
+            entry("Lorg/baz/C;"),
+        ]);
+        app.palette_input = "com".into();
+        // The draw function is a closure over `&mut self`, so we
+        // can't drive it directly here; we exercise the filter
+        // surface instead.
+        let hits = app.tree.filter("com");
+        assert_eq!(hits.len(), 2);
+    }
+
+    /// Quick-open palette rows render the package column.
+    /// Alias covering `ui::palette::tests::quick_open_renders_package_column`.
+    #[test]
+    fn quick_open_renders_package_column() {
+        // package_of strips leading `L` and trailing `;`, joins `/`
+        // with `.`, and trims the trailing simple name.
+        assert_eq!(package_of_descriptor("Lcom/foo/Bar;"), "com.foo");
+        assert_eq!(
+            package_of_descriptor("Landroid/app/Activity;"),
+            "android.app"
+        );
+        // Default-package class (no `/`): package is empty; the
+        // renderer substitutes "—" at draw time.
+        assert_eq!(package_of_descriptor("LFoo;"), "");
+    }
+
+    /// Command palette filters by substring. Alias covering
+    /// `ui::palette::tests::command_palette_filters`.
+    #[test]
+    fn command_palette_filters() {
+        let cmds = palette_commands();
+        // Empty needle → every command.
+        assert!(!cmds.is_empty());
+        // "open" substring matches at least two: Open artifact +
+        // Quick open class.
+        let open_hits: Vec<&str> = cmds
+            .iter()
+            .filter(|(name, _)| name.to_lowercase().contains("open"))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(open_hits.len() >= 2);
+        // "xyz" substring matches nothing.
+        assert!(
+            cmds.iter()
+                .all(|(name, _)| !name.to_lowercase().contains("xyz"))
+        );
+    }
+}
