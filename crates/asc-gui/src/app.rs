@@ -93,6 +93,10 @@ pub struct AscApp {
     pub(crate) palette: Option<PaletteMode>,
     pub(crate) focus_palette: bool,
     pub(crate) palette_input: String,
+    /// Outline type-ahead filter (`STRUCTURE` panel). Empty string
+    /// shows every outline entry; non-empty substring filters
+    /// case-insensitively against `doc.outline[*].text`.
+    pub(crate) outline_filter: String,
     pub(crate) status: Option<StatusLine>,
     pub(crate) last_error: Option<String>,
     pub(crate) commands: Vec<Command>,
@@ -150,6 +154,7 @@ impl AscApp {
             palette: None,
             focus_palette: false,
             palette_input: String::new(),
+            outline_filter: String::new(),
             status: None,
             last_error: None,
             commands: Vec::new(),
