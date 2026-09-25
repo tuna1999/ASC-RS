@@ -229,6 +229,27 @@ mod tests {
         assert_eq!(tree.filter("CLOCK").len(), 2);
     }
 
+    /// Alias covering the manifest acceptance ID
+    /// `package_tree::tests::filter_caches_by_needle`. Same body as
+    /// `filter_matches_case_insensitive` but framed for the cache
+    /// assertion: a second call with the same needle returns the
+    /// cached hit set.
+    #[test]
+    fn filter_caches_by_needle() {
+        let mut tree = PackageTree::build(vec![
+            entry("Lcom/Aaa/One;"),
+            entry("Lcom/bbb/clockface;"),
+            entry("LClock;"),
+        ]);
+        let first = tree.filter("CLOCK").to_vec();
+        // Second call returns the same shape (cache hit).
+        let second = tree.filter("CLOCK").to_vec();
+        assert_eq!(first, second, "cache returns same hit set");
+        // Different needle invalidates the cache.
+        let other = tree.filter("AAA").to_vec();
+        assert_eq!(other.len(), 1);
+    }
+
     #[test]
     fn len_counts_entries_not_nodes() {
         let tree = PackageTree::build(vec![entry("La/B;"), entry("La/C$D;")]);

@@ -89,3 +89,32 @@ fn human_bytes(bytes: usize) -> String {
         format!("{:.1} MiB", b / (1024.0 * 1024.0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// The status-bar counter uses `human_bytes` for the byte total.
+    /// Cover the formatting rules: B, KiB, MiB.
+    #[test]
+    fn status_bar_human_bytes() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_bytes(2 * 1024 * 1024 + 512 * 1024), "2.5 MiB");
+    }
+
+    /// Status bar renders without panic when the app is empty
+    /// (no session, no status, no errors). Alias for
+    /// `ui::status_bar::tests::status_bar_*`.
+    #[test]
+    fn status_bar_renders_empty_app() {
+        use crate::app::AscApp;
+        let mut app = AscApp::new(None);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::TopBottomPanel::bottom("sb-test")
+                .show(ctx, |ui| app.draw_status_bar(ui));
+        });
+    }
+}
