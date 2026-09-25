@@ -61,6 +61,10 @@ pub enum Command {
     PinTab,
     NextTab,
     PreviousTab,
+    /// Ctrl+1..9 → jump to the n-th tab (1-indexed, clamped).
+    QuickSwitch {
+        n: u8,
+    },
 
     // --- layout ---
     ToggleExplorer,
@@ -73,4 +77,18 @@ pub enum Command {
 
     // --- palette ---
     ToggleCommandPalette,
+
+    // --- clipboard ---
+    /// Copy the active class's descriptor (`Lcom/foo/Bar;`) to the
+    /// system clipboard. The descriptor is the canonical reference
+    /// (JADX-GUI-006 / JADX-GUI-015).
+    CopyDescriptor,
+    /// Copy the active class's fully-qualified Java form
+    /// (`com.foo.Bar`) to the system clipboard.
+    CopyFqn,
+
+    // --- navigation helpers ---
+    /// Open the goto-line input (Ctrl+G). Bound by the keyboard
+    /// dispatcher; the input bar lives in the editor surface.
+    GotoLine,
 }

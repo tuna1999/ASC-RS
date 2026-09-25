@@ -97,6 +97,14 @@ pub struct AscApp {
     /// shows every outline entry; non-empty substring filters
     /// case-insensitively against `doc.outline[*].text`.
     pub(crate) outline_filter: String,
+    /// Most-recent text written via the copy-to-clipboard surface
+    /// (JADX-GUI-006, JADX-GUI-015). Production dispatches this to
+    /// `egui::Context::copy_text`; the field exists so unit tests
+    /// can observe the write without an active GUI.
+    pub(crate) last_clipboard: Option<String>,
+    /// Ctrl+G goto-line input: shows when `Some(_)`. `pending_scroll`
+    /// is set when the user presses Enter on a valid 1-indexed line.
+    pub(crate) goto_line_input: Option<String>,
     pub(crate) status: Option<StatusLine>,
     pub(crate) last_error: Option<String>,
     pub(crate) commands: Vec<Command>,
@@ -155,6 +163,8 @@ impl AscApp {
             focus_palette: false,
             palette_input: String::new(),
             outline_filter: String::new(),
+            last_clipboard: None,
+            goto_line_input: None,
             status: None,
             last_error: None,
             commands: Vec::new(),
@@ -696,6 +706,24 @@ impl AscApp {
                 design::set_theme(next);
                 design::apply(ctx);
             }
+            Command::QuickSwitch { n } => {
+                // Ctrl+1..9 jumps to the n-th tab. The tab list is
+                // pinned-first / preview-last; `n` is 1-indexed and
+                // clamped.
+                let count = self.tabs.tabs().len();
+                if count == 0 {
+                    self.set_status("no tabs to switch to", false);
+                    return;
+                }
+                let idx = (n as usize).saturating_sub(1).min(count - 1);
+                let descriptor = self.tabs.tabs()[idx].descriptor.clone();
+                self.tabs.activate(&descriptor);
+                self.nav.push(crate::state::NavigationLocation {
+                    descriptor,
+                    line: None,
+                    origin: crate::state::NavOrigin::Tab,
+                });
+            }
             Command::BeginRenameSymbol => {
                 if let Some(sel) = self.symbol_sel.as_ref() {
                     self.rename_input = sel.token.clone();
@@ -723,7 +751,72 @@ impl AscApp {
                 self.tasks.cancel_kind(TaskKind::FindRefs);
                 self.set_status("search cancelled", false);
             }
+            Command::CopyDescriptor => {
+                let descriptor = self
+                    .tabs
+                    .active_descriptor()
+                    .or(self.selected_class.as_deref())
+                    .map(str::to_string);
+                let Some(d) = descriptor else {
+                    self.set_status("copy descriptor: no active class", false);
+                    return;
+                };
+                self.last_clipboard = Some(d.clone());
+                ctx.copy_text(d.clone());
+                self.set_status(format!("copied descriptor: {d}"), true);
+            }
+            Command::CopyFqn => {
+                let descriptor = self
+                    .tabs
+                    .active_descriptor()
+                    .or(self.selected_class.as_deref())
+                    .map(str::to_string);
+                let Some(d) = descriptor else {
+                    self.set_status("copy FQN: no active class", false);
+                    return;
+                };
+                let fqn = asc_core::normalize_class_name(&d)
+                    .ok()
+                    .map(|c| {
+                        // The normalized form is the descriptor; the FQN
+                        // is the Java form which is the descriptor with
+                        // leading `L` and trailing `;` stripped, and
+                        // `/` → `.`.
+                        if c.starts_with('L') && c.ends_with(';') {
+                            c[1..c.len() - 1].replace('/', ".")
+                        } else {
+                            c
+                        }
+                    })
+                    .unwrap_or_else(|| d.clone());
+                self.last_clipboard = Some(fqn.clone());
+                ctx.copy_text(fqn.clone());
+                self.set_status(format!("copied FQN: {fqn}"), true);
+            }
+            Command::GotoLine => {
+                // Surface the input bar. The bar lives in the editor
+                // (drawn when `goto_line_input.is_some()`); pressing
+                // Enter with a numeric value calls
+                // `apply_goto_line(line)` which sets `pending_scroll`.
+                self.goto_line_input = Some(String::new());
+                self.set_status("goto line (1-indexed):", true);
+            }
         }
+    }
+
+    /// Apply a 1-indexed `line` to `pending_scroll`. The editor reads
+    /// `pending_scroll` and offsets the scroll area accordingly.
+    /// Public so the editor surface (or a future modal) can call
+    /// it without duplicating the bounds check.
+    pub(crate) fn apply_goto_line(&mut self, line: usize) {
+        if line == 0 {
+            // Treat 0 as "no-op" (avoids underflowing the 1-indexed
+            // → 0-based conversion).
+            return;
+        }
+        self.pending_scroll = Some(line - 1);
+        self.set_status(format!("jumped to line {line}"), true);
+        self.goto_line_input = None;
     }
 
     /// Frame keyboard shortcuts → commands. Single place, no draw fn
@@ -1962,5 +2055,100 @@ mod tests {
                 .any(|c| matches!(c, Command::RunSearch)),
             "RunSearch queued"
         );
+    }
+
+    /// `Command::CopyDescriptor` writes the active class's descriptor
+    /// to `last_clipboard`. Covers JADX-GUI-006 (Ctrl+C → copy
+    /// descriptor).
+    #[test]
+    fn copy_descriptor_writes_clipboard() {
+        let mut app = empty_app();
+        app.tabs.open_pinned("Lcom/foo/Bar;");
+        let ctx = egui::Context::default();
+        app.dispatch(Command::CopyDescriptor, &ctx);
+        assert_eq!(app.last_clipboard.as_deref(), Some("Lcom/foo/Bar;"));
+    }
+
+    /// `Command::CopyFqn` writes the active class's Java-form FQN
+    /// (`com.foo.Bar`) to `last_clipboard`. Covers JADX-GUI-015
+    /// (Copy FQN of selected class).
+    #[test]
+    fn copy_fqn_writes_clipboard() {
+        let mut app = empty_app();
+        app.tabs.open_pinned("Lcom/foo/Bar;");
+        let ctx = egui::Context::default();
+        app.dispatch(Command::CopyFqn, &ctx);
+        assert_eq!(app.last_clipboard.as_deref(), Some("com.foo.Bar"));
+    }
+
+    /// `Command::ToggleTheme` flips the active theme. Covers
+    /// `ASC-GUI-025` (settings dialog theme picker). The full
+    /// settings dialog is still TODO; the theme toggle is the
+    /// minimum the picker needs to drive.
+    #[test]
+    fn theme_toggle_via_view_menu() {
+        use crate::design::{Theme, set_theme, theme};
+        // Start in Dark so we observe the flip.
+        set_theme(Theme::Dark);
+        let mut app = empty_app();
+        let ctx = egui::Context::default();
+        app.dispatch(Command::ToggleTheme, &ctx);
+        assert_eq!(theme(), Theme::Light, "Dark → Light on first toggle");
+        app.dispatch(Command::ToggleTheme, &ctx);
+        assert_eq!(theme(), Theme::Dark, "Light → Dark on second toggle");
+    }
+
+    /// `apply_goto_line` converts a 1-indexed user line to a
+    /// 0-indexed `pending_scroll`. Covers JADX-GUI-020 (goto line).
+    #[test]
+    fn goto_line_jumps_to_zero_indexed() {
+        let mut app = empty_app();
+        // Open an active doc so the editor has a target.
+        app.tabs.open_pinned("Lcom/foo/Bar;");
+        // 1-indexed line 42 → 0-indexed 41.
+        app.apply_goto_line(42);
+        assert_eq!(app.pending_scroll, Some(41));
+        assert!(app.goto_line_input.is_none(), "input bar closed");
+        // 0 is a no-op (avoids underflow).
+        app.pending_scroll = None;
+        app.apply_goto_line(0);
+        assert!(app.pending_scroll.is_none(), "0 is a no-op");
+    }
+
+    /// `Command::GotoLine` opens the input bar. The bar is dismissed
+    /// by `apply_goto_line`. Covers the dispatch half of JADX-GUI-020.
+    #[test]
+    fn goto_line_input_opens_via_command() {
+        let mut app = empty_app();
+        let ctx = egui::Context::default();
+        assert!(app.goto_line_input.is_none());
+        app.dispatch(Command::GotoLine, &ctx);
+        assert!(app.goto_line_input.is_some(), "input bar opened");
+        app.apply_goto_line(7);
+        assert!(app.goto_line_input.is_none(), "input bar closed on apply");
+    }
+
+    /// `Command::QuickSwitch { n }` activates the n-th tab
+    /// (1-indexed). Covers JADX-GUI-014 (Ctrl+1..9 quick switch).
+    #[test]
+    fn quick_switch_activates_nth_tab() {
+        let mut app = empty_app();
+        app.tabs.open_pinned("Lcom/foo/A;");
+        app.tabs.open_pinned("Lcom/foo/B;");
+        app.tabs.open_pinned("Lcom/foo/C;");
+        let ctx = egui::Context::default();
+        // Ctrl+1 → first tab.
+        app.dispatch(Command::QuickSwitch { n: 1 }, &ctx);
+        assert_eq!(app.tabs.active_descriptor(), Some("Lcom/foo/A;"));
+        // Ctrl+2 → second tab.
+        app.dispatch(Command::QuickSwitch { n: 2 }, &ctx);
+        assert_eq!(app.tabs.active_descriptor(), Some("Lcom/foo/B;"));
+        // Ctrl+99 is clamped to the last tab.
+        app.dispatch(Command::QuickSwitch { n: 99 }, &ctx);
+        assert_eq!(app.tabs.active_descriptor(), Some("Lcom/foo/C;"));
+        // Empty tab list: no-op (status set, no panic).
+        app.tabs.clear();
+        app.dispatch(Command::QuickSwitch { n: 1 }, &ctx);
+        assert!(app.tabs.active_descriptor().is_none());
     }
 }
