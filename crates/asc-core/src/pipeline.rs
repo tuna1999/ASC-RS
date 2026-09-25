@@ -366,8 +366,7 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
         // line. None when the body has no debug_info_item; we do not
         // fail the match on malformed debug streams — we just skip
         // the line number (the GUI then opens at line 0 / start).
-        let first_line = min_code_off
-            .and_then(|off| resolve_first_line(view, *mid, off));
+        let first_line = min_code_off.and_then(|off| resolve_first_line(view, *mid, off));
         out.push(RenderedMatch {
             caller: caller_str,
             matched: matched_strs,
@@ -387,7 +386,9 @@ fn resolve_first_line(view: &DexView<'_>, mid: u32, code_off: u32) -> Option<u32
     let n = view.class_def_count();
     let mut found_code_off: Option<u32> = None;
     for ci in 0..n {
-        let Ok(def) = view.class_def(ci) else { continue };
+        let Ok(def) = view.class_def(ci) else {
+            continue;
+        };
         if def.class_data_off == 0 {
             continue;
         }

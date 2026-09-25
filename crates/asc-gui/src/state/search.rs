@@ -174,12 +174,8 @@ impl SearchController {
             SearchKind::String => Query::string(pattern),
             SearchKind::Type => Query::type_(pattern),
             // No class filter given → None (engine matches any class).
-            SearchKind::Method | SearchKind::MemberMethod => {
-                Query::method(Some(pattern), class)
-            }
-            SearchKind::Field | SearchKind::MemberField => {
-                Query::field(Some(pattern), class)
-            }
+            SearchKind::Method | SearchKind::MemberMethod => Query::method(Some(pattern), class),
+            SearchKind::Field | SearchKind::MemberField => Query::field(Some(pattern), class),
         })
     }
 
@@ -240,7 +236,10 @@ impl SearchController {
                 .filter(|row| {
                     row.caller_class.to_ascii_lowercase().contains(&needle)
                         || row.caller_member.to_ascii_lowercase().contains(&needle)
-                        || row.matched.iter().any(|m| m.to_ascii_lowercase().contains(&needle))
+                        || row
+                            .matched
+                            .iter()
+                            .any(|m| m.to_ascii_lowercase().contains(&needle))
                 })
                 .collect(),
         )
@@ -478,9 +477,11 @@ mod tests {
     #[test]
     fn search_bar_shows_fuzzy_toggle_for_method_field() {
         // Member-scoped kinds → fuzzy toggle is shown.
-        let mut s = SearchController::default();
-        s.kind = SearchKind::MemberMethod;
-        s.input = "doThing".into();
+        let mut s = SearchController {
+            kind: SearchKind::MemberMethod,
+            input: "doThing".into(),
+            ..Default::default()
+        };
         assert!(s.kind.is_member_scoped());
         // Class filter applies (even with `fuzzy_class` off the
         // substring match still works as a literal).
@@ -505,8 +506,10 @@ mod tests {
     /// over recent queries).
     #[test]
     fn search_autocomplete_over_recent_queries() {
-        let mut s = SearchController::default();
-        s.input = "hello".into();
+        let mut s = SearchController {
+            input: "hello".into(),
+            ..Default::default()
+        };
         s.commit_to_history();
         s.input = "help".into();
         s.class_filter = "Lcom/foo/Bar;".into();
@@ -518,8 +521,7 @@ mod tests {
         s.commit_to_history();
         // Autocomplete suggestions while the user types "hel".
         s.input = "hel".into();
-        let suggestions: Vec<&SearchHistoryEntry> =
-            s.history_filtered("hel");
+        let suggestions: Vec<&SearchHistoryEntry> = s.history_filtered("hel");
         assert_eq!(suggestions.len(), 2, "two entries contain `hel`");
         // Class filter also matches the search. The matcher checks
         // both `input` AND `class_filter`. Only the entry whose
@@ -570,8 +572,10 @@ mod tests {
 
     #[test]
     fn search_history_dropdown_renders() {
-        let mut s = SearchController::default();
-        s.kind = SearchKind::String;
+        let mut s = SearchController {
+            kind: SearchKind::String,
+            ..Default::default()
+        };
         s.input = "hello".into();
         s.commit_to_history();
         s.input = "world".into();
@@ -597,7 +601,10 @@ mod tests {
             s.commit_to_history();
         }
         assert_eq!(s.history("").len(), MAX_SEARCH_HISTORY);
-        assert_eq!(s.history("")[0].input, format!("q{}", MAX_SEARCH_HISTORY + 9));
+        assert_eq!(
+            s.history("")[0].input,
+            format!("q{}", MAX_SEARCH_HISTORY + 9)
+        );
         // `select_history` rehydrates the input fields.
         s.select_history(0);
         assert_eq!(s.input, format!("q{}", MAX_SEARCH_HISTORY + 9));

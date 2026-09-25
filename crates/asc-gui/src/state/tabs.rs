@@ -158,9 +158,7 @@ impl TabController {
     /// active one when `None`). Returns the closed descriptors in
     /// drop order (oldest first, preview last).
     pub fn close_others(&mut self, keep: Option<&str>) -> Vec<String> {
-        let target = keep
-            .map(str::to_string)
-            .or_else(|| self.active.clone());
+        let target = keep.map(str::to_string).or_else(|| self.active.clone());
         let Some(target) = target else {
             return Vec::new();
         };
@@ -454,7 +452,7 @@ mod tests {
         assert_eq!(tabs.tabs()[0].status, TabStatus::Ready);
     }
 
-/// Close-others: every tab except the active one is dropped; the
+    /// Close-others: every tab except the active one is dropped; the
     /// active descriptor remains active. Covers ASC-GUI-030 and
     /// JADX-GUI-005.
     #[test]
@@ -478,7 +476,7 @@ mod tests {
         assert!(tabs.active_descriptor().is_none());
     }
 
-/// Open-tabs popup: every tab surfaces; a substring needle
+    /// Open-tabs popup: every tab surfaces; a substring needle
     /// narrows to descriptors that contain it (case-insensitive).
     /// Covers JADX-GUI-004 (open-tabs popup with filter) and
     /// ASC-GUI-029 (tab overflow popup).
@@ -558,7 +556,10 @@ mod tests {
         let all = tabs.bookmarks();
         assert_eq!(all.len(), 2);
         assert!(all.iter().any(|(d, l)| d == "Lcom/foo/Qux;" && *l == 1));
-        assert!(all.iter().any(|(d, l)| d == "Lorg/fdroid/FDroid;" && *l == 3));
+        assert!(
+            all.iter()
+                .any(|(d, l)| d == "Lorg/fdroid/FDroid;" && *l == 3)
+        );
     }
 
     /// TabController supports a non-class `Text` tab kind for

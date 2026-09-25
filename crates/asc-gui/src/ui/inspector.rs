@@ -166,11 +166,11 @@ impl AscApp {
         let _ = header;
     }
 
-// Close the first `impl AscApp` block (draw_inspector,
-// inspector_symbol, inspector_outline). The remaining inspector
-// methods (inspector_dex, inspector_references, inspector_metadata)
-// live in a second `impl AscApp` block below; `filter_outline` is a
-// free helper between them.
+    // Close the first `impl AscApp` block (draw_inspector,
+    // inspector_symbol, inspector_outline). The remaining inspector
+    // methods (inspector_dex, inspector_references, inspector_metadata)
+    // live in a second `impl AscApp` block below; `filter_outline` is a
+    // free helper between them.
 }
 
 pub(crate) fn filter_outline(

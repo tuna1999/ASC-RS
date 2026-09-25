@@ -159,7 +159,11 @@ impl<'a> DexView<'a> {
                 DebugOp::EndSequence => break,
                 DebugOp::AdvancePc { addr_diff } => pc = pc.saturating_add(addr_diff),
                 DebugOp::AdvanceLine { line_diff } => line = line.saturating_add(line_diff as i64),
-                DebugOp::Special { addr_diff, line_diff, .. } => {
+                DebugOp::Special {
+                    addr_diff,
+                    line_diff,
+                    ..
+                } => {
                     pc = pc.saturating_add(addr_diff);
                     line = line.saturating_add(line_diff as i64);
                 }

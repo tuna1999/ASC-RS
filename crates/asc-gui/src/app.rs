@@ -645,9 +645,8 @@ impl AscApp {
                 if let Some(sel) = self.symbol_sel.as_ref() {
                     if !sel.descriptor.is_empty() {
                         self.search.input = sel.token.clone();
-                        self.search.class_filter =
-                            asc_core::normalize_class_name(&sel.descriptor)
-                                .unwrap_or_else(|_| sel.descriptor.clone());
+                        self.search.class_filter = asc_core::normalize_class_name(&sel.descriptor)
+                            .unwrap_or_else(|_| sel.descriptor.clone());
                         self.search.kind = SearchKind::Method;
                         self.focus_search = true;
                         self.queue(Command::RunSearch);
@@ -692,10 +691,7 @@ impl AscApp {
                 for d in &dropped {
                     self.documents.remove(d);
                 }
-                self.set_status(
-                    format!("closed {} other tab(s)", dropped.len()),
-                    true,
-                );
+                self.set_status(format!("closed {} other tab(s)", dropped.len()), true);
             }
             Command::CloseAll => {
                 let dropped = self.tabs.close_all();
@@ -2043,7 +2039,9 @@ mod tests {
         // Exactly one command queued, opening the resolved owner.
         assert_eq!(app.commands.len(), 1, "one OpenClass queued");
         match &app.commands[0] {
-            Command::OpenClass { descriptor, origin, .. } => {
+            Command::OpenClass {
+                descriptor, origin, ..
+            } => {
                 assert_eq!(descriptor, "Lcom/foo/Bar;");
                 assert_eq!(*origin, NavOrigin::Declaration);
             }
@@ -2078,9 +2076,7 @@ mod tests {
         // RunSearch is queued (its execution depends on a live
         // session, asserted at integration level).
         assert!(
-            app.commands
-                .iter()
-                .any(|c| matches!(c, Command::RunSearch)),
+            app.commands.iter().any(|c| matches!(c, Command::RunSearch)),
             "RunSearch queued"
         );
     }
