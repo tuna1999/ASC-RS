@@ -136,7 +136,7 @@ impl AscApp {
     /// REFERENCES tab: callers of the active class (Analysis ▸ Find
     /// references, or the palette).
     fn draw_references(&mut self, ui: &mut egui::Ui) {
-        let rows: Vec<(String, String, String, String)> = self
+        let rows: Vec<(String, String, String, String, Option<u32>)> = self
             .references
             .as_ref()
             .map(|r| {
@@ -152,6 +152,7 @@ impl AscApp {
                             ),
                             row.caller_class.clone(),
                             row.matched.join(" "),
+                            row.code_off,
                         )
                     })
                     .collect()
@@ -171,7 +172,7 @@ impl AscApp {
     /// Virtualized search-result rows: DEX · caller · matched
     /// entities. Selection navigates (preview) and keeps the list.
     fn draw_search_results(&mut self, ui: &mut egui::Ui) {
-        let rows: Vec<(String, String, String, String)> = self
+        let rows: Vec<(String, String, String, String, Option<u32>)> = self
             .search
             .results()
             .map(|r| {
@@ -187,6 +188,7 @@ impl AscApp {
                             ),
                             row.caller_class.clone(),
                             row.matched.join(" "),
+                            row.code_off,
                         )
                     })
                     .collect()
@@ -205,23 +207,24 @@ impl AscApp {
 
     /// Shared virtualized result rows. `track_selection` keeps the
     /// clicked row highlighted in SEARCH RESULTS (the REFERENCES list
-    /// is transient).
+    /// is transient). When the row carries a code-unit offset
+    /// (`JADX-GUI-012`), clicking jumps to that line in the editor.
     fn draw_result_rows(
         &mut self,
         ui: &mut egui::Ui,
-        rows: Vec<(String, String, String, String)>,
+        rows: Vec<(String, String, String, String, Option<u32>)>,
         track_selection: bool,
     ) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
         let row_h = T.row_list;
         let selected = self.search.selected();
-        let mut activate: Option<(usize, String)> = None;
+        let mut activate: Option<(usize, String, Option<usize>)> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for idx in range {
-                    let (dex, caller, descriptor, matched) = &rows[idx];
+                    let (dex, caller, descriptor, matched, code_off) = &rows[idx];
                     let is_sel = track_selection && selected == Some(idx);
                     let frame = if is_sel {
                         egui::Frame::new().fill(T.row_sel_bg)
@@ -251,18 +254,20 @@ impl AscApp {
                         .interact(egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
-                        activate = Some((idx, descriptor.clone()));
+                        // 1-indexed line in the GUI; backend stores 1-indexed.
+                        let line = code_off.map(|n| n as usize);
+                        activate = Some((idx, descriptor.clone(), line));
                     }
                 }
             });
-        if let Some((idx, descriptor)) = activate {
+        if let Some((idx, descriptor, line)) = activate {
             if track_selection {
                 self.search.select(Some(idx));
             }
             self.queue(Command::OpenClass {
                 descriptor,
                 pin: false,
-                line: None,
+                line,
                 origin: NavOrigin::Search,
             });
         }

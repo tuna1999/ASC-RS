@@ -36,6 +36,14 @@ pub struct RenderedMatch {
     pub caller: String,
     /// Sorted, de-duplicated matched entity strings.
     pub matched: Vec<String>,
+    /// 1-indexed source line in the caller that the engine resolves
+    /// from the smallest code-unit offset of any matched instruction
+    /// in the body. `None` when the body has no `debug_info_item` (or
+    /// the debug stream is malformed). The GUI uses this to land on
+    /// the matched call site when the user clicks the row.
+    /// Added for `JADX-GUI-012` (jump-to-line on search hit click).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub first_line: Option<u32>,
 }
 
 /// Per-DEX subset of a [`SearchReport`].

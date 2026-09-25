@@ -48,6 +48,12 @@ pub struct SearchRow {
     pub caller_member: String,
     /// Matched entity strings (string literal / type / member).
     pub matched: Vec<String>,
+    /// 1-indexed source line within `caller_member` that the engine
+    /// resolved from the smallest matched code-unit offset. The GUI
+    /// uses this to land on the matched call site when the user
+    /// clicks the row (JADX-GUI-012). `None` when the caller has no
+    /// `debug_info_item` (the GUI then opens at line 0).
+    pub code_off: Option<u32>,
 }
 
 /// A completed search, retained for browsing.
@@ -72,6 +78,7 @@ impl SearchResults {
                     caller_class: class,
                     caller_member: member,
                     matched: m.matched.clone(),
+                    code_off: m.first_line,
                 });
             }
         }
@@ -207,10 +214,12 @@ mod tests {
                 RenderedMatch {
                     caller: "Lcom/foo/Bar;->onCreate".into(),
                     matched: vec!["\"hello\"".into()],
+                    first_line: Some(7),
                 },
                 RenderedMatch {
                     caller: "Lcom/foo/Baz$Inner;->run".into(),
                     matched: vec!["\"hello\"".into(), "\"world\"".into()],
+                    first_line: None,
                 },
             ],
             errors: Vec::new(),
@@ -221,6 +230,7 @@ mod tests {
             matches: vec![RenderedMatch {
                 caller: "Lother/Qux;->go".into(),
                 matched: vec!["\"hello\"".into()],
+                first_line: Some(42),
             }],
             errors: Vec::new(),
             complete: true,
@@ -278,5 +288,20 @@ mod tests {
         assert_eq!(s.selected(), None);
         s.input = "hell".into();
         assert!(s.dirty(), "edited input marks results stale");
+    }
+
+    /// `first_line` from `RenderedMatch` flows through to the per-row
+    /// `code_off`. The row whose caller lacks a debug_info_item carries
+    /// `None` (the GUI opens at line 0 in that case). Covers
+    /// `JADX-GUI-012` (search result jump-to-line data surface).
+    #[test]
+    fn search_row_carries_method_code_off() {
+        let results = SearchResults::from_report("string \"hello\"".into(), &sample_report());
+        // Row 0: Bar.onCreate had first_line = Some(7).
+        assert_eq!(results.rows[0].code_off, Some(7));
+        // Row 1: Baz$Inner.run had None.
+        assert_eq!(results.rows[1].code_off, None);
+        // Row 2: Qux.go had first_line = Some(42).
+        assert_eq!(results.rows[2].code_off, Some(42));
     }
 }

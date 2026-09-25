@@ -316,18 +316,25 @@ fn run_engine_for_view(
 ///
 /// Group by caller method id, de-duplicate and sort matched refs,
 /// render each caller / matched pair into strings while the borrowed
-/// `view` is alive.
+/// `view` is alive. Also resolves the smallest matched code-unit
+/// offset to a 1-indexed source line via `debug_info` (None when the
+/// method has no debug stream).
 fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
     if hits.is_empty() {
         return Vec::new();
     }
-    // caller -> sorted, dedup'd matched refs.
-    let mut by_caller: BTreeMap<u32, Vec<DexRef>> = BTreeMap::new();
+    // caller -> (sorted, dedup'd matched refs) + minimum code_off.
+    let mut by_caller: BTreeMap<u32, (Vec<DexRef>, Option<u32>)> = BTreeMap::new();
     for h in hits {
-        by_caller.entry(h.method.0).or_default().push(h.dex_ref);
+        let entry = by_caller.entry(h.method.0).or_default();
+        entry.0.push(h.dex_ref);
+        entry.1 = Some(match entry.1 {
+            Some(prev) => prev.min(h.offset),
+            None => h.offset,
+        });
     }
     let mut out: Vec<RenderedMatch> = Vec::with_capacity(by_caller.len());
-    for (mid, matched) in &by_caller {
+    for (mid, (matched, min_code_off)) in &by_caller {
         let Some(caller_str) = render_caller(view, mid) else {
             continue;
         };
@@ -355,12 +362,63 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
             .iter()
             .filter_map(|r| render_dex_ref(view, r))
             .collect();
+        // Resolve the smallest matched offset to a 1-indexed source
+        // line. None when the body has no debug_info_item; we do not
+        // fail the match on malformed debug streams — we just skip
+        // the line number (the GUI then opens at line 0 / start).
+        let first_line = min_code_off
+            .and_then(|off| resolve_first_line(view, *mid, off));
         out.push(RenderedMatch {
             caller: caller_str,
             matched: matched_strs,
+            first_line,
         });
     }
     out
+}
+
+/// Resolve the 1-indexed source line of the smallest matched code
+/// offset in a caller method. Returns `None` when the body has no
+/// `debug_info_item` (or the offset lands on a malformed stream).
+fn resolve_first_line(view: &DexView<'_>, mid: u32, code_off: u32) -> Option<u32> {
+    // Walk every class_data_item once, picking the `code_off` for the
+    // matching `method_idx`. For the typical 64 MiB corpus this is
+    // < 1ms; if it ever becomes hot we'll cache it on the worker.
+    let n = view.class_def_count();
+    let mut found_code_off: Option<u32> = None;
+    for ci in 0..n {
+        let Ok(def) = view.class_def(ci) else { continue };
+        if def.class_data_off == 0 {
+            continue;
+        }
+        let Ok(Some(data)) = view.class_data(def.class_data_off) else {
+            continue;
+        };
+        for m in data
+            .direct_methods
+            .iter()
+            .chain(data.virtual_methods.iter())
+        {
+            if m.method_idx.0 == mid {
+                found_code_off = Some(m.code_off);
+                break;
+            }
+        }
+        if found_code_off.is_some() {
+            break;
+        }
+    }
+    let code_off_abs = found_code_off?;
+    if code_off_abs == 0 {
+        return None;
+    }
+    // Read the code_item header to fetch debug_info_off.
+    let code_item = view.code_item(code_off_abs).ok()??;
+    let dbg_off = code_item.debug_info_off;
+    if dbg_off == 0 {
+        return None;
+    }
+    view.line_for_code_unit(dbg_off, code_off).ok().flatten()
 }
 
 /// Render a caller method `Lcom/foo/Bar;->name` for a given method id.

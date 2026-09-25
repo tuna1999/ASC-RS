@@ -23,7 +23,7 @@ use crate::package_tree::PackageTree;
 use crate::session::WorkspaceSession;
 use crate::state::{
     Document, DocumentCache, NavOrigin, NavigationHistory, NavigationLocation, SearchController,
-    SearchResults, TabController,
+    SearchKind, SearchResults, TabController,
 };
 use crate::task::{CompletedTask, LoadedArtifact, TaskId, TaskKind, TaskManager, TaskOutcome};
 use crate::ui::bottom_panel::BottomTab;
@@ -599,6 +599,44 @@ impl AscApp {
             Command::FindInDocument => {
                 self.show_find = true;
                 self.recompute_find_matches();
+            }
+            Command::FindUsagesOfClicked => {
+                // Workflow B: prefill the search bar with the clicked
+                // identifier as a method-scoped find with a class
+                // filter pinned to the click's descriptor. Falls back
+                // to global search when the click didn't target a
+                // member (still useful — same UI surface).
+                if let Some(sel) = self.symbol_sel.as_ref() {
+                    if !sel.descriptor.is_empty() {
+                        self.search.input = sel.token.clone();
+                        self.search.class_filter =
+                            asc_core::normalize_class_name(&sel.descriptor)
+                                .unwrap_or_else(|_| sel.descriptor.clone());
+                        self.search.kind = SearchKind::Method;
+                        self.focus_search = true;
+                        self.queue(Command::RunSearch);
+                        return;
+                    }
+                }
+                self.queue(Command::GlobalSearch);
+            }
+            Command::GoToDeclaration => {
+                // Workflow D: open the descriptor the click landed on,
+                // if any. For non-class tokens we still run a search —
+                // "go to declaration" of a member in the absence of a
+                // class-keyed find is a TODO at the engine level.
+                if let Some(sel) = self.symbol_sel.as_ref() {
+                    if sel.descriptor.starts_with('L') && sel.descriptor.ends_with(';') {
+                        self.queue(Command::OpenClass {
+                            descriptor: sel.descriptor.clone(),
+                            pin: false,
+                            line: None,
+                            origin: NavOrigin::Declaration,
+                        });
+                        return;
+                    }
+                }
+                self.set_status("go to declaration: no class identifier selected", false);
             }
             Command::QuickOpen => {
                 self.palette = Some(PaletteMode::QuickOpen);
@@ -1333,6 +1371,7 @@ mod tests {
             matches: vec![RenderedMatch {
                 caller: "Lcom/foo/Bar;->onCreate".into(),
                 matched: vec!["\"lit\"".into()],
+                first_line: Some(3),
             }],
             errors: Vec::new(),
             complete: true,
@@ -1831,5 +1870,68 @@ mod tests {
             "comment appended to the line"
         );
         assert!(doc.source.ends_with("}\n"), "tail preserved");
+    }
+
+    /// `Command::GoToDeclaration` on an `L...;` selection queues an
+    /// `OpenClass` for the resolved owner. Covers `JADX-GUI-003`
+    /// (Go to declaration of selected symbol). The test inspects
+    /// the queue — `navigate_to` would need a live `WorkspaceSession`
+    /// to call `spawn_decompile`, which is outside the unit-test
+    /// scope (covered by `integration::selfcheck_on_workload_apk`).
+    #[test]
+    fn go_to_declaration_jumps_to_owner() {
+        let mut app = empty_app();
+        // Simulate a click on an `Lcom/foo/Bar;` reference.
+        app.symbol_sel = Some(SymbolSelection {
+            descriptor: "Lcom/foo/Bar;".into(),
+            token: "Bar".into(),
+            method: (0, 10),
+            occurrences: vec![(0, 3)],
+        });
+        let ctx = egui::Context::default();
+        app.dispatch(Command::GoToDeclaration, &ctx);
+        // Exactly one command queued, opening the resolved owner.
+        assert_eq!(app.commands.len(), 1, "one OpenClass queued");
+        match &app.commands[0] {
+            Command::OpenClass { descriptor, origin, .. } => {
+                assert_eq!(descriptor, "Lcom/foo/Bar;");
+                assert_eq!(*origin, NavOrigin::Declaration);
+            }
+            other => panic!("expected OpenClass, got {other:?}"),
+        }
+    }
+
+    /// `Command::FindUsagesOfClicked` pre-fills the search bar with
+    /// the click's token and a class filter pinned to the click's
+    /// descriptor, then queues a `RunSearch`. Covers workflow B
+    /// (`JADX-GUI-002` member-scoped find from a click).
+    #[test]
+    fn find_usages_method_query_via_click() {
+        let mut app = empty_app();
+        app.symbol_sel = Some(SymbolSelection {
+            descriptor: "Lcom/foo/Bar;".into(),
+            token: "doThing".into(),
+            method: (0, 10),
+            occurrences: vec![(0, 8)],
+        });
+        let ctx = egui::Context::default();
+        app.dispatch(Command::FindUsagesOfClicked, &ctx);
+        // The search controller was retargeted before RunSearch was
+        // queued.
+        assert_eq!(app.search.kind, SearchKind::Method);
+        assert_eq!(app.search.input, "doThing");
+        assert!(
+            app.search.class_filter.contains("Bar"),
+            "class filter pinned to click descriptor: {:?}",
+            app.search.class_filter
+        );
+        // RunSearch is queued (its execution depends on a live
+        // session, asserted at integration level).
+        assert!(
+            app.commands
+                .iter()
+                .any(|c| matches!(c, Command::RunSearch)),
+            "RunSearch queued"
+        );
     }
 }

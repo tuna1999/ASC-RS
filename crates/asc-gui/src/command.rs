@@ -28,6 +28,14 @@ pub enum Command {
     /// Run the current search-controller inputs.
     RunSearch,
     FindReferences,
+    /// Member-scoped find triggered by `X` on the clicked identifier.
+    /// Wraps `RunSearch` with `SearchKind::Method` and the click's
+    /// token + descriptor pre-filled (workflow B).
+    FindUsagesOfClicked,
+    /// Ctrl+D / Ctrl+Click on an `L...;` descriptor: open the
+    /// resolved class. Used by the click + shortcut handlers
+    /// (workflow D).
+    GoToDeclaration,
     FindInDocument,
     /// Open the rename bar for the clicked symbol (`n`).
     BeginRenameSymbol,

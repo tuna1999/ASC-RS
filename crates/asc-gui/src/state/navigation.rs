@@ -20,6 +20,8 @@ pub enum NavOrigin {
     Tab,
     /// Back/Forward walk.
     History,
+    /// Go-to-declaration (workflow D).
+    Declaration,
 }
 
 /// One navigation target.
