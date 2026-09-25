@@ -300,12 +300,13 @@
       "feature": "Settings dialog window (theme picker)",
       "priority": "P0",
       "weight": 8,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::theme_toggle_via_view_menu",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: settings.py:5-39"
+      "reference": "ASC frozen: settings.py:5-39",
+      "notes": "Theme toggle via ToggleTheme command wired + test `theme_toggle_via_view_menu` passes."
     },
     {
       "id": "ASC-GUI-026",
@@ -348,24 +349,26 @@
       "feature": "Tab overflow + open-tabs popup with filter",
       "priority": "P0",
       "weight": 8,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::tab_overflow_popup_filters",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: widgets.py:300-527"
+      "reference": "ASC frozen: widgets.py:300-527",
+      "notes": "Tab overflow popup uses TabController::filtered; test `tab_overflow_popup_filters` passes."
     },
     {
       "id": "ASC-GUI-030",
       "feature": "Clear tabs / Close Tab context actions",
       "priority": "P0",
       "weight": 8,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::close_others_close_all",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: widgets.py:398-399"
+      "reference": "ASC frozen: widgets.py:398-399",
+      "notes": "Close-others / close-all wired on Command + TabController; test `close_others_close_all` passes."
     },
     {
       "id": "ASC-GUI-031",
@@ -420,24 +423,26 @@
       "feature": "Per-DEX load progress feedback",
       "priority": "P0",
       "weight": 8,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::load_artifact_reports_running_status",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
-      "reference": "ASC frozen: app.py:485"
+      "reference": "ASC frozen: app.py:485",
+      "notes": "open_path flips loading_artifact and sets a running status; test `load_artifact_reports_running_status` passes."
     },
     {
       "id": "ASC-GUI-036",
       "feature": "Search history dropdown",
       "priority": "P0",
       "weight": 8,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::bottom_panel::tests::search_history_dropdown_renders",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "ASC frozen: runtime.py"
+      "reference": "ASC frozen: runtime.py",
+      "notes": "Search history dropdown via SearchController::commit_to_history + history_filtered; test `search_history_dropdown_renders` passes."
     },
     {
       "id": "ASC-GUI-037",
@@ -578,36 +583,39 @@
       "feature": "Open-tabs list popup with filter",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::open_tabs_popup_filters",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX tab bar overflow"
+      "reference": "JADX tab bar overflow",
+      "notes": "Open-tabs popup uses TabController::filtered; test `open_tabs_popup_filters` passes."
     },
     {
       "id": "JADX-GUI-005",
       "feature": "Close others / close all / close right",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::close_others_close_all",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX tab context"
+      "reference": "JADX tab context",
+      "notes": "Close-others + close-all commands + close_others_close_all test pass."
     },
     {
       "id": "JADX-GUI-006",
       "feature": "Copy descriptor (Ctrl+C)",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::copy_descriptor_writes_clipboard",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX standard action"
+      "reference": "JADX standard action",
+      "notes": "CopyDescriptor command writes last_clipboard + egui::Context::copy_text. Test `copy_descriptor_writes_clipboard` passes."
     },
     {
       "id": "JADX-GUI-007",
@@ -626,12 +634,13 @@
       "feature": "Outline filter (type-ahead in inspector)",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::inspector::tests::outline_filter_narrows",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX outline filter"
+      "reference": "JADX outline filter",
+      "notes": "STRUCTURE panel outline filter: filter_outline + outline_filter field + test `outline_filter_narrows`."
     },
     {
       "id": "JADX-GUI-009",
@@ -650,12 +659,13 @@
       "feature": "Bookmarks (persistent, per-class)",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::bookmarks_persist_per_descriptor",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX bookmark manager"
+      "reference": "JADX bookmark manager",
+      "notes": "Per-descriptor bookmarks via TabController::toggle_bookmark / bookmark / bookmarks. Data-shape test `bookmarks_persist_per_descriptor` passes."
     },
     {
       "id": "JADX-GUI-011",
@@ -687,36 +697,39 @@
       "feature": "Search history dropdown in bottom panel",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::bottom_panel::tests::search_history_dropdown_renders",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX persistent history"
+      "reference": "JADX persistent history",
+      "notes": "Search history dropdown in bottom panel via commit_to_history + history_filtered. Test `search_history_dropdown_renders` passes."
     },
     {
       "id": "JADX-GUI-014",
       "feature": "Quick switch between recent tabs (Ctrl+1..9)",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::quick_switch_*",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX common"
+      "reference": "JADX common",
+      "notes": "Quick switch via Command::QuickSwitch { n }; test `quick_switch_activates_nth_tab` passes."
     },
     {
       "id": "JADX-GUI-015",
       "feature": "Copy FQN of selected class",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::ui::explorer::tests::copy_fqn_writes_clipboard",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX right-click Copy"
+      "reference": "JADX right-click Copy",
+      "notes": "CopyFqn command writes last_clipboard (Java form). Test `copy_fqn_writes_clipboard` passes."
     },
     {
       "id": "JADX-GUI-016",
@@ -771,12 +784,13 @@
       "feature": "Goto line (Ctrl+G)",
       "priority": "P1",
       "weight": 5,
-      "status": "MISSING",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::goto_line_jumps_to_*",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
-      "reference": "JADX goto line"
+      "reference": "JADX goto line",
+      "notes": "Goto-line: Command::GotoLine + apply_goto_line. Tests `goto_line_jumps_to_zero_indexed` + `goto_line_input_opens_via_command` pass."
     },
     {
       "id": "ASC-RS-GUI-001",

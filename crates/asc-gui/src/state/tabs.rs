@@ -52,6 +52,11 @@ pub struct TabController {
     tabs: Vec<Tab>,
     /// Descriptor of the visible tab.
     active: Option<String>,
+    /// Per-descriptor bookmark: descriptor → bookmarked line
+    /// (1-indexed). Multiple lines per descriptor are not yet
+    /// supported (JADX-GUI-010 lays the data shape; the UI ships
+    /// with one bookmark per class for now).
+    bookmarks: std::collections::HashMap<String, usize>,
 }
 
 impl TabController {
@@ -67,6 +72,45 @@ impl TabController {
 
     fn index_of(&self, descriptor: &str) -> Option<usize> {
         self.tabs.iter().position(|t| t.descriptor == descriptor)
+    }
+
+    /// Toggle a bookmark on `descriptor` at 1-indexed `line`. Returns
+    /// the new state (`true` = bookmarked, `false` = cleared). When
+    /// `line` is `None`, the existing bookmark (if any) is removed.
+    pub fn toggle_bookmark(&mut self, descriptor: &str, line: Option<usize>) -> bool {
+        match line {
+            Some(_) => match self.bookmarks.remove(descriptor) {
+                Some(prev) if Some(prev) == line => false,
+                _ => {
+                    self.bookmarks
+                        .insert(descriptor.to_string(), line.unwrap_or(1).max(1));
+                    true
+                }
+            },
+            None => {
+                self.bookmarks.remove(descriptor);
+                false
+            }
+        }
+    }
+
+    /// Look up the bookmarked line for `descriptor`. Returns the
+    /// 1-indexed line.
+    pub fn bookmark(&self, descriptor: &str) -> Option<usize> {
+        self.bookmarks.get(descriptor).copied()
+    }
+
+    /// All currently-bookmarked (descriptor, line) pairs in insertion
+    /// order. The HashMap doesn't preserve insertion order, but the
+    /// canonical "bookmarks list" UI sorts alphabetically.
+    pub fn bookmarks(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = self
+            .bookmarks
+            .iter()
+            .map(|(d, l)| (d.clone(), *l))
+            .collect();
+        out.sort();
+        out
     }
 
     /// `Close others`: drop every tab except the named one (or the
@@ -421,5 +465,44 @@ mod tests {
         assert_eq!(subset.len(), 11, "A2 prefix subset");
         // Whitespace is trimmed.
         assert_eq!(tabs.filtered("   ").len(), 31);
+    }
+
+    /// Bookmarks persist per-descriptor across session swaps in the
+    /// same controller. Covers JADX-GUI-010 (bookmarks persistent
+    /// per-class) — the data-shape contract; persistence to disk is
+    /// covered by the integration test.
+    #[test]
+    fn bookmarks_persist_per_descriptor() {
+        let mut tabs = TabController::default();
+        // Toggle on → bookmark created.
+        assert!(tabs.toggle_bookmark("Lcom/foo/Bar;", Some(42)));
+        assert_eq!(tabs.bookmark("Lcom/foo/Bar;"), Some(42));
+        // Toggle off at the same line → bookmark removed.
+        assert!(!tabs.toggle_bookmark("Lcom/foo/Bar;", Some(42)));
+        assert!(tabs.bookmark("Lcom/foo/Bar;").is_none());
+        // Re-toggle; survives a `clear` (clear() drops tabs but keeps
+        // bookmarks by design — bookmarks survive the workspace
+        // swap).
+        assert!(tabs.toggle_bookmark("Lcom/foo/Baz;", Some(7)));
+        tabs.open_pinned("LA;");
+        tabs.open_pinned("LB;");
+        tabs.clear();
+        assert_eq!(
+            tabs.bookmark("Lcom/foo/Baz;"),
+            Some(7),
+            "bookmark survives tab clear"
+        );
+        // Drop a bookmark by passing None.
+        tabs.toggle_bookmark("Lcom/foo/Baz;", None);
+        assert!(tabs.bookmark("Lcom/foo/Baz;").is_none());
+        // Empty line is treated as line 1.
+        assert!(tabs.toggle_bookmark("Lcom/foo/Qux;", Some(0)));
+        assert_eq!(tabs.bookmark("Lcom/foo/Qux;"), Some(1));
+        // Multiple bookmarks are listed.
+        tabs.toggle_bookmark("Lorg/fdroid/FDroid;", Some(3));
+        let all = tabs.bookmarks();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|(d, l)| d == "Lcom/foo/Qux;" && *l == 1));
+        assert!(all.iter().any(|(d, l)| d == "Lorg/fdroid/FDroid;" && *l == 3));
     }
 }
