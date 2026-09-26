@@ -33,6 +33,24 @@ preprocessing, no global xref graphs, no fully-materialized object graphs.
 | `benches/` | Benchmark methodology + baselines |
 | `fuzz/` | Fuzzing (separate workspace) |
 
+## Quick start
+
+```bash
+cargo build --release
+# build artifact: target/release/asc-rs (or asc-rs.exe on Windows)
+asc-rs findrefs <apk> string https://              # all callers of any string containing "https://"
+asc-rs findrefs <apk> type   Fragment              # all callers whose code references type descriptors containing "Fragment"
+asc-rs findrefs <apk> method onClick              # callers of method name "onClick"
+asc-rs findrefs <apk> method onLayout --class Lcom/foo/Bar;   # precise class
+asc-rs findrefs <apk> field  textColor --fuzzy-class --class Foo
+asc-rs getclass   <apk> Lcom/foo/Bar;              # decompiled Java source on stdout
+asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
+asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
+```
+
+Class names accept Dalvik descriptor (`Lcom/foo/Bar;`) **or** dotted Java form (`com.foo.Bar`).
+Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`) can appear before or after the APK positional. Exit codes: `0` success, `1` not-found / invalid input, `2` engine error. Each command also accepts `--help`.
+
 ## Development
 
 ```bash
