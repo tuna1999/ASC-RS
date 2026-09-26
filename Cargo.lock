@@ -332,6 +332,7 @@ dependencies = [
 name = "asc-decompile"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "criterion",
  "droidsaw-dex",
  "thiserror 2.0.20",

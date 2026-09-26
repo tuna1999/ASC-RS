@@ -96,9 +96,23 @@ pub struct PoolCounts {
 /// `target_descriptor` must be a valid DEX class descriptor in
 /// canonical form (`Lcom/foo/Bar;` or `[Lcom/foo/Bar;`).
 pub fn rebuild(view: &DexView<'_>, target_descriptor: &str) -> Result<RebuiltDex, RebuildError> {
+    let started = std::time::Instant::now();
     let closure = closure::Closure::compute(view, target_descriptor)?;
+    let closure_us = started.elapsed().as_micros();
     let maps = remap::PoolMaps::build(&closure, view);
+    let remap_us = started.elapsed().as_micros() - closure_us;
     let lo = layout::emit(view, &closure, &maps)?;
+    let layout_us = started.elapsed().as_micros() - closure_us - remap_us;
+
+    // Only emit timings when ASC_REBUILD_DEBUG=1 is set in the env so
+    // the hot path stays untouched. This is the cheapest possible
+    // instrumentation: a single env read at entry.
+    if std::env::var_os("ASC_REBUILD_DEBUG").is_some() {
+        eprintln!(
+            "[ASC_REBUILD_DEBUG] closure_us={closure_us} remap_us={remap_us} layout_us={layout_us} out_bytes={}",
+            lo.out.len()
+        );
+    }
 
     Ok(RebuiltDex {
         bytes: lo.out.clone(),

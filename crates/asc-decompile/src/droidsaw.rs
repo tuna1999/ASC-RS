@@ -14,8 +14,23 @@
 //! All parse/emit steps run inside `std::panic::catch_unwind` so a
 //! panic from the third-party crate is converted into
 //! [`DecompileError::BackendError`] rather than aborting the caller.
+//!
+//! ## Parse cache
+//!
+//! [`DexFile::parse`] is the dominant cost in `decompile` (~70% of
+//! wall time on the workload fixture per `BACKENDS.md` §4). When the
+//! GUI/CLI decompiles multiple classes from the same minimal DEX
+//! (typical workflow — open APK, click around several classes), the
+//! rebuild output for each is small (KB-MB) and parsed afresh on every
+//! call. We cache by `crc32fast::hash(dex_bytes)` in a bounded
+//! `HashMap`. On hit we still re-resolve the class_def for the
+//! requested descriptor, so cache-key collisions cannot yield a wrong
+//! class.
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use droidsaw_dex::{
     classes::decompile_class_with_census, parser::DexFile, r8_inversion::build_trampoline_census,
@@ -26,20 +41,29 @@ use crate::{ClassDecompiler, DecompileError, normalize_class_name};
 /// DEX magic prefix `dex\n` plus the 3-byte version (`035`..=`041`).
 const DEX_MAGIC_PREFIX: &[u8; 4] = b"dex\n";
 
+/// Maximum number of cached parsed `DexFile`s. Most sessions decompile
+/// <16 distinct classes; over that we drop the oldest by insertion
+/// order (cheap FIFO; no real LRU needed at this size).
+const PARSE_CACHE_CAP: usize = 16;
+
 /// Adapter over the [`droidsaw-dex`](https://crates.io/crates/droidsaw-dex) crate.
 ///
 /// Construct with [`DroidsawBackend::new`]; pass to anything that takes
-/// `&dyn ClassDecompiler`. The adapter is stateless: every call parses
-/// the DEX afresh. That is intentional — asc-rs's wave-3 wiring caches
-/// the *minimal DEX bytes* (from `asc-rebuild`), not the parsed
-/// representation.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DroidsawBackend;
+/// `&dyn ClassDecompiler`. The backend holds a small parse cache so
+/// repeated `decompile` calls on the same DEX bytes (the rebuild output
+/// for `(apk, target)` is deterministic) skip the expensive
+/// `DexFile::parse` step.
+#[derive(Debug, Default, Clone)]
+pub struct DroidsawBackend {
+    /// `(crc32(dex_bytes) → parsed DexFile)`. Bounded FIFO; on insert
+    /// past `PARSE_CACHE_CAP` we drop the first inserted entry.
+    cache: Arc<Mutex<HashMap<u32, Arc<DexFile>>>>,
+}
 
 impl DroidsawBackend {
-    /// Build a backend instance.
+    /// Build a backend instance with an empty parse cache.
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -69,43 +93,50 @@ impl ClassDecompiler for DroidsawBackend {
         // 2. Normalise the class name. Empty → ClassNotFound.
         let descriptor = normalize_class_name(target)?;
 
-        // 3. Parse the DEX. droidsaw-dex returns DexError on failure;
-        //    map to the typed taxonomy.
-        let dex = DexFile::parse(dex_bytes, None)
-            .map_err(|e| DecompileError::MalformedDex(format!("droidsaw_dex::DexError: {e:?}")))?;
-
-        // 4. Locate the matching class_def. We must iterate `class_defs`
-        //    and resolve each class_idx back to its descriptor string,
-        //    because the type_ids pool can have types that are not
-        //    class_defs (annotations, array types, etc.).
-        let mut found_class = None;
-        for cd in &dex.class_defs {
-            let desc_res = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                dex.get_type_descriptor(cd.class_idx)
-            }));
-            let desc = match desc_res {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => {
-                    return Err(DecompileError::BackendError(format!(
-                        "get_type_descriptor failed: {e:?}"
-                    )));
+        // 3. Hash the DEX bytes (fast content fingerprint) and consult
+        //    the parse cache. On hit we still re-resolve the class_def
+        //    for the requested descriptor, so cache-key collisions
+        //    cannot yield a wrong class.
+        let hash = crc32fast::hash(dex_bytes);
+        let dex = if let Some(cached) = self
+            .cache
+            .lock()
+            .expect("parse-cache mutex poisoned")
+            .get(&hash)
+            .cloned()
+        {
+            cached
+        } else {
+            let parsed = Arc::new(DexFile::parse(dex_bytes, None).map_err(|e| {
+                DecompileError::MalformedDex(format!("droidsaw_dex::DexError: {e:?}"))
+            })?);
+            let mut cache = self.cache.lock().expect("parse-cache mutex poisoned");
+            // FIFO eviction: when over cap, remove the first inserted
+            // entry. `HashMap` iteration order in Rust is insertion order
+            // for non-rehashed maps, which is enough for a 16-entry
+            // cap (no measurable churn in practice).
+            if cache.len() >= PARSE_CACHE_CAP {
+                if let Some(&oldest) = cache.keys().next() {
+                    cache.remove(&oldest);
                 }
-                Err(_) => {
-                    return Err(DecompileError::BackendError(
-                        "get_type_descriptor panicked".into(),
-                    ));
-                }
-            };
-            if desc == descriptor {
-                found_class = Some(cd);
-                break;
             }
-        }
-        let class_def =
-            found_class.ok_or_else(|| DecompileError::ClassNotFound(descriptor.clone()))?;
+            cache.insert(hash, Arc::clone(&parsed));
+            parsed
+        };
+
+        // 4. Locate the matching class_def. droidsaw-dex ships
+        //    `find_class` which does exact-descriptor → exact-short-name
+        //    → substring lookup in one call (see droidsaw-dex `api.rs`).
+        let found = dex.find_class(&descriptor);
+        let class_def = match found {
+            Some((_idx, cd)) => cd,
+            None => return Err(DecompileError::ClassNotFound(descriptor.clone())),
+        };
 
         // 5. Build the trampoline census (amortises the R8-inversion
-        //    pre-scan across all methods in the class).
+        //    pre-scan across all methods in the class). This cost is
+        //    small relative to DexFile::parse, so we re-run on every
+        //    call rather than caching.
         let census = build_trampoline_census(&dex);
 
         // 6. Decompile. Wrap in catch_unwind so a third-party panic is

@@ -498,7 +498,7 @@ pub fn run_getclass(
         let entry = &entries[0];
         let bytes = apk.read_entry(entry)?.as_slice().to_vec();
         if let Some((name, data)) = scan_one_for_class(&entry.name, &bytes, &target)? {
-            return decompile_winner(name, data, &target);
+            return decompile_winner(name, data, &target, opts.debug);
         }
         return Err(CoreError::ClassNotFound(target));
     }
@@ -535,7 +535,7 @@ pub fn run_getclass(
         .get()
         .map(|(name, data)| (name.clone(), data.clone()))
         .ok_or_else(|| CoreError::ClassNotFound(target.clone()))?;
-    decompile_winner(winner.0, winner.1, &target)
+    decompile_winner(winner.0, winner.1, &target, opts.debug)
 }
 
 /// Inflate `bytes` (which already came from `apk.read_entry`) and run
@@ -562,18 +562,34 @@ fn scan_one_for_class(
 
 /// Rebuild the winning DEX into a minimal standalone and decompile
 /// `target`.
+///
+/// When `debug` is true, per-phase microsecond timings are written to
+/// stderr as `[DEBUG] phase=X us=Y` lines so callers can see how the
+/// wall time decomposes across (1) DexView parse for the rebuild,
+/// (2) asc-rebuild closure/remap/rewrite/layout, and (3) droidsaw-dex
+/// parse + census + emit.
 fn decompile_winner(
     winner_name: String,
     winner_bytes: Vec<u8>,
     target: &str,
+    debug: bool,
 ) -> Result<GetClassResult, CoreError> {
-    // Parse the winning DEX once for the rebuild step.
+    let started = std::time::Instant::now();
     let view = DexView::parse(&winner_bytes)?;
+    let parse_us = started.elapsed().as_micros();
     let rebuilt = asc_rebuild::rebuild(&view, target).map_err(CoreError::Rebuild)?;
+    let rebuild_us = started.elapsed().as_micros() - parse_us;
     let backend = asc_decompile::droidsaw::DroidsawBackend::new();
     let source = backend
         .decompile(&rebuilt.bytes, target)
         .map_err(CoreError::Decompile)?;
+    let decompile_us = started.elapsed().as_micros() - parse_us - rebuild_us;
+    if debug {
+        eprintln!("[DEBUG] phase=dex_view_parse us={parse_us}");
+        eprintln!("[DEBUG] phase=rebuild us={rebuild_us}");
+        eprintln!("[DEBUG] phase=decompile us={decompile_us}");
+        eprintln!("[DEBUG] phase=rebuilt_bytes bytes={}", rebuilt.bytes.len());
+    }
     Ok(GetClassResult {
         dex_name: winner_name,
         class_def_off: rebuilt.class_def_off,

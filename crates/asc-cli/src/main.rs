@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use asc_core::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
@@ -55,23 +55,44 @@ fn main() -> ExitCode {
 }
 
 /// Output format selector for `--format`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
 enum OutputFormat {
     /// Human-readable text format (the default; mirrors the oracle).
+    #[default]
     Text,
     /// JSON-ready value emitted via `serde_json`.
     Json,
 }
 
+/// Flags that are accepted in any position — before or after the APK
+/// positional — on every subcommand. Mirrors the Python oracle's
+/// permissive `argparse` (`reference/asc/main.py:60-150`). `global = true`
+/// makes clap scan the parent's flags from the subcommand's argv too.
+#[derive(Args, Debug, Clone, Default)]
+struct SharedFlags {
+    /// Write the result to this file in addition to stdout.
+    /// `-o/--output` is exclusive on `listclass` (matches the oracle's
+    /// `cli.py:99`); the other subcommands append.
+    #[arg(short = 'o', long = "output", global = true)]
+    output: Option<PathBuf>,
+    /// Number of worker threads (default 8).
+    #[arg(long = "threads", default_value_t = 8, global = true)]
+    threads: usize,
+    /// Emit per-stage timing information to stderr.
+    #[arg(long = "debug", default_value_t = false, global = true)]
+    debug: bool,
+    /// Output format (text | json). Default: text.
+    /// Only honored by `findrefs`; other subcommands ignore.
+    #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text, global = true)]
+    format: OutputFormat,
+}
+
 /// Per-subcommand shared args.
 #[derive(Parser, Debug)]
-#[command(
-    name = "asc-rs",
-    bin_name = "asc-rs",
-    version,
-    about = "Pure-Rust ASC rewrite — getclass / findrefs over APKs"
-)]
+#[command(version)]
 struct Cli {
+    #[command(flatten)]
+    shared: SharedFlags,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -84,15 +105,6 @@ enum Cmd {
         apk: PathBuf,
         /// Class descriptor (`Lcom/poc/Main;` or `com.poc.Main`).
         class: String,
-        /// Write the decompiled source to this file in addition to stdout.
-        #[arg(short = 'o', long = "output")]
-        output: Option<PathBuf>,
-        /// Number of worker threads (default 8).
-        #[arg(long = "threads", default_value_t = 8)]
-        threads: usize,
-        /// Emit per-stage timing information to stderr.
-        #[arg(long = "debug", default_value_t = false)]
-        debug: bool,
     },
     /// Find every caller of a matching reference in the APK.
     Findrefs {
@@ -100,18 +112,6 @@ enum Cmd {
         apk: PathBuf,
         #[command(subcommand)]
         kind: FindRefsKind,
-        /// Write the result to this file in addition to stdout.
-        #[arg(short = 'o', long = "output")]
-        output: Option<PathBuf>,
-        /// Number of worker threads (default 8).
-        #[arg(long = "threads", default_value_t = 8)]
-        threads: usize,
-        /// Emit per-stage timing information to stderr.
-        #[arg(long = "debug", default_value_t = false)]
-        debug: bool,
-        /// Output format (text | json). Default: text.
-        #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
     },
     /// List every class defined in the APK (in DEX-definition order).
     Listclass {
@@ -121,16 +121,6 @@ enum Cmd {
         /// Accepts `Lcom/foo`, `Lcom/foo/Bar;`, `com.foo`, `com.foo.Bar;`.
         #[arg(long = "prefix")]
         prefix: Option<String>,
-        /// Write the result to this file in addition to stdout.
-        #[arg(short = 'o', long = "output")]
-        output: Option<PathBuf>,
-        /// Number of worker threads (default 8). Reserved for future
-        /// parallel enumeration; currently unused.
-        #[arg(long = "threads", default_value_t = 8)]
-        threads: usize,
-        /// Emit per-stage timing information to stderr.
-        #[arg(long = "debug", default_value_t = false)]
-        debug: bool,
     },
 }
 
@@ -171,29 +161,30 @@ enum FindRefsKind {
 }
 
 fn dispatch(cli: &Cli) -> Result<(), CoreError> {
+    let shared = &cli.shared;
     match &cli.cmd {
-        Cmd::Getclass {
+        Cmd::Getclass { apk, class } => run_getclass_cmd(
             apk,
             class,
-            output,
-            threads,
-            debug,
-        } => run_getclass_cmd(apk, class, output.as_deref(), *threads, *debug),
-        Cmd::Findrefs {
+            shared.output.as_deref(),
+            shared.threads,
+            shared.debug,
+        ),
+        Cmd::Findrefs { apk, kind } => run_findrefs_cmd(
             apk,
             kind,
-            output,
-            threads,
-            debug,
-            format,
-        } => run_findrefs_cmd(apk, kind, output.as_deref(), *threads, *debug, *format),
-        Cmd::Listclass {
+            shared.output.as_deref(),
+            shared.threads,
+            shared.debug,
+            shared.format,
+        ),
+        Cmd::Listclass { apk, prefix } => run_listclass_cmd(
             apk,
-            prefix,
-            output,
-            threads,
-            debug,
-        } => run_listclass_cmd(apk, prefix.as_deref(), output.as_deref(), *threads, *debug),
+            prefix.as_deref(),
+            shared.output.as_deref(),
+            shared.threads,
+            shared.debug,
+        ),
     }
 }
 
