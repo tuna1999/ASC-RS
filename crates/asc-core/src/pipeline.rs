@@ -11,8 +11,9 @@
 //!    check the 8-byte magic. If so, expand it into one or more
 //!    logical DEX views via
 //!    [`asc_dex::DexView::logical_header_offsets`] +
-//!    [`asc_dex::DexView::parse_at`]. Each logical DEX is named
-//!    `name[i]` per `BEHAVIOR.md` §2 / `dex_container.py:142-149`.
+//!    [`asc_dex::DexView::parse_at`]. Each logical DEX of a multi-member
+//!    container is named `name!classes{i+1}.dex` per `BEHAVIOR.md` §2 /
+//!    `dex_container.py:142-149`.
 //!    c. Otherwise, parse a single [`asc_dex::DexView`] at offset 0.
 //!    d. Call [`asc_query::find_refs`] on each view.
 //!    e. Render each `RefHit` to `(caller_string, matched_strings)`
@@ -183,7 +184,7 @@ impl Default for GetClassOptions {
 #[derive(Debug, Clone)]
 pub struct GetClassResult {
     /// Display name of the winning DEX (`classes.dex`,
-    /// `classes2.dex`, `classes.dex[0]`, …).
+    /// `classes2.dex`, `classes.dex!classes2.dex`, …).
     pub dex_name: String,
     /// `class_def` off the winner used during the rebuild.
     pub class_def_off: u32,
@@ -244,11 +245,7 @@ fn scan_entry_bytes(entry_name: &str, bytes: &[u8], query: &Query, report: &mut 
             return;
         };
         for (i, off) in offsets.iter().enumerate() {
-            let name = if offsets.len() == 1 {
-                entry_name.to_string()
-            } else {
-                format!("{entry_name}[{i}]")
-            };
+            let name = logical_dex_name(entry_name, offsets.len(), i);
             let view = match DexView::parse_at(bytes, *off) {
                 Ok(v) => v,
                 Err(e) => {
@@ -549,8 +546,8 @@ pub fn run_getclass(
     if n == 1 {
         let entry = &entries[0];
         let bytes = apk.read_entry(entry)?.as_slice().to_vec();
-        if let Some((name, data)) = scan_one_for_class(&entry.name, &bytes, &target)? {
-            return decompile_winner(name, data, &target, opts.debug);
+        if let Some(hit) = scan_one_for_class(&entry.name, &bytes, &target)? {
+            return decompile_winner(hit, &target, opts.debug);
         }
         return Err(CoreError::ClassNotFound(target));
     }
@@ -560,7 +557,7 @@ pub fn run_getclass(
     // publishes to the OnceLock winner cell and sets `found`.
     let pool = WorkerPool::new(opts.threads.max(1));
     let found = Arc::new(AtomicBool::new(false));
-    let cell: Arc<OnceLock<(String, Vec<u8>)>> = Arc::new(OnceLock::new());
+    let cell: Arc<OnceLock<ClassHit>> = Arc::new(OnceLock::new());
     let target_arc = Arc::new(target.clone());
     let apk_clone = Arc::clone(&apk);
     let cell_clone = Arc::clone(&cell);
@@ -573,8 +570,8 @@ pub fn run_getclass(
         // ownership — bounded by the per-entry cap).
         let bytes = apk_clone.read_entry(entry).ok()?.as_slice().to_vec();
         match scan_one_for_class(&entry.name, &bytes, &target_arc) {
-            Ok(Some((name, data))) => {
-                let _ = cell_clone.set((name, data));
+            Ok(Some(hit)) => {
+                let _ = cell_clone.set(hit);
                 found.store(true, Ordering::Release);
                 Some(())
             }
@@ -585,31 +582,59 @@ pub fn run_getclass(
     let _outcome = pool.run(&entries, scan_for_class);
     let winner = cell
         .get()
-        .map(|(name, data)| (name.clone(), data.clone()))
+        .cloned()
         .ok_or_else(|| CoreError::ClassNotFound(target.clone()))?;
-    decompile_winner(winner.0, winner.1, &target, opts.debug)
+    decompile_winner(winner, &target, opts.debug)
 }
 
-/// Inflate `bytes` (which already came from `apk.read_entry`) and run
-/// the class-idx / class-def lookup for `target`. Returns
-/// `Some((display_name, inflated_bytes))` on hit, `None` on miss,
-/// `Err` on parse failure.
+/// A class-defining DEX found by `getclass`: the display name, the entry
+/// bytes (whole container for DEX-041), and the logical header offset.
+#[derive(Clone)]
+struct ClassHit {
+    name: String,
+    bytes: Vec<u8>,
+    header_off: usize,
+}
+
+/// Display name of logical DEX `i` of `count` in entry `name`
+/// (oracle: `iter_logical_dex_buffers`).
+fn logical_dex_name(name: &str, count: usize, i: usize) -> String {
+    if count <= 1 {
+        name.to_string()
+    } else {
+        format!("{name}!classes{}.dex", i + 1)
+    }
+}
+
+/// Run the class-idx / class-def lookup for `target` on every logical DEX
+/// of `bytes` (which already came from `apk.read_entry`). Returns the hit
+/// on success, `None` on miss, `Err` on parse failure.
 fn scan_one_for_class(
     entry_name: &str,
     bytes: &[u8],
     target: &str,
-) -> Result<Option<(String, Vec<u8>)>, CoreError> {
+) -> Result<Option<ClassHit>, CoreError> {
     // Reject obviously-bad entry bytes (matches oracle's
     // `_inflate_and_hit` early-return on magic != `dex\n0..\x00`).
     if bytes.len() < 8 || !bytes.starts_with(b"dex\n") {
         return Ok(None);
     }
-    let view = DexView::parse(bytes)?;
-    if class_defines(&view, target) {
-        Ok(Some((entry_name.to_string(), bytes.to_vec())))
+    let offsets = if bytes.starts_with(b"dex\n041\0") {
+        DexView::logical_header_offsets(bytes)?
     } else {
-        Ok(None)
+        vec![0]
+    };
+    for (i, &header_off) in offsets.iter().enumerate() {
+        let view = DexView::parse_at(bytes, header_off)?;
+        if class_defines(&view, target) {
+            return Ok(Some(ClassHit {
+                name: logical_dex_name(entry_name, offsets.len(), i),
+                bytes: bytes.to_vec(),
+                header_off,
+            }));
+        }
     }
+    Ok(None)
 }
 
 /// Rebuild the winning DEX into a minimal standalone and decompile
@@ -620,14 +645,9 @@ fn scan_one_for_class(
 /// wall time decomposes across (1) DexView parse for the rebuild,
 /// (2) asc-rebuild closure/remap/rewrite/layout, and (3) droidsaw-dex
 /// parse + census + emit.
-fn decompile_winner(
-    winner_name: String,
-    winner_bytes: Vec<u8>,
-    target: &str,
-    debug: bool,
-) -> Result<GetClassResult, CoreError> {
+fn decompile_winner(hit: ClassHit, target: &str, debug: bool) -> Result<GetClassResult, CoreError> {
     let started = std::time::Instant::now();
-    let view = DexView::parse(&winner_bytes)?;
+    let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
     let parse_us = started.elapsed().as_micros();
     let rebuilt = asc_rebuild::rebuild(&view, target).map_err(CoreError::Rebuild)?;
     let rebuild_us = started.elapsed().as_micros() - parse_us;
@@ -643,7 +663,7 @@ fn decompile_winner(
         eprintln!("[DEBUG] phase=rebuilt_bytes bytes={}", rebuilt.bytes.len());
     }
     Ok(GetClassResult {
-        dex_name: winner_name,
+        dex_name: hit.name,
         class_def_off: rebuilt.class_def_off,
         source,
     })

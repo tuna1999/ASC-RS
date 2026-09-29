@@ -50,8 +50,8 @@ pub struct RenderedMatch {
 ///
 /// `dex_name` follows `reference/BEHAVIOR.md` §2:
 /// `classes.dex` (literal entry name) for ordinary entries; for
-/// DEX-041 containers, `name[i]` where `name` is the entry name and
-/// `i` is the logical-DEX index inside the container.
+/// multi-member DEX-041 containers, `name!classes{i+1}.dex` where `name`
+/// is the entry name and `i` the logical-DEX index inside the container.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DexResults {
     /// Display name of this DEX.
@@ -75,7 +75,7 @@ pub struct DexResults {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchError {
     /// Display name of the DEX the error was observed against
-    /// (`classes.dex`, `classes2.dex`, `classes.dex[1]`, …).
+    /// (`classes.dex`, `classes2.dex`, `classes.dex!classes2.dex`, …).
     pub dex_name: String,
     /// Coarse category (`engine`, `apk`, `parse`).
     pub kind: SearchErrorKind,
