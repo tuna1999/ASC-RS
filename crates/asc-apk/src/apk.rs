@@ -247,10 +247,16 @@ fn read_entry_inner<'a>(
 ///
 /// Indices refer to `entries`; callers project out clones.
 fn discover_dex_indices(entries: &[DexEntry]) -> Vec<usize> {
+    // The oracle keeps only the first central-directory record per name
+    // (`seen_names` in `_parse_cd_dex_entries`).
+    let mut seen = std::collections::HashSet::new();
     let mut pairs: Vec<(u64, usize)> = entries
         .iter()
         .enumerate()
-        .filter_map(|(i, e)| parse_classes_dex_group(&e.name).map(|group| (group, i)))
+        .filter_map(|(i, e)| {
+            let group = parse_classes_dex_group(&e.name)?;
+            seen.insert(e.name.as_str()).then_some((group, i))
+        })
         .collect();
     pairs.sort_by_key(|(g, _)| *g);
     pairs.into_iter().map(|(_, i)| i).collect()

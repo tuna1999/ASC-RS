@@ -65,6 +65,18 @@ fn dex_entries_numeric_order_with_decoys() {
 }
 
 #[test]
+fn duplicate_dex_names_keep_first_record_only() {
+    let mut b = ZipBuilder::new();
+    b.add_stored("classes.dex", vec![1]);
+    b.add_stored("classes.dex", vec![2]);
+    let bytes = b.build();
+    let view = parse_view(&bytes).expect("parse");
+    let dex = view.dex_entries();
+    assert_eq!(dex.len(), 1);
+    assert_eq!(view.read_entry(&dex[0]).unwrap().as_slice(), &[1]);
+}
+
+#[test]
 fn dex_entries_discover_only_one_when_present() {
     let mut b = ZipBuilder::new();
     b.add_stored("classes.dex", vec![1]);
