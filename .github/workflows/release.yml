@@ -20,6 +20,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Tag push: the pushed tag. Manual dispatch: the `tag` input (ref_name
+  # would be the branch name there).
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   gates:
@@ -33,6 +36,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Verify tag matches Cargo.toml version
+        shell: bash
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "v$v" = "$RELEASE_TAG" ] || { echo "::error::tag $RELEASE_TAG != Cargo.toml version v$v"; exit 1; }
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -212,7 +221,7 @@ jobs:
           # so this also acts as a sanity check that every file we'd ship is
           # actually tracked.
           mkdir -p dist
-          python scripts/build_release.py "${{ github.ref_name }}" --output dist
+          python scripts/build_release.py "$RELEASE_TAG" --output dist
 
       - name: Upload source archive
         uses: actions/upload-artifact@v4
@@ -252,7 +261,8 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          name: ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           files: |
             artifacts/*.zip
