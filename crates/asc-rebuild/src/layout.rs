@@ -178,6 +178,12 @@ impl Default for LayoutOut {
 
 const HEADER_SIZE: usize = DexHeader::SIZE;
 
+/// `type_list` entries are `u16` type indices (DEX spec `type_item`).
+fn type_list_entry(new_idx: u32) -> Result<u16, RebuildError> {
+    u16::try_from(new_idx)
+        .map_err(|_| RebuildError::Internal("type index exceeds u16 in type_list"))
+}
+
 /// Top-level entry point. Emits the rebuilt DEX into a fresh `Vec<u8>`.
 pub(crate) fn emit(
     view: &DexView<'_>,
@@ -243,7 +249,7 @@ pub(crate) fn emit(
         out.extend_from_slice(&(types.len() as u32).to_le_bytes());
         for t in types {
             let new_idx = maps.types.lookup(t.0)?;
-            out.extend_from_slice(&new_idx.to_le_bytes());
+            out.extend_from_slice(&type_list_entry(new_idx)?.to_le_bytes());
         }
         lo.interfaces_size = (out.len() as u32) - lo.interfaces_off;
         lo.interfaces_count = 1;
@@ -270,7 +276,7 @@ pub(crate) fn emit(
         out.extend_from_slice(&(rec.3.len() as u32).to_le_bytes());
         for t in &rec.3 {
             let new_t = maps.types.lookup(t.0)?;
-            out.extend_from_slice(&new_t.to_le_bytes());
+            out.extend_from_slice(&type_list_entry(new_t)?.to_le_bytes());
         }
         proto_params_off[new_idx as usize] = tl_off;
         lo.proto_type_list_count += 1;

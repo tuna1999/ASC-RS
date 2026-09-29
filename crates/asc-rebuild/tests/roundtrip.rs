@@ -527,3 +527,53 @@ fn rebuilt_methods_keep_their_own_code_items() {
         "Lcom/google/android/material/timepicker/ClockFaceView;",
     );
 }
+
+fn method_signatures(view: &DexView<'_>) -> std::collections::HashSet<String> {
+    let ty = |t: asc_dex::TypeIdx| {
+        let s = view.type_(t).unwrap();
+        String::from_utf8_lossy(view.string(s).unwrap().mutf8).into_owned()
+    };
+    (0..view.method_count())
+        .map(|i| {
+            let m = view.method(asc_dex::MethodIdx(i)).unwrap();
+            let p = view.proto(m.proto).unwrap();
+            let name = view.string(m.name).unwrap().mutf8;
+            let params: Vec<String> = p.parameters.iter().map(ty).collect();
+            format!(
+                "{}.{}({}){}",
+                ty(m.class),
+                String::from_utf8_lossy(name),
+                params.join(","),
+                ty(p.return_type)
+            )
+        })
+        .collect()
+}
+
+/// Regression: `type_list` entries were written as u32 instead of u16, so
+/// every multi-parameter proto lost its 2nd+ parameter types. Every method
+/// signature of the rebuilt DEX must exist verbatim in the source DEX.
+fn assert_signatures_preserved(bytes: &[u8], target: &str) {
+    let view = DexView::parse(bytes).expect("source parses");
+    let out = rebuild(&view, target).expect("rebuild succeeds");
+    let rebuilt = DexView::parse(&out.bytes).expect("rebuilt DEX parses");
+    let source = method_signatures(&view);
+    for sig in method_signatures(&rebuilt) {
+        assert!(
+            source.contains(&sig),
+            "rebuilt signature not in source: {sig}"
+        );
+    }
+}
+
+#[test]
+fn rebuilt_signatures_match_source() {
+    let Some(bytes) = read_bytes("workload_classes.dex") else {
+        eprintln!("workload_classes.dex missing; skipping");
+        return;
+    };
+    assert_signatures_preserved(
+        &bytes,
+        "Lcom/google/android/material/timepicker/ClockFaceView;",
+    );
+}
