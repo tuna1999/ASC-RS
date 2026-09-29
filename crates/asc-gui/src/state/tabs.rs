@@ -264,10 +264,10 @@ impl TabController {
         let target = descriptor
             .map(str::to_string)
             .or_else(|| self.active.clone());
-        if let Some(d) = target {
-            if let Some(i) = self.index_of(&d) {
-                self.tabs[i].kind = TabKind::Pinned;
-            }
+        if let Some(d) = target
+            && let Some(i) = self.index_of(&d)
+        {
+            self.tabs[i].kind = TabKind::Pinned;
         }
     }
 

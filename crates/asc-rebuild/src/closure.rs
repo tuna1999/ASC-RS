@@ -471,15 +471,15 @@ impl Closure {
             self.walk_dex_ref(view, hit.secondary)?;
         }
 
-        if ci.tries_size > 0 {
-            if let Some(list) = view.catch_handler_list(&ci)? {
-                for entry in list.iter_all()? {
-                    for (type_idx, _) in &entry.pairs {
-                        self.add_type(*type_idx)?;
-                        let sidx = view.type_(TypeIdx(*type_idx))?;
-                        self.add_string(sidx.0)?;
-                        self.record_type(view, TypeIdx(*type_idx), sidx)?;
-                    }
+        if ci.tries_size > 0
+            && let Some(list) = view.catch_handler_list(&ci)?
+        {
+            for entry in list.iter_all()? {
+                for (type_idx, _) in &entry.pairs {
+                    self.add_type(*type_idx)?;
+                    let sidx = view.type_(TypeIdx(*type_idx))?;
+                    self.add_string(sidx.0)?;
+                    self.record_type(view, TypeIdx(*type_idx), sidx)?;
                 }
             }
         }

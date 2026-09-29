@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-droidsaw-dex = "=1.0.0"
+droidsaw-dex = "2.0.0"
 crc32fast.workspace = true
 
 [dev-dependencies]

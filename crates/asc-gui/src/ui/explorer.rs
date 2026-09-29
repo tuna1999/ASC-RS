@@ -256,8 +256,8 @@ mod tests {
         let ctx = egui::Context::default();
         // Drive draw_explorer headlessly; the tooltip is set on
         // hover_text so we exercise it via the class_row helper.
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::SidePanel::left("explorer-test").show(ctx, |ui| app.draw_explorer(ui));
+        crate::app::AscApp::run_ui(&ctx, |ui| {
+            egui::Panel::left("explorer-test").show(ui, |ui| app.draw_explorer(ui));
         });
         // The descriptor is present in the tree's first leaf and
         // matches the tooltip text we attach.

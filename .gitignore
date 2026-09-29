@@ -24,6 +24,9 @@ bench-out.txt
 # --- one-off evaluation outputs (verdicts live in BACKENDS.md) ---
 crates/asc-decompile/eval/
 
+# --- APKPure bundles: multi-APK zip, not a fixture we build against ---
+corpus/apk/*.xapk
+
 # --- fuzzer runtime state (seeds/ and regress/ ARE tracked) ---
 crashes/
 fuzz/crashes/

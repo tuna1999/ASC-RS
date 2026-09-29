@@ -215,38 +215,38 @@ pub(crate) fn emit(
 
     // ---------- type_list (interfaces) ----------
     let mut proto_params_off: Vec<u32> = vec![0; maps.protos.len() as usize];
-    if let Some(cd_rec) = &closure.class_def_record {
-        if cd_rec.interfaces_off != 0 {
-            align_to_4(&mut out);
-            lo.interfaces_off = out.len() as u32;
-            let cd = ClassDef {
-                class: cd_rec.class_type_idx,
-                access_flags: cd_rec.access_flags,
-                superclass: cd_rec.superclass,
-                interfaces_off: cd_rec.interfaces_off,
-                source_file: cd_rec.source_file,
-                annotations_off: cd_rec.annotations_off,
-                class_data_off: cd_rec.class_data_off,
-                static_values_off: cd_rec.static_values_off,
-            };
-            let original = view
-                .class_interfaces(&cd)?
-                .ok_or(asc_dex::DexError::InvalidLength {
-                    off: cd_rec.interfaces_off as usize,
-                    message: "interfaces_off == 0 after validation",
-                })?;
-            let mut types = Vec::with_capacity(original.len());
-            for entry in original.iter() {
-                types.push(entry);
-            }
-            out.extend_from_slice(&(types.len() as u32).to_le_bytes());
-            for t in types {
-                let new_idx = maps.types.lookup(t.0)?;
-                out.extend_from_slice(&new_idx.to_le_bytes());
-            }
-            lo.interfaces_size = (out.len() as u32) - lo.interfaces_off;
-            lo.interfaces_count = 1;
+    if let Some(cd_rec) = &closure.class_def_record
+        && cd_rec.interfaces_off != 0
+    {
+        align_to_4(&mut out);
+        lo.interfaces_off = out.len() as u32;
+        let cd = ClassDef {
+            class: cd_rec.class_type_idx,
+            access_flags: cd_rec.access_flags,
+            superclass: cd_rec.superclass,
+            interfaces_off: cd_rec.interfaces_off,
+            source_file: cd_rec.source_file,
+            annotations_off: cd_rec.annotations_off,
+            class_data_off: cd_rec.class_data_off,
+            static_values_off: cd_rec.static_values_off,
+        };
+        let original = view
+            .class_interfaces(&cd)?
+            .ok_or(asc_dex::DexError::InvalidLength {
+                off: cd_rec.interfaces_off as usize,
+                message: "interfaces_off == 0 after validation",
+            })?;
+        let mut types = Vec::with_capacity(original.len());
+        for entry in original.iter() {
+            types.push(entry);
         }
+        out.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        for t in types {
+            let new_idx = maps.types.lookup(t.0)?;
+            out.extend_from_slice(&new_idx.to_le_bytes());
+        }
+        lo.interfaces_size = (out.len() as u32) - lo.interfaces_off;
+        lo.interfaces_count = 1;
     }
 
     // ---------- proto parameter type_lists ----------
@@ -282,16 +282,16 @@ pub(crate) fn emit(
     };
 
     // ---------- static_values ----------
-    if let Some(cd_rec) = &closure.class_def_record {
-        if cd_rec.static_values_off != 0 {
-            align_to_4(&mut out);
-            lo.static_values_off = out.len() as u32;
-            let arr = view.encoded_array(view.physical(), cd_rec.static_values_off as usize)?;
-            let rewritten = rewrite_static_values(&arr.0, maps)?;
-            out.extend_from_slice(&rewritten);
-            lo.static_values_size = (out.len() as u32) - lo.static_values_off;
-            lo.static_values_count = 1;
-        }
+    if let Some(cd_rec) = &closure.class_def_record
+        && cd_rec.static_values_off != 0
+    {
+        align_to_4(&mut out);
+        lo.static_values_off = out.len() as u32;
+        let arr = view.encoded_array(view.physical(), cd_rec.static_values_off as usize)?;
+        let rewritten = rewrite_static_values(&arr.0, maps)?;
+        out.extend_from_slice(&rewritten);
+        lo.static_values_size = (out.len() as u32) - lo.static_values_off;
+        lo.static_values_count = 1;
     }
 
     // ---------- annotations region ----------
@@ -303,174 +303,174 @@ pub(crate) fn emit(
     let mut field_pairs: Vec<(u32, u32)> = Vec::new();
     let mut method_pairs: Vec<(u32, u32)> = Vec::new();
     let mut param_pairs: Vec<(u32, u32)> = Vec::new();
-    if let Some(cd_rec) = &closure.class_def_record {
-        if cd_rec.annotations_off != 0 {
-            let dir = view.annotations_directory(cd_rec.annotations_off)?.ok_or(
-                asc_dex::DexError::InvalidLength {
-                    off: cd_rec.annotations_off as usize,
-                    message: "annotations_off == 0 after validation",
-                },
-            )?;
+    if let Some(cd_rec) = &closure.class_def_record
+        && cd_rec.annotations_off != 0
+    {
+        let dir = view.annotations_directory(cd_rec.annotations_off)?.ok_or(
+            asc_dex::DexError::InvalidLength {
+                off: cd_rec.annotations_off as usize,
+                message: "annotations_off == 0 after validation",
+            },
+        )?;
 
-            let mut item_offs: Vec<u32> = Vec::new();
-            if dir.class_annotations_off != 0 {
-                let set = view.annotation_set(dir.class_annotations_off)?;
+        let mut item_offs: Vec<u32> = Vec::new();
+        if dir.class_annotations_off != 0 {
+            let set = view.annotation_set(dir.class_annotations_off)?;
+            item_offs.extend(set.annotation_offs.iter().copied());
+        }
+        for fa in &dir.fields {
+            if closure.fields.contains(&fa.field_idx.0) && fa.annotations_off != 0 {
+                let set = view.annotation_set(fa.annotations_off)?;
                 item_offs.extend(set.annotation_offs.iter().copied());
             }
-            for fa in &dir.fields {
-                if closure.fields.contains(&fa.field_idx.0) && fa.annotations_off != 0 {
-                    let set = view.annotation_set(fa.annotations_off)?;
-                    item_offs.extend(set.annotation_offs.iter().copied());
-                }
-            }
-            for ma in &dir.methods {
-                if closure.methods.contains(&ma.method_idx.0) && ma.annotations_off != 0 {
-                    let set = view.annotation_set(ma.annotations_off)?;
-                    item_offs.extend(set.annotation_offs.iter().copied());
-                }
-            }
-            for pa in &dir.parameters {
-                if closure.methods.contains(&pa.method_idx.0) && pa.annotations_off != 0 {
-                    let refs = view.annotation_set_ref_list(pa.annotations_off)?;
-                    for &set_off in &refs.annotation_set_offs {
-                        if set_off != 0 {
-                            let set = view.annotation_set(set_off)?;
-                            item_offs.extend(set.annotation_offs.iter().copied());
-                        }
-                    }
-                }
-            }
-            item_offs.sort_unstable();
-            item_offs.dedup();
-            align_to_4(&mut out);
-            lo.ann_items_off = out.len() as u32;
-            for old_item_off in item_offs {
-                if old_item_off == 0 {
-                    continue;
-                }
-                let Some(item) = view.annotation_item(old_item_off)? else {
-                    continue;
-                };
-                let start = out.len() as u32;
-                rewrite_annotation_item(item.visibility, &item.annotation, &mut out, maps)?;
-                new_item_off_map.insert(old_item_off, start);
-            }
-            lo.ann_items_size = (out.len() as u32) - lo.ann_items_off;
-            lo.ann_item_count = new_item_off_map.len() as u32;
-
-            let mut set_offs: Vec<u32> = Vec::new();
-            if dir.class_annotations_off != 0 {
-                set_offs.push(dir.class_annotations_off);
-            }
-            for fa in &dir.fields {
-                if closure.fields.contains(&fa.field_idx.0) && fa.annotations_off != 0 {
-                    set_offs.push(fa.annotations_off);
-                }
-            }
-            for ma in &dir.methods {
-                if closure.methods.contains(&ma.method_idx.0) && ma.annotations_off != 0 {
-                    set_offs.push(ma.annotations_off);
-                }
-            }
-            set_offs.sort_unstable();
-            set_offs.dedup();
-            align_to_4(&mut out);
-            lo.ann_sets_off = out.len() as u32;
-            for old_set_off in set_offs {
-                let set = view.annotation_set(old_set_off)?;
-                let start = out.len() as u32;
-                let mut new_offs: Vec<u32> = Vec::new();
-                for &old_item in &set.annotation_offs {
-                    if let Some(&new_o) = new_item_off_map.get(&old_item) {
-                        new_offs.push(new_o);
-                    }
-                }
-                rewrite_annotation_set(&new_offs, &mut out)?;
-                new_set_off_map.insert(old_set_off, start);
-            }
-            lo.ann_sets_size = (out.len() as u32) - lo.ann_sets_off;
-            lo.ann_set_count = new_set_off_map.len() as u32;
-
-            let mut param_ref_offs: Vec<u32> = Vec::new();
-            for pa in &dir.parameters {
-                if closure.methods.contains(&pa.method_idx.0) && pa.annotations_off != 0 {
-                    param_ref_offs.push(pa.annotations_off);
-                }
-            }
-            param_ref_offs.sort_unstable();
-            param_ref_offs.dedup();
-            align_to_4(&mut out);
-            lo.ann_set_ref_lists_off = out.len() as u32;
-            for old_ref in param_ref_offs {
-                let refs = view.annotation_set_ref_list(old_ref)?;
-                let start = out.len() as u32;
-                let mut new_offs: Vec<u32> = Vec::new();
-                for &set_off in &refs.annotation_set_offs {
-                    if let Some(&new_o) = new_set_off_map.get(&set_off) {
-                        new_offs.push(new_o);
-                    }
-                }
-                rewrite_annotation_set_ref_list(&new_offs, &mut out)?;
-                new_ref_off_map.insert(old_ref, start);
-            }
-            lo.ann_set_ref_lists_size = (out.len() as u32) - lo.ann_set_ref_lists_off;
-            lo.ann_ref_list_count = new_ref_off_map.len() as u32;
-
-            align_to_4(&mut out);
-            lo.ann_dir_off = out.len() as u32;
-            class_ann_off = if dir.class_annotations_off != 0 {
-                new_set_off_map
-                    .get(&dir.class_annotations_off)
-                    .copied()
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            for fa in &dir.fields {
-                if !closure.fields.contains(&fa.field_idx.0) {
-                    continue;
-                }
-                let new_field = maps.fields.lookup(fa.field_idx.0)?;
-                let new_set = new_set_off_map
-                    .get(&fa.annotations_off)
-                    .copied()
-                    .unwrap_or(0);
-                field_pairs.push((new_field, new_set));
-            }
-            field_pairs.sort_by_key(|(f, _)| *f);
-            for ma in &dir.methods {
-                if !closure.methods.contains(&ma.method_idx.0) {
-                    continue;
-                }
-                let new_method = maps.methods.lookup(ma.method_idx.0)?;
-                let new_set = new_set_off_map
-                    .get(&ma.annotations_off)
-                    .copied()
-                    .unwrap_or(0);
-                method_pairs.push((new_method, new_set));
-            }
-            method_pairs.sort_by_key(|(m, _)| *m);
-            for pa in &dir.parameters {
-                if !closure.methods.contains(&pa.method_idx.0) {
-                    continue;
-                }
-                let new_method = maps.methods.lookup(pa.method_idx.0)?;
-                let new_ref = new_ref_off_map
-                    .get(&pa.annotations_off)
-                    .copied()
-                    .unwrap_or(0);
-                param_pairs.push((new_method, new_ref));
-            }
-            param_pairs.sort_by_key(|(m, _)| *m);
-            rewrite_annotations_directory(
-                class_ann_off,
-                &field_pairs,
-                &method_pairs,
-                &param_pairs,
-                &mut out,
-            )?;
-            lo.ann_dir_size = (out.len() as u32) - lo.ann_dir_off;
         }
+        for ma in &dir.methods {
+            if closure.methods.contains(&ma.method_idx.0) && ma.annotations_off != 0 {
+                let set = view.annotation_set(ma.annotations_off)?;
+                item_offs.extend(set.annotation_offs.iter().copied());
+            }
+        }
+        for pa in &dir.parameters {
+            if closure.methods.contains(&pa.method_idx.0) && pa.annotations_off != 0 {
+                let refs = view.annotation_set_ref_list(pa.annotations_off)?;
+                for &set_off in &refs.annotation_set_offs {
+                    if set_off != 0 {
+                        let set = view.annotation_set(set_off)?;
+                        item_offs.extend(set.annotation_offs.iter().copied());
+                    }
+                }
+            }
+        }
+        item_offs.sort_unstable();
+        item_offs.dedup();
+        align_to_4(&mut out);
+        lo.ann_items_off = out.len() as u32;
+        for old_item_off in item_offs {
+            if old_item_off == 0 {
+                continue;
+            }
+            let Some(item) = view.annotation_item(old_item_off)? else {
+                continue;
+            };
+            let start = out.len() as u32;
+            rewrite_annotation_item(item.visibility, &item.annotation, &mut out, maps)?;
+            new_item_off_map.insert(old_item_off, start);
+        }
+        lo.ann_items_size = (out.len() as u32) - lo.ann_items_off;
+        lo.ann_item_count = new_item_off_map.len() as u32;
+
+        let mut set_offs: Vec<u32> = Vec::new();
+        if dir.class_annotations_off != 0 {
+            set_offs.push(dir.class_annotations_off);
+        }
+        for fa in &dir.fields {
+            if closure.fields.contains(&fa.field_idx.0) && fa.annotations_off != 0 {
+                set_offs.push(fa.annotations_off);
+            }
+        }
+        for ma in &dir.methods {
+            if closure.methods.contains(&ma.method_idx.0) && ma.annotations_off != 0 {
+                set_offs.push(ma.annotations_off);
+            }
+        }
+        set_offs.sort_unstable();
+        set_offs.dedup();
+        align_to_4(&mut out);
+        lo.ann_sets_off = out.len() as u32;
+        for old_set_off in set_offs {
+            let set = view.annotation_set(old_set_off)?;
+            let start = out.len() as u32;
+            let mut new_offs: Vec<u32> = Vec::new();
+            for &old_item in &set.annotation_offs {
+                if let Some(&new_o) = new_item_off_map.get(&old_item) {
+                    new_offs.push(new_o);
+                }
+            }
+            rewrite_annotation_set(&new_offs, &mut out)?;
+            new_set_off_map.insert(old_set_off, start);
+        }
+        lo.ann_sets_size = (out.len() as u32) - lo.ann_sets_off;
+        lo.ann_set_count = new_set_off_map.len() as u32;
+
+        let mut param_ref_offs: Vec<u32> = Vec::new();
+        for pa in &dir.parameters {
+            if closure.methods.contains(&pa.method_idx.0) && pa.annotations_off != 0 {
+                param_ref_offs.push(pa.annotations_off);
+            }
+        }
+        param_ref_offs.sort_unstable();
+        param_ref_offs.dedup();
+        align_to_4(&mut out);
+        lo.ann_set_ref_lists_off = out.len() as u32;
+        for old_ref in param_ref_offs {
+            let refs = view.annotation_set_ref_list(old_ref)?;
+            let start = out.len() as u32;
+            let mut new_offs: Vec<u32> = Vec::new();
+            for &set_off in &refs.annotation_set_offs {
+                if let Some(&new_o) = new_set_off_map.get(&set_off) {
+                    new_offs.push(new_o);
+                }
+            }
+            rewrite_annotation_set_ref_list(&new_offs, &mut out)?;
+            new_ref_off_map.insert(old_ref, start);
+        }
+        lo.ann_set_ref_lists_size = (out.len() as u32) - lo.ann_set_ref_lists_off;
+        lo.ann_ref_list_count = new_ref_off_map.len() as u32;
+
+        align_to_4(&mut out);
+        lo.ann_dir_off = out.len() as u32;
+        class_ann_off = if dir.class_annotations_off != 0 {
+            new_set_off_map
+                .get(&dir.class_annotations_off)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        for fa in &dir.fields {
+            if !closure.fields.contains(&fa.field_idx.0) {
+                continue;
+            }
+            let new_field = maps.fields.lookup(fa.field_idx.0)?;
+            let new_set = new_set_off_map
+                .get(&fa.annotations_off)
+                .copied()
+                .unwrap_or(0);
+            field_pairs.push((new_field, new_set));
+        }
+        field_pairs.sort_by_key(|(f, _)| *f);
+        for ma in &dir.methods {
+            if !closure.methods.contains(&ma.method_idx.0) {
+                continue;
+            }
+            let new_method = maps.methods.lookup(ma.method_idx.0)?;
+            let new_set = new_set_off_map
+                .get(&ma.annotations_off)
+                .copied()
+                .unwrap_or(0);
+            method_pairs.push((new_method, new_set));
+        }
+        method_pairs.sort_by_key(|(m, _)| *m);
+        for pa in &dir.parameters {
+            if !closure.methods.contains(&pa.method_idx.0) {
+                continue;
+            }
+            let new_method = maps.methods.lookup(pa.method_idx.0)?;
+            let new_ref = new_ref_off_map
+                .get(&pa.annotations_off)
+                .copied()
+                .unwrap_or(0);
+            param_pairs.push((new_method, new_ref));
+        }
+        param_pairs.sort_by_key(|(m, _)| *m);
+        rewrite_annotations_directory(
+            class_ann_off,
+            &field_pairs,
+            &method_pairs,
+            &param_pairs,
+            &mut out,
+        )?;
+        lo.ann_dir_size = (out.len() as u32) - lo.ann_dir_off;
     }
 
     // ---------- debug_info region ----------
@@ -588,19 +588,19 @@ pub(crate) fn emit(
     }
 
     // ---------- class_data item ----------
-    if let Some(cd_rec) = &closure.class_def_record {
-        if cd_rec.class_data_off != 0 {
-            align_to_4(&mut out);
-            lo.class_data_off = out.len() as u32;
-            let new_raw = rewrite_class_data(
-                &cd_rec.class_data_raw,
-                closure,
-                maps,
-                &new_code_off_per_method,
-            )?;
-            out.extend_from_slice(&new_raw);
-            lo.class_data_size = (out.len() as u32) - lo.class_data_off;
-        }
+    if let Some(cd_rec) = &closure.class_def_record
+        && cd_rec.class_data_off != 0
+    {
+        align_to_4(&mut out);
+        lo.class_data_off = out.len() as u32;
+        let new_raw = rewrite_class_data(
+            &cd_rec.class_data_raw,
+            closure,
+            maps,
+            &new_code_off_per_method,
+        )?;
+        out.extend_from_slice(&new_raw);
+        lo.class_data_size = (out.len() as u32) - lo.class_data_off;
     }
 
     // ---------- call_site arrays + method_handles rows ----------

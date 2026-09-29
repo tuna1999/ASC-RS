@@ -208,12 +208,12 @@ pub fn find_method_range(text: &str, off: usize) -> Option<(usize, usize)> {
             let prev_start = rfind_byte(b, b'\n', prev_end).map_or(0, |i| i + 1);
             prefix = text[prev_start..prev_end].trim().to_string();
         }
-        if looks_like_method_prefix(&prefix) {
-            if let Some(end) = matching_brace(text, br) {
-                if br <= off && off <= end {
-                    return Some((line_start, end + 1));
-                }
-            }
+        if looks_like_method_prefix(&prefix)
+            && let Some(end) = matching_brace(text, br)
+            && br <= off
+            && off <= end
+        {
+            return Some((line_start, end + 1));
         }
         brace = if br == 0 {
             None

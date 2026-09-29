@@ -952,10 +952,10 @@ impl<'a> Parser<'a> {
 }
 
 fn push_filter_action(vec: &mut [ComponentEntry], comp_idx: usize, filter_idx: usize, name: &str) {
-    if let Some(comp) = vec.get_mut(comp_idx) {
-        if let Some(f) = comp.intent_filters.get_mut(filter_idx) {
-            f.actions.push(name.to_string());
-        }
+    if let Some(comp) = vec.get_mut(comp_idx)
+        && let Some(f) = comp.intent_filters.get_mut(filter_idx)
+    {
+        f.actions.push(name.to_string());
     }
 }
 
@@ -965,10 +965,10 @@ fn push_filter_category(
     filter_idx: usize,
     name: &str,
 ) {
-    if let Some(comp) = vec.get_mut(comp_idx) {
-        if let Some(f) = comp.intent_filters.get_mut(filter_idx) {
-            f.categories.push(name.to_string());
-        }
+    if let Some(comp) = vec.get_mut(comp_idx)
+        && let Some(f) = comp.intent_filters.get_mut(filter_idx)
+    {
+        f.categories.push(name.to_string());
     }
 }
 

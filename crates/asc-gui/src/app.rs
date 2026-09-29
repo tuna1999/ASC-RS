@@ -414,10 +414,10 @@ impl AscApp {
             return;
         }
         for idx in 0..doc.line_count() {
-            if let Some(line) = doc.line(idx) {
-                if line.to_ascii_lowercase().contains(&needle) {
-                    self.find_matches.push(idx);
-                }
+            if let Some(line) = doc.line(idx)
+                && line.to_ascii_lowercase().contains(&needle)
+            {
+                self.find_matches.push(idx);
             }
         }
         self.find_step(true);
@@ -591,20 +591,20 @@ impl AscApp {
             } => self.navigate_to(&descriptor, pin, line, origin, ctx),
             Command::GlobalSearch | Command::RunSearch => {
                 self.focus_search = true;
-                if let Some(session) = &self.session {
-                    if let Some(query) = self.search.query() {
-                        let apk = session.path().to_path_buf();
-                        let label = self.search.label();
-                        self.tasks.spawn_findrefs(&apk, query, label, ctx);
-                        // Record this query for the history dropdown
-                        // (JADX-GUI-013 / ASC-GUI-036). Only on
-                        // RunSearch — GlobalSearch is just a focus
-                        // toggle, not a query submission.
-                        if matches!(cmd, Command::RunSearch) {
-                            self.search.commit_to_history();
-                        }
-                        self.set_status(format!("findrefs running: {}", self.search.input), true);
+                if let Some(session) = &self.session
+                    && let Some(query) = self.search.query()
+                {
+                    let apk = session.path().to_path_buf();
+                    let label = self.search.label();
+                    self.tasks.spawn_findrefs(&apk, query, label, ctx);
+                    // Record this query for the history dropdown
+                    // (JADX-GUI-013 / ASC-GUI-036). Only on
+                    // RunSearch — GlobalSearch is just a focus
+                    // toggle, not a query submission.
+                    if matches!(cmd, Command::RunSearch) {
+                        self.search.commit_to_history();
                     }
+                    self.set_status(format!("findrefs running: {}", self.search.input), true);
                 }
             }
             Command::FindReferences => {
@@ -642,16 +642,16 @@ impl AscApp {
                 // filter pinned to the click's descriptor. Falls back
                 // to global search when the click didn't target a
                 // member (still useful — same UI surface).
-                if let Some(sel) = self.symbol_sel.as_ref() {
-                    if !sel.descriptor.is_empty() {
-                        self.search.input = sel.token.clone();
-                        self.search.class_filter = asc_core::normalize_class_name(&sel.descriptor)
-                            .unwrap_or_else(|_| sel.descriptor.clone());
-                        self.search.kind = SearchKind::Method;
-                        self.focus_search = true;
-                        self.queue(Command::RunSearch);
-                        return;
-                    }
+                if let Some(sel) = self.symbol_sel.as_ref()
+                    && !sel.descriptor.is_empty()
+                {
+                    self.search.input = sel.token.clone();
+                    self.search.class_filter = asc_core::normalize_class_name(&sel.descriptor)
+                        .unwrap_or_else(|_| sel.descriptor.clone());
+                    self.search.kind = SearchKind::Method;
+                    self.focus_search = true;
+                    self.queue(Command::RunSearch);
+                    return;
                 }
                 self.queue(Command::GlobalSearch);
             }
@@ -660,16 +660,17 @@ impl AscApp {
                 // if any. For non-class tokens we still run a search —
                 // "go to declaration" of a member in the absence of a
                 // class-keyed find is a TODO at the engine level.
-                if let Some(sel) = self.symbol_sel.as_ref() {
-                    if sel.descriptor.starts_with('L') && sel.descriptor.ends_with(';') {
-                        self.queue(Command::OpenClass {
-                            descriptor: sel.descriptor.clone(),
-                            pin: false,
-                            line: None,
-                            origin: NavOrigin::Declaration,
-                        });
-                        return;
-                    }
+                if let Some(sel) = self.symbol_sel.as_ref()
+                    && sel.descriptor.starts_with('L')
+                    && sel.descriptor.ends_with(';')
+                {
+                    self.queue(Command::OpenClass {
+                        descriptor: sel.descriptor.clone(),
+                        pin: false,
+                        line: None,
+                        origin: NavOrigin::Declaration,
+                    });
+                    return;
                 }
                 self.set_status("go to declaration: no class identifier selected", false);
             }
@@ -908,7 +909,7 @@ impl AscApp {
         // Source-edit keys (oracle `n` / `;`): only when the code
         // surface is hovered, a document is open, and no text input
         // owns the keyboard.
-        if self.code_hovered && self.active_doc.is_some() && !ctx.wants_keyboard_input() {
+        if self.code_hovered && self.active_doc.is_some() && !ctx.egui_wants_keyboard_input() {
             if pressed(ctx, egui::Modifiers::default(), egui::Key::N) {
                 self.queue(Command::BeginRenameSymbol);
             } else if ctx.input(|i| {
@@ -919,6 +920,25 @@ impl AscApp {
                 self.queue(Command::BeginLineComment);
             }
         }
+    }
+
+    /// One eframe frame headlessly: `logic` then the `ui` pass.
+    /// eframe 0.35+ split `App::update` into `logic` + `ui`; tests drive
+    /// both explicitly since there is no eframe event loop here.
+    #[cfg(test)]
+    pub(crate) fn test_frame(&mut self, ui: &mut egui::Ui) {
+        use eframe::App as _;
+        self.logic(ui.ctx(), &mut eframe::Frame::_new_kittest());
+        eframe::App::ui(self, ui, &mut eframe::Frame::_new_kittest());
+    }
+
+    /// `Context::run_ui` and the texture-upload warm-up both produce a
+    /// `FullOutput` we never apply. egui 0.35+ `debug_assert!`s on
+    /// dropping `TexturesDelta` with pending deltas, so drain them.
+    #[cfg(test)]
+    pub(crate) fn run_ui(ctx: &egui::Context, f: impl FnMut(&mut egui::Ui)) {
+        ctx.run_ui(Default::default(), f)
+            .drop_without_applying_deltas();
     }
 }
 
@@ -947,20 +967,17 @@ fn count_per_dex(
 }
 
 impl eframe::App for AscApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let tokens = design::tokens();
-
+    /// Non-UI work. eframe (0.35+) forbids painting from here, so the
+    /// texture upload — which needs a live `Context` — moved into
+    /// [`App::ui`] behind the same `get_or_insert_with` guard.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.initial_path.is_some() {
             let path = self.initial_path.take().unwrap();
             self.open_path(&path, ctx);
         }
 
-        // Upload workspace icon textures once (folders / source
-        // files; see `icons.rs`).
-        self.icons
-            .get_or_insert_with(|| crate::icons::Icons::load(ctx));
-
-        // 1. Drain worker results first so this frame sees them.
+        // Drain worker results before the UI pass so this frame sees
+        // freshly-completed tasks.
         self.poll_workers(ctx);
         let want_title = self.window_title.clone();
         if want_title != "asc-gui" {
@@ -970,11 +987,20 @@ impl eframe::App for AscApp {
             }
         }
 
-        // 2. Frame-level shortcuts.
+        // Frame-level shortcuts.
         self.frame_shortcuts(ctx);
+    }
 
-        // 3. Menu bar.
-        egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let tokens = design::tokens();
+
+        // Upload workspace icon textures once (folders / source
+        // files; see `icons.rs`).
+        self.icons
+            .get_or_insert_with(|| crate::icons::Icons::load(ui.ctx()));
+
+        // 1. Menu bar.
+        egui::Panel::top("menubar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open artifact…  (Ctrl+O)").clicked() {
@@ -987,7 +1013,7 @@ impl eframe::App for AscApp {
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
                 ui.menu_button("Navigate", |ui| {
@@ -1094,9 +1120,9 @@ impl eframe::App for AscApp {
         });
 
         // 4. Toolbar: back/forward, artifact search, meta.
-        egui::TopBottomPanel::top("toolbar")
+        egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(tokens.surface))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     // ◀/▶ exist in both families; monospace keeps the
                     // toolbar's code-face consistent.
@@ -1173,29 +1199,29 @@ impl eframe::App for AscApp {
 
         // 5. Bottom panel.
         if self.show_bottom {
-            egui::TopBottomPanel::bottom("bottom_panel")
+            egui::Panel::bottom("bottom_panel")
                 .resizable(true)
-                .default_height(tokens.bottom_default)
+                .default_size(tokens.bottom_default)
                 .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     self.draw_bottom_panel(ui);
                 });
         }
 
         // 6. Status bar.
-        egui::TopBottomPanel::bottom("statusbar")
+        egui::Panel::bottom("statusbar")
             .frame(egui::Frame::new().fill(tokens.panel_bg))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 self.draw_status_bar(ui);
             });
 
         // 7. Inspector (right).
         if self.show_inspector {
-            egui::SidePanel::right("inspector")
+            egui::Panel::right("inspector")
                 .resizable(true)
-                .default_width(tokens.inspector_default)
+                .default_size(tokens.inspector_default)
                 .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         self.draw_inspector(ui);
                     });
@@ -1204,10 +1230,10 @@ impl eframe::App for AscApp {
 
         // 7b. Activity bar (far left): Explorer / Search / Tasks.
         {
-            egui::SidePanel::left("activity_bar")
-                .exact_width(36.0)
+            egui::Panel::left("activity_bar")
+                .exact_size(36.0)
                 .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.with_layout(
                         egui::Layout::top_down_justified(egui::Align::Center),
                         |ui| {
@@ -1260,11 +1286,11 @@ impl eframe::App for AscApp {
 
         // 8. Explorer (left).
         if self.show_explorer {
-            egui::SidePanel::left("explorer")
+            egui::Panel::left("explorer")
                 .resizable(true)
-                .default_width(tokens.explorer_default)
+                .default_size(tokens.explorer_default)
                 .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     self.draw_explorer(ui);
                 });
         }
@@ -1272,17 +1298,17 @@ impl eframe::App for AscApp {
         // 9. Editor (center).
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(tokens.app_bg))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 self.draw_editor(ui);
             });
 
         // 10. Palette overlay.
-        self.draw_palette(ctx);
+        self.draw_palette(ui.ctx());
 
         // 11. Dispatch everything queued this frame.
         let commands = std::mem::take(&mut self.commands);
         for cmd in commands {
-            self.dispatch(cmd, ctx);
+            self.dispatch(cmd, ui.ctx());
         }
     }
 }
@@ -1290,7 +1316,6 @@ impl eframe::App for AscApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::App as _;
 
     fn corpus() -> Option<PathBuf> {
         let apk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
@@ -1552,9 +1577,7 @@ mod tests {
         let mut app = AscApp::new(Some(apk));
         // Drive the startup open to completion.
         for _ in 0..600 {
-            let _ = ctx.run(Default::default(), |ctx| {
-                app.update(ctx, &mut eframe::Frame::_new_kittest());
-            });
+            crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
             if app.session.is_some() {
                 break;
             }
@@ -1563,7 +1586,8 @@ mod tests {
         assert!(app.session.is_some(), "artifact loaded");
 
         // Open a class and run a search.
-        let _ = ctx.run(Default::default(), |ctx| {
+        crate::app::AscApp::run_ui(&ctx, |ui| {
+            let ctx = ui.ctx();
             app.dispatch(
                 Command::OpenClass {
                     descriptor: "Lcom/google/android/material/timepicker/ClockFaceView;".into(),
@@ -1577,9 +1601,7 @@ mod tests {
             app.dispatch(Command::RunSearch, ctx);
         });
         for _ in 0..600 {
-            let _ = ctx.run(Default::default(), |ctx| {
-                app.update(ctx, &mut eframe::Frame::_new_kittest());
-            });
+            crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
             if !app.documents.is_empty() && app.search.results().is_some() {
                 break;
             }
@@ -1593,9 +1615,7 @@ mod tests {
         app.show_find = true;
         app.find_input = "class".into();
         for _ in 0..5 {
-            let _ = ctx.run(Default::default(), |ctx| {
-                app.update(ctx, &mut eframe::Frame::_new_kittest());
-            });
+            crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
         }
         assert!(app.last_error.is_none(), "{:?}", app.last_error);
     }
@@ -1628,13 +1648,7 @@ mod tests {
         let mut h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .wgpu()
-            .build_state(
-                |ctx, app: &mut AscApp| {
-                    let mut frame = eframe::Frame::_new_kittest();
-                    app.update(ctx, &mut frame);
-                },
-                AscApp::new(None),
-            );
+            .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
         crate::design::apply(&h.ctx);
         for _ in 0..5 {
             h.step();
@@ -1758,13 +1772,7 @@ mod tests {
         let mut h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1440.0, 900.0))
             .wgpu()
-            .build_state(
-                |ctx, app: &mut AscApp| {
-                    let mut frame = eframe::Frame::_new_kittest();
-                    app.update(ctx, &mut frame);
-                },
-                AscApp::new(None),
-            );
+            .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
         crate::design::apply(&h.ctx);
         let ctx0 = h.ctx.clone();
         h.state_mut().open_path(&apk, &ctx0);
@@ -1836,35 +1844,33 @@ mod tests {
             .map(|cp| char::from_u32(*cp).unwrap())
             .collect();
         let banned = |c: char| banned_chars.contains(&c);
-        let ctx = egui::Context::default();
-        // Fonts exist only after a run() — do one empty pass.
-        let _ = ctx.run(Default::default(), |_| {});
+        // egui 0.35+ resolves a char through the family fallback chain,
+        // and `FontsView::has_glyph` reports `false` for every char on a
+        // fresh context (the faces are not warm yet) — it cannot be used
+        // as the oracle. Rasterize instead: the control renders as the
+        // identical replacement box, so matching its pixels IS tofu.
+        let raster = |g: &str| -> Vec<u8> {
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(64.0, 64.0))
+                .build_ui(|ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.monospace(egui::RichText::new(g).size(48.0));
+                    });
+                });
+            h.run();
+            h.render().expect("render").into_raw()
+        };
+        let tofu_px = raster(&char::from_u32(0x2315).unwrap().to_string());
         let mut missing: Vec<String> = Vec::new();
-        ctx.fonts_mut(|f| {
-            for ch in USED
-                .iter()
-                .map(|c| c.chars().next().unwrap())
-                .chain(banned_chars.iter().copied())
-            {
-                let banned = banned(ch);
-                // All glyph sites render through the Monospace family
-                // (Proportional lacks ▸▾▲▼●◆▤ etc. — the tree-toggle
-                // tofu bug). Assert mono coverage for USED and that
-                // BANNED glyphs stay uncovered (in either family).
-                for (family_name, font_id) in [
-                    ("mono", egui::FontId::monospace(20.0)),
-                    ("prop", egui::FontId::proportional(20.0)),
-                ] {
-                    let covered = f.has_glyph(&font_id, ch);
-                    if banned && covered {
-                        panic!("banned glyph {ch:?} is now covered — move it to USED");
-                    }
-                    if !banned && family_name == "mono" && !covered {
-                        missing.push(format!("{ch:?} in {family_name}"));
-                    }
-                }
+        for ch in USED.iter().map(|c| c.chars().next().unwrap()) {
+            assert!(!banned(ch), "{ch:?} is in USED and BANNED_CP");
+            // All glyph sites render through the Monospace family
+            // (Proportional lacks ▸▾▲▼●◆▤ etc. — the tree-toggle
+            // tofu bug), so the audit checks the mono raster only.
+            if raster(&ch.to_string()) == tofu_px {
+                missing.push(format!("{ch:?} in mono"));
             }
-        });
+        }
         // Static guard: banned glyphs must not appear anywhere in the
         // crate source (catches copy-paste regressions pre-render).
         for file in [

@@ -25,7 +25,7 @@ Layer 1      : asc-apk        (mmap ZIP/APK, DEFLATE, CRC32)
 Layer 2      : asc-manifest   (binary AXML)
                 asc-query      (locators + find_refs + CodeOwners)
                 asc-rebuild    (minimal DEX reconstruction, closure+remap+rewrite+layout)
-Layer 3      : asc-decompile  (ClassDecompiler trait + DroidsawBackend, droidsaw-dex =1.0.0 pinned)
+Layer 3      : asc-decompile  (ClassDecompiler trait + DroidsawBackend, droidsaw-dex 2.0.0)
 Layer 4 fan-in: asc-core      (orchestration, pipeline, WorkerPool, format emitters)
 Layer 5      : asc-cli        (clap binary asc-rs)
                 asc-gui        (eframe/egui binary asc-gui)
@@ -119,8 +119,8 @@ cargo bench -p asc-decompile
 
 ### Release packaging
 ```bash
-python scripts/build_release.py v0.1.1 --output dist
-# writes dist/ASC-RS-v0.1.1-source.zip + dist/SHA256SUMS (byte-reproducible).
+python scripts/build_release.py v0.2.0 --output dist
+# writes dist/ASC-RS-v0.2.0-source.zip + dist/SHA256SUMS (byte-reproducible).
 ```
 
 ### Fuzz (separate workspace under `fuzz/`)
@@ -146,7 +146,7 @@ python benches/perf_compare.py --selftest
 
 ## Code Conventions & Common Patterns
 
-**Language & toolchain:** Rust 2024, MSRV `1.85`, resolver `3`. Per-crate Cargo.toml inherits via `.workspace = true`. No `rust-toolchain.toml`, no `rustfmt.toml`, no `clippy.toml`, no `.cargo/config.toml` — rely on cargo defaults.
+**Language & toolchain:** Rust 2024, MSRV `1.93`, resolver `3` (MSRV raised from 1.85 by droidsaw-dex 2.0.0). Per-crate Cargo.toml inherits via `.workspace = true`. No `rust-toolchain.toml`, no `rustfmt.toml`, no `clippy.toml`, no `.cargo/config.toml` — rely on cargo defaults.
 
 **Errors:** every crate uses `thiserror` for its `*Error` enum (`DexError`, `ApkError`, `BytecodeError`, `ManifestError`, `RebuildError`, `SearchError`, `SessionError`, `SelfcheckError`, `DecompileError`). `CoreError` (`crates/asc-core/src/pipeline.rs:65`) is hand-rolled to compose variants from sibling crates.
 
@@ -174,7 +174,7 @@ python benches/perf_compare.py --selftest
 
 **Panic safety:** `droidsaw-dex` calls wrapped in `catch_unwind(AssertUnwindSafe(...))` (`crates/asc-decompile/src/droidsaw.rs:18/82/113`). GUI workers run inside `catch_unwind` (`crates/asc-gui/src/task.rs:225`).
 
-**Pinned deps:** `droidsaw-dex = "=1.0.0"` exact pin (`crates/asc-decompile/Cargo.toml:10`). `eframe = "0.33"` with features `["default_fonts","glow","persistence"]` pinned locally per Lead (NOT in `[workspace.dependencies]`). `parking_lot 0.12`, `rfd 0.15`.
+**Pinned deps:** `droidsaw-dex = "2.0.0"` (caret; `Cargo.lock` pins the exact build — see `crates/asc-decompile/BACKENDS.md` §2.2). `eframe`/`egui_kittest` = `"0.36"` with features `["default_fonts","glow","persistence","accesskit"]` declared locally per Lead (NOT in `[workspace.dependencies]`). `parking_lot 0.12`, `rfd 0.17`, `criterion 0.8` (workspace).
 
 **`unsafe` policy:** `#![deny(unsafe_op_in_unsafe_fn)]` in `crates/asc-dex/src/lib.rs:72`, `crates/asc-bytecode/src/lib.rs:80`, `crates/asc-core/src/lib.rs:34`. `#![forbid(unsafe_code)]` boundary in `asc-decompile/src/lib.rs:36`. The only `unsafe` blocks live in `asc-apk` for `Mmap::map` and `unsafe impl Send/Sync` (`apk.rs:56/129-130/198-199`).
 

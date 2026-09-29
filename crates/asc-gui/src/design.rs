@@ -218,7 +218,10 @@ pub fn apply(ctx: &eframe::egui::Context) {
     style.visuals = v;
     style.spacing.item_spacing = eframe::egui::vec2(t.spacing_tight, t.spacing_tight);
     style.spacing.menu_margin = eframe::egui::Margin::same(6);
-    ctx.set_style(style);
+    // egui 0.34+ dropped `Context::set_style`; styles are now per-theme.
+    // Set both so a later `set_theme` swap can never reveal a stale style.
+    ctx.set_style_of(eframe::egui::Theme::Dark, style.clone());
+    ctx.set_style_of(eframe::egui::Theme::Light, style);
 }
 
 use crate::highlight::Token;

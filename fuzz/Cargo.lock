@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "asc-apk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "asc-bytecode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asc-dex",
  "thiserror",
@@ -78,14 +78,14 @@ dependencies = [
 
 [[package]]
 name = "asc-dex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "asc-fuzz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asc-apk",
  "asc-bytecode",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "asc-rebuild"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "adler2",
  "asc-bytecode",

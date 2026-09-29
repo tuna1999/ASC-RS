@@ -62,12 +62,13 @@ impl NavigationHistory {
     /// Record a visit. Truncates the forward tail; consecutive
     /// identical locations (same descriptor + line) collapse.
     pub fn push(&mut self, loc: NavigationLocation) {
-        if let Some(current) = self.entries.get(self.cursor) {
-            if current.descriptor == loc.descriptor && current.line == loc.line {
-                // Same place: refresh origin in place, no new entry.
-                self.entries[self.cursor].origin = loc.origin;
-                return;
-            }
+        if let Some(current) = self.entries.get(self.cursor)
+            && current.descriptor == loc.descriptor
+            && current.line == loc.line
+        {
+            // Same place: refresh origin in place, no new entry.
+            self.entries[self.cursor].origin = loc.origin;
+            return;
         }
         self.entries.truncate(self.cursor + 1);
         self.entries.push(loc);

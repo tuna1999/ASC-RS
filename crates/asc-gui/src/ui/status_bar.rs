@@ -34,10 +34,11 @@ impl AscApp {
                     ui.monospace(egui::RichText::new("ready").small().color(T.text_secondary));
                 }
             }
-            if self.last_error.is_some() && self.status.is_none() {
-                if let Some(e) = &self.last_error {
-                    ui.monospace(egui::RichText::new(e).small().color(T.error));
-                }
+            if self.last_error.is_some()
+                && self.status.is_none()
+                && let Some(e) = &self.last_error
+            {
+                ui.monospace(egui::RichText::new(e).small().color(T.error));
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -112,8 +113,8 @@ mod tests {
         use crate::app::AscApp;
         let mut app = AscApp::new(None);
         let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::TopBottomPanel::bottom("sb-test").show(ctx, |ui| app.draw_status_bar(ui));
+        crate::app::AscApp::run_ui(&ctx, |ui| {
+            egui::Panel::bottom("sb-test").show(ui, |ui| app.draw_status_bar(ui));
         });
     }
 }

@@ -13,35 +13,35 @@ impl AscApp {
     pub(crate) fn draw_editor(&mut self, ui: &mut egui::Ui) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
-        egui::TopBottomPanel::top("editor_tabs")
+        egui::Panel::top("editor_tabs")
             .frame(egui::Frame::new().fill(T.surface))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.draw_tab_strip(ui);
             });
         if self.show_find {
-            egui::TopBottomPanel::top("editor_find")
+            egui::Panel::top("editor_find")
                 .frame(egui::Frame::new().fill(T.panel_bg))
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.draw_find_bar(ui);
                 });
         }
         if self.show_rename {
-            egui::TopBottomPanel::top("editor_rename")
+            egui::Panel::top("editor_rename")
                 .frame(egui::Frame::new().fill(T.panel_bg))
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.draw_rename_bar(ui);
                 });
         }
         if self.comment_target.is_some() {
-            egui::TopBottomPanel::top("editor_comment")
+            egui::Panel::top("editor_comment")
                 .frame(egui::Frame::new().fill(T.panel_bg))
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.draw_comment_bar(ui);
                 });
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(T.app_bg))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.draw_code_area(ui);
             });
     }

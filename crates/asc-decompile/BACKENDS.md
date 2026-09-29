@@ -26,10 +26,10 @@ quality + perf comparison against the Python oracle's
 | crates.io | <https://crates.io/crates/droidsaw-dex> |
 | Repo | <https://github.com/droidsaw/droidsaw-dex> |
 | License | BSD-3-Clause |
-| Latest version | 2.0.0 (2026-06-11) |
+| Latest version | 2.0.0 (2026-06-11) — **adopted**, see §2.2 |
 | Earlier usable | 1.0.0 (2026-05-25) |
 | Rust edition | 2024 |
-| rust-version | 1.93 (workspace MSRV 1.85; 1.97 stable here, OK) |
+| rust-version | 1.93 (workspace MSRV 1.93; 1.97 stable here, OK) |
 | Direct deps | `scroll`, `thiserror`, `adler2`, `sha1` 0.11, `serde`, `rustc-hash`, `droidsaw-common` |
 
 ### 2.1 Maturity
@@ -50,11 +50,21 @@ quality + perf comparison against the Python oracle's
 
 ### 2.2 Version pinning
 
-Pinned **exact** (`=1.0.0`) in `crates/asc-decompile/Cargo.toml`. The
-crate does not advertise a SemVer-stable public surface across minors
-(2.0.0 requires Rust 1.93, breaks `droidsaw-common` 1.x, rearranges
-its public re-exports) so every minor is treated as breaking until
-upstream publishes a stability statement.
+Declared as `2.0.0` (caret) in `crates/asc-decompile/Cargo.toml` and
+`crates/asc-core/Cargo.toml` (dev-dependency); `Cargo.lock` pins the
+exact resolved build.
+
+Upgrading 1.0.0 → 2.0.0 was safe for our call sites: the three
+functions and the `find_class` method this adapter uses kept their
+signatures, and the module list is unchanged apart from additions
+(`spr` — structure-preserving representation). The `droidsaw-common`
+1.x → 2.x break and the Rust 1.93 floor do not surface here because
+we never import `droidsaw-common` directly and the workspace MSRV
+was raised to 1.93 in the same change.
+
+Upstream still advertises no SemVer-stability statement, so a future
+minor must be treated as potentially breaking: re-run
+`cargo test -p asc-decompile` and re-verify the §4 quality table.
 
 ## 3. Alternatives considered
 
@@ -213,7 +223,7 @@ caller that has zero imports from `droidsaw_dex`.
 
 ## 8. Recommendation
 
-**Adopt `droidsaw-dex 1.0.0` (pinned exact) as the asc-decompile
+**Adopt `droidsaw-dex 2.0.0` as the asc-decompile
 backend.** It is the only viable pure-Rust DEX decompiler crate on
 crates.io, produces structurally equivalent Java source for the
 golden target, runs ~17× faster than androguard on the decompiler
@@ -258,7 +268,7 @@ Web search:
 ```
 crates/asc-decompile/
 ├── BACKENDS.md                         (this file)
-├── Cargo.toml                          (added droidsaw-dex = "=1.0.0", criterion dev-dep, bench target)
+├── Cargo.toml                          (added droidsaw-dex = "2.0.0", criterion dev-dep, bench target)
 ├── src/
 │   ├── lib.rs                          (ClassDecompiler trait, DecompileError enum, normalize_class_name)
 │   └── droidsaw.rs                     (DroidsawBackend adapter; 200 lines incl. 8 unit tests)

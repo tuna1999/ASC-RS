@@ -105,13 +105,13 @@ impl AscApp {
                 if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                     move_sel(-1, self);
                 }
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if let Some((_, _, action)) = entries.get(self.palette_sel) {
-                        run = Some(match action {
-                            PaletteAction::Dispatch(c) => PaletteAction::Dispatch(c.clone()),
-                            PaletteAction::OpenClass(d) => PaletteAction::OpenClass(d.clone()),
-                        });
-                    }
+                if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && let Some((_, _, action)) = entries.get(self.palette_sel)
+                {
+                    run = Some(match action {
+                        PaletteAction::Dispatch(c) => PaletteAction::Dispatch(c.clone()),
+                        PaletteAction::OpenClass(d) => PaletteAction::OpenClass(d.clone()),
+                    });
                 }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     close = true;

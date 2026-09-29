@@ -509,8 +509,8 @@ mod tests {
         app.manifest = Some(populated_manifest());
         let ctx = egui::Context::default();
         for _ in 0..3 {
-            let _ = ctx.run(Default::default(), |ctx| {
-                egui::SidePanel::right("inspector-test").show(ctx, |ui| app.draw_inspector(ui));
+            crate::app::AscApp::run_ui(&ctx, |ui| {
+                egui::Panel::right("inspector-test").show(ui, |ui| app.draw_inspector(ui));
             });
         }
         assert!(app.last_error.is_none(), "{:?}", app.last_error);

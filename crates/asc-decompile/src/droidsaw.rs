@@ -4,12 +4,13 @@
 //! emission internally; asc-decompile callers only see
 //! [`crate::ClassDecompiler::decompile`].
 //!
-//! The version is pinned exactly (`=1.0.0`) because droidsaw-dex has
-//! no documented SemVer stability promise across minor versions (the
-//! 2.0.0 release requires Rust 1.93, breaks `droidsaw-common` 1.x, and
-//! rearranges its public re-exports — see `BACKENDS.md` §2 for the
-//! evaluation). Until upstream ships a stable API, asc-rs treats each
-//! minor as breaking and pins exact.
+//! Version is declared as `2.0.0` (caret, not exact): the surface we
+//! use — `DexFile::parse`, `DexFile::find_class`,
+//! `decompile_class_with_census`, `build_trampoline_census` — is
+//! unchanged across the 1.x → 2.0 bump, and `Cargo.lock` pins the
+//! exact resolved version. Upstream still advertises no SemVer
+//! stability statement, so treat a future minor as potentially
+//! breaking and re-verify `BACKENDS.md` §4 when bumping.
 //!
 //! All parse/emit steps run inside `std::panic::catch_unwind` so a
 //! panic from the third-party crate is converted into
@@ -115,10 +116,10 @@ impl ClassDecompiler for DroidsawBackend {
             // entry. `HashMap` iteration order in Rust is insertion order
             // for non-rehashed maps, which is enough for a 16-entry
             // cap (no measurable churn in practice).
-            if cache.len() >= PARSE_CACHE_CAP {
-                if let Some(&oldest) = cache.keys().next() {
-                    cache.remove(&oldest);
-                }
+            if cache.len() >= PARSE_CACHE_CAP
+                && let Some(&oldest) = cache.keys().next()
+            {
+                cache.remove(&oldest);
             }
             cache.insert(hash, Arc::clone(&parsed));
             parsed

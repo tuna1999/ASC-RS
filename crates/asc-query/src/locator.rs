@@ -215,10 +215,10 @@ fn resolve_field_query(
     let needle = name.filter(|s| !s.is_empty()).map(str::as_bytes);
     let mut out: SmallVec<[FieldIdx; SMALL_HINT]> = SmallVec::new();
     for (idx, field) in view.fields() {
-        if let Some(allowed) = allowed_classes.as_ref() {
-            if !allowed.contains(&field.class) {
-                continue;
-            }
+        if let Some(allowed) = allowed_classes.as_ref()
+            && !allowed.contains(&field.class)
+        {
+            continue;
         }
         if let Some(n) = needle {
             let sref = view.string(field.name).map_err(|e| SearchError::Locator {
@@ -256,10 +256,10 @@ fn resolve_method_query(
     let mut out: SmallVec<[MethodIdx; SMALL_HINT]> = SmallVec::new();
     let needle = name.filter(|s| !s.is_empty()).map(str::as_bytes);
     for (idx, method) in view.methods() {
-        if let Some(allowed) = allowed_classes.as_ref() {
-            if !allowed.contains(&method.class) {
-                continue;
-            }
+        if let Some(allowed) = allowed_classes.as_ref()
+            && !allowed.contains(&method.class)
+        {
+            continue;
         }
         if let Some(n) = needle {
             let sref = view.string(method.name).map_err(|e| SearchError::Locator {

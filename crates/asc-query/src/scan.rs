@@ -225,26 +225,26 @@ pub fn find_refs(view: &DexView, query: &Query) -> DexSearchReport {
                 Ok(insn) => {
                     // Per-code-owner fan-out: emit one hit per owner
                     // method for each matched DexRef.
-                    if let Some(r) = insn.primary {
-                        if targets.matches(&r) {
-                            for &method in &owner.methods {
-                                hits.push(RefHit {
-                                    method,
-                                    offset: insn.offset,
-                                    dex_ref: r,
-                                });
-                            }
+                    if let Some(r) = insn.primary
+                        && targets.matches(&r)
+                    {
+                        for &method in &owner.methods {
+                            hits.push(RefHit {
+                                method,
+                                offset: insn.offset,
+                                dex_ref: r,
+                            });
                         }
                     }
-                    if let Some(r) = insn.secondary {
-                        if targets.matches(&r) {
-                            for &method in &owner.methods {
-                                hits.push(RefHit {
-                                    method,
-                                    offset: insn.offset,
-                                    dex_ref: r,
-                                });
-                            }
+                    if let Some(r) = insn.secondary
+                        && targets.matches(&r)
+                    {
+                        for &method in &owner.methods {
+                            hits.push(RefHit {
+                                method,
+                                offset: insn.offset,
+                                dex_ref: r,
+                            });
                         }
                     }
                 }

@@ -53,6 +53,8 @@ Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`) can
 
 ## Development
 
+Minimum supported Rust version: **1.93** (set by `droidsaw-dex 2.0.0`).
+
 ```bash
 cargo build --release
 cargo test --workspace --release
@@ -65,7 +67,7 @@ frozen Python oracle.
 Release / perf dev tooling:
 
 ```bash
-python scripts/build_release.py v0.1.1 --output dist   # byte-reproducible source ZIP + SHA256SUMS
+python scripts/build_release.py v0.2.0 --output dist   # byte-reproducible source ZIP + SHA256SUMS
 python benches/perf_compare.py --selftest              # paired sign-test + Bonferroni + 3% floor gate (synthetic)
 python benches/perf_compare.py --samples 31            # real binary comparison against target/release/asc-rs.exe
 ```

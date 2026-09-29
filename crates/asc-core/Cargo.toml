@@ -18,5 +18,5 @@ serde.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-droidsaw-dex = "1.0.0"
+droidsaw-dex = "2.0.0"
 zip = { version = "0.6", default-features = false }

@@ -32,14 +32,13 @@ fn main() {
         let bytes = apk_obj.read_entry(&entry).expect("read entry");
         if let Ok(view) = DexView::parse(bytes.as_slice()) {
             for ci in 0..view.class_def_count() {
-                if let Ok(def) = view.class_def(ci) {
-                    if let Ok(t) = view.type_(def.class) {
-                        if let Ok(s) = view.string(t) {
-                            let d = s.decode_lossy().into_owned();
-                            if d.starts_with("Lnet/") && candidates.len() < 10 {
-                                candidates.push(d);
-                            }
-                        }
+                if let Ok(def) = view.class_def(ci)
+                    && let Ok(t) = view.type_(def.class)
+                    && let Ok(s) = view.string(t)
+                {
+                    let d = s.decode_lossy().into_owned();
+                    if d.starts_with("Lnet/") && candidates.len() < 10 {
+                        candidates.push(d);
                     }
                 }
             }
