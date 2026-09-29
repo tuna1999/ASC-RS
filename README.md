@@ -3,8 +3,10 @@
 Pure Rust rewrite of [MG1937/ASC](https://github.com/MG1937/ASC) — on-demand
 Android APK analysis: `findrefs` (string/type/method/field cross-reference
 search across all DEX entries), `getclass` (locate a class, extract a
-minimal standalone DEX, decompile), and `listclass` (enumerate every class
-descriptor across all DEX entries, with optional ASCII prefix filter).
+minimal standalone DEX, decompile), `listclass` (enumerate every class
+descriptor across all DEX entries, with optional ASCII prefix filter), and
+`manifest` (dump package, permissions, components; tolerates the AXML
+tampering Android itself ignores).
 No Python, no JVM, no Node at runtime.
 
 ## Philosophy
@@ -46,6 +48,7 @@ asc-rs findrefs <apk> field  textColor --fuzzy-class --class Foo
 asc-rs getclass   <apk> Lcom/foo/Bar;              # decompiled Java source on stdout
 asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
 asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
+asc-rs manifest   <apk>                             # package, permissions, components
 ```
 
 Class names accept Dalvik descriptor (`Lcom/foo/Bar;`) **or** dotted Java form (`com.foo.Bar`).

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 asc-core.workspace = true
+asc-manifest.workspace = true
 asc-query.workspace = true
 thiserror.workspace = true
 clap.workspace = true

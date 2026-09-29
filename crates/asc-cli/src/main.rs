@@ -2,8 +2,8 @@
 //!
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
-//! `asc-rs listclass <apk> [--prefix P]` with `--format text|json`,
-//! `-o/--output`, `--threads`, `--debug`.
+//! `asc-rs listclass <apk> [--prefix P]`, and `asc-rs manifest <apk>`,
+//! with `--format text|json`, `-o/--output`, `--threads`, `--debug`.
 //!
 //! All engine logic lives in `asc-core`; this binary is a thin
 //! arg-parsing / output-routing wrapper. Exit codes:
@@ -35,6 +35,9 @@ const EXIT_INTERNAL: u8 = 2;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Cmd::Manifest { apk } = &cli.cmd {
+        return run_manifest_cmd(apk, cli.shared.output.as_deref());
+    }
     match dispatch(&cli) {
         Ok(()) => ExitCode::from(EXIT_OK),
         Err(e) => {
@@ -127,6 +130,11 @@ enum Cmd {
         #[arg(long = "prefix")]
         prefix: Option<String>,
     },
+    /// Dump AndroidManifest.xml: package, SDKs, permissions, components.
+    Manifest {
+        /// Path to the APK.
+        apk: PathBuf,
+    },
 }
 
 /// The four findrefs query kinds.
@@ -199,6 +207,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.threads,
             shared.debug,
         ),
+        Cmd::Manifest { .. } => unreachable!("handled in main"),
     }
 }
 
@@ -357,6 +366,79 @@ fn run_listclass_cmd(
         }
     }
     Ok(())
+}
+
+/// `asc-rs manifest <apk>`: text dump of the parsed manifest. Parse
+/// failure exits 2 (engine error); `-o` is exclusive like `listclass`.
+fn run_manifest_cmd(apk: &std::path::Path, output: Option<&std::path::Path>) -> ExitCode {
+    let m = match asc_manifest::parse_from_apk(apk) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Error: manifest: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let text = format_manifest_text(&m);
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, text.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_USER_ERROR);
+            }
+        }
+        None => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(EXIT_OK)
+}
+
+fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
+    use std::fmt::Write as _;
+    let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+    let num = |v: Option<u32>| v.map_or_else(|| "-".into(), |n| n.to_string());
+    let mut s = String::new();
+    let _ = writeln!(s, "package: {}", opt(&m.package));
+    let _ = writeln!(
+        s,
+        "version: {} ({})",
+        opt(&m.version_name),
+        num(m.version_code)
+    );
+    let _ = writeln!(
+        s,
+        "sdk: min={} target={} compile={}",
+        num(m.min_sdk),
+        num(m.target_sdk),
+        num(m.compile_sdk)
+    );
+    let _ = writeln!(s, "permissions ({}):", m.permissions.len());
+    for p in &m.permissions {
+        let _ = writeln!(s, "  {}", p.name);
+    }
+    for (label, list) in [
+        ("activities", &m.activities),
+        ("services", &m.services),
+        ("receivers", &m.receivers),
+    ] {
+        let _ = writeln!(s, "{label} ({}):", list.len());
+        for c in list {
+            let exported = if c.exported { " [exported]" } else { "" };
+            let _ = writeln!(s, "  {}{exported}", c.name);
+            for f in &c.intent_filters {
+                for a in &f.actions {
+                    let _ = writeln!(s, "    action {a}");
+                }
+            }
+        }
+    }
+    let _ = writeln!(s, "providers ({}):", m.providers.len());
+    for p in &m.providers {
+        let exported = if p.exported { " [exported]" } else { "" };
+        let _ = writeln!(s, "  {} auth={}{exported}", p.name, opt(&p.authorities));
+    }
+    s
 }
 
 /// Translate the CLI `FindRefsKind` into an [`Query`]. For method/field

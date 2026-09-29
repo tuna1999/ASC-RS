@@ -33,6 +33,33 @@ fn wrong_magic_is_not_xml() {
 }
 
 #[test]
+fn zeroed_root_type_still_parses() {
+    // Anti-analysis trick seen in Virbox-packed malware: root header
+    // `0x00080000` (type zeroed). Android ignores the type; so must we.
+    let mut bytes = doc_with_start_element("manifest", start_element_fields(20, 0));
+    bytes[..2].copy_from_slice(&0u16.to_le_bytes());
+    parse_manifest(&bytes).expect("zeroed root type must be accepted");
+}
+
+#[test]
+fn garbage_after_root_close_is_ignored() {
+    // Chunks after `</manifest>` are never read by Android; malware
+    // parks a zero-size chunk there to crash strict parsers.
+    let mut bytes = doc_with_start_element("manifest", start_element_fields(20, 0));
+    bytes.extend_from_slice(&0x0103u16.to_le_bytes()); // END_ELEMENT
+    bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+    bytes.extend_from_slice(&24u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // lineNumber
+    bytes.extend_from_slice(&NO_INDEX.to_le_bytes()); // comment
+    bytes.extend_from_slice(&NO_INDEX.to_le_bytes()); // ns
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // name = "manifest"
+    bytes.extend_from_slice(&[0u8; 8]); // garbage chunk: size 0 < headerSize
+    let root_size = bytes.len() as u32;
+    bytes[4..8].copy_from_slice(&root_size.to_le_bytes());
+    parse_manifest(&bytes).expect("garbage after </manifest> must be ignored");
+}
+
+#[test]
 fn truncated_below_root_header_is_not_xml() {
     // Less than 8 bytes — the parser refuses because it can't even
     // read the magic.
@@ -98,25 +125,13 @@ fn string_pool_with_bogus_count_errors() {
 }
 
 #[test]
-fn truncated_utf16_string_errors_not_panics() {
-    // Build a string-pool chunk with 1 string, stringsStart=28, then
-    // truncate the payload so the char length read past EOF.
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&0x0008_0003u32.to_le_bytes());
-    let root_size: u32 = 8 + 36;
-    bytes.extend_from_slice(&root_size.to_le_bytes());
-    bytes.extend_from_slice(&0x0001u16.to_le_bytes());
-    bytes.extend_from_slice(&0x001Cu16.to_le_bytes());
-    bytes.extend_from_slice(&36u32.to_le_bytes());
-    bytes.extend_from_slice(&1u32.to_le_bytes()); // stringCount
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
-    bytes.extend_from_slice(&28u32.to_le_bytes()); // stringsStart
-    bytes.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
-    // char_len = 100 but no payload follows — read will truncate.
-    bytes.extend_from_slice(&100u16.to_le_bytes());
-    let err = parse_manifest(&bytes).unwrap_err();
-    assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
+fn garbage_string_offset_degrades_to_empty() {
+    // Malware points unreferenced pool slots past the chunk. Android
+    // decodes lazily and never trips on them; we decode that slot to ""
+    // instead of rejecting the whole manifest.
+    let mut bytes = doc_with_start_element("manifest", start_element_fields(20, 0));
+    bytes[36..40].copy_from_slice(&0x7FFF_0000u32.to_le_bytes()); // offsets[0]
+    parse_manifest(&bytes).expect("bad string offset must not fail the manifest");
 }
 
 #[test]
@@ -138,8 +153,9 @@ fn bad_string_index_in_attribute_errors_not_panics() {
     bytes.extend_from_slice(&1u32.to_le_bytes()); // stringCount
     bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
     bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
-    bytes.extend_from_slice(&28u32.to_le_bytes()); // stringsStart
+    bytes.extend_from_slice(&32u32.to_le_bytes()); // stringsStart
     bytes.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]
     // UTF-16LE payload: 8 chars "manifest" (each ASCII byte becomes
     // a UTF-16 code unit with a zero high byte).
     bytes.extend_from_slice(&8u16.to_le_bytes());
@@ -197,8 +213,9 @@ fn doc_with_start_element(name: &str, fields: [u8; 20]) -> Vec<u8> {
     bytes.extend_from_slice(&1u32.to_le_bytes()); // stringCount
     bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
     bytes.extend_from_slice(&0u32.to_le_bytes()); // flags (UTF-16)
-    bytes.extend_from_slice(&28u32.to_le_bytes()); // stringsStart
+    bytes.extend_from_slice(&32u32.to_le_bytes()); // stringsStart
     bytes.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]
     let name_utf16: Vec<u16> = name.encode_utf16().collect();
     bytes.extend_from_slice(&(name_utf16.len() as u16).to_le_bytes());
     for unit in &name_utf16 {
@@ -328,8 +345,9 @@ fn utf8_string_pool_decodes() {
     bytes.extend_from_slice(&1u32.to_le_bytes()); // count
     bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
     bytes.extend_from_slice(&RES_STRING_POOL_UTF8_FLAG.to_le_bytes());
-    bytes.extend_from_slice(&28u32.to_le_bytes()); // stringsStart
+    bytes.extend_from_slice(&32u32.to_le_bytes()); // stringsStart
     bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]
     // UTF-8 payload: "main"
     bytes.push(4); // char_len
     bytes.push(4); // byte_len

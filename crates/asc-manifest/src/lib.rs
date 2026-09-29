@@ -280,10 +280,11 @@ impl<'a> Parser<'a> {
             return Err(ManifestError::NotAXml);
         }
         // Root header: type=0x0003, headerSize=8, size=…
-        // The magic AOSP uses is 0x00080003 (type | (headerSize << 16))
-        // for an 8-byte `ResChunk_header` over a `RES_XML_TYPE` body.
-        let magic = read_u32(bytes, 0)?;
-        if magic != 0x0008_0003 {
+        // Android's `ResXMLTree::setTo` never checks the root `type`, and
+        // malware zeroes it (`0x00080000`) to break analysers. Mirror the
+        // framework: ignore `type`, trust only `headerSize` and `size`.
+        let header_size = usize::from(read_u16(bytes, 2)?);
+        if header_size != 8 {
             return Err(ManifestError::NotAXml);
         }
         let root_size = read_u32(bytes, 4)? as usize;
@@ -360,6 +361,12 @@ impl<'a> Parser<'a> {
                 }
                 RES_XML_END_ELEMENT_TYPE => {
                     self.handle_end_element(chunk_start)?;
+                    // `</manifest>` closed: Android's PackageParser stops
+                    // here and never validates what follows, so malware
+                    // parks garbage chunks past it. Stop too.
+                    if self.stack.is_empty() {
+                        return Ok(());
+                    }
                 }
                 _ => {
                     return Err(ManifestError::Unsupported(format!(
@@ -451,15 +458,27 @@ impl<'a> Parser<'a> {
             )));
         }
         let utf8 = (flags & RES_STRING_POOL_UTF8_FLAG) != 0;
-        let mut strings_off = chunk_start + strings_start as usize;
+        let offsets_off = body_off + 20;
+        let offsets_end = (string_count as usize)
+            .checked_mul(4)
+            .and_then(|n| offsets_off.checked_add(n))
+            .filter(|&e| e <= chunk_end)
+            .ok_or_else(|| ManifestError::Truncated("string offset table".into()))?;
+        let strings_base = chunk_start + strings_start as usize;
         let mut decoded: Vec<String> = Vec::with_capacity(string_count as usize);
         let mut total_bytes: u64 = 0;
-        for i in 0..string_count {
+        for (i, off) in (offsets_off..offsets_end).step_by(4).enumerate() {
+            // Address each string through the offset table like Android's
+            // `ResStringPool::stringAt`. The framework decodes lazily, so
+            // malware plants garbage in unreferenced slots; an undecodable
+            // entry becomes "" instead of failing the whole manifest.
+            let mut pos = strings_base.saturating_add(read_u32(self.bytes, off)? as usize);
             let s = if utf8 {
-                self.read_utf8_string(&mut strings_off, chunk_end)?
+                self.read_utf8_string(&mut pos, chunk_end)
             } else {
-                self.read_utf16_string(&mut strings_off, chunk_end)?
-            };
+                self.read_utf16_string(&mut pos, chunk_end)
+            }
+            .unwrap_or_default();
             total_bytes = total_bytes.saturating_add(s.len() as u64);
             decoded.push(s);
             if total_bytes > MAX_STRING_BYTES {

@@ -329,6 +329,7 @@ name = "asc-cli"
 version = "0.2.0"
 dependencies = [
  "asc-core",
+ "asc-manifest",
  "asc-query",
  "clap",
  "serde",
