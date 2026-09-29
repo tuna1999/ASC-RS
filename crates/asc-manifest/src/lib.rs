@@ -489,15 +489,12 @@ impl<'a> Parser<'a> {
             return Err(ManifestError::Truncated("UTF-16 payload".into()));
         }
         let bytes = &self.bytes[*pos..*pos + byte_len];
-        let mut out = String::with_capacity(char_len);
-        for chunk in bytes.chunks_exact(2) {
-            let cu = u16::from_le_bytes([chunk[0], chunk[1]]);
-            if let Some(c) = char::from_u32(cu as u32) {
-                out.push(c);
-            } else {
-                out.push('\u{FFFD}');
-            }
-        }
+        let units = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        let out: String = char::decode_utf16(units)
+            .map(|r| r.unwrap_or('\u{FFFD}'))
+            .collect();
         *pos += byte_len + 2; // skip payload + NUL terminator
         Ok(out)
     }
