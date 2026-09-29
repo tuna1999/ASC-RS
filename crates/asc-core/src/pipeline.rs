@@ -558,9 +558,13 @@ pub fn run_getclass(
     let pool = WorkerPool::new(opts.threads.max(1));
     let found = Arc::new(AtomicBool::new(false));
     let cell: Arc<OnceLock<ClassHit>> = Arc::new(OnceLock::new());
+    // First read/parse failure. The oracle lets these exceptions escape
+    // `get_class_dex`; here they only matter when no other DEX defines the class.
+    let first_err: Arc<OnceLock<CoreError>> = Arc::new(OnceLock::new());
     let target_arc = Arc::new(target.clone());
     let apk_clone = Arc::clone(&apk);
     let cell_clone = Arc::clone(&cell);
+    let err_clone = Arc::clone(&first_err);
 
     let scan_for_class = move |_: usize, entry: &DexEntry| -> Option<()> {
         if found.load(Ordering::Acquire) {
@@ -568,22 +572,42 @@ pub fn run_getclass(
         }
         // Read the entry (clones the inflated bytes for independent
         // ownership — bounded by the per-entry cap).
-        let bytes = apk_clone.read_entry(entry).ok()?.as_slice().to_vec();
+        let bytes = match apk_clone.read_entry(entry) {
+            Ok(b) => b.as_slice().to_vec(),
+            Err(e) => {
+                let _ = err_clone.set(e.into());
+                return None;
+            }
+        };
         match scan_one_for_class(&entry.name, &bytes, &target_arc) {
             Ok(Some(hit)) => {
                 let _ = cell_clone.set(hit);
                 found.store(true, Ordering::Release);
                 Some(())
             }
-            _ => None,
+            Ok(None) => None,
+            Err(e) => {
+                let _ = err_clone.set(e);
+                None
+            }
         }
     };
 
     let _outcome = pool.run(&entries, scan_for_class);
-    let winner = cell
-        .get()
-        .cloned()
-        .ok_or_else(|| CoreError::ClassNotFound(target.clone()))?;
+    let winner = match cell.get() {
+        Some(w) => w.clone(),
+        None => {
+            return Err(
+                match Arc::try_unwrap(first_err)
+                    .ok()
+                    .and_then(OnceLock::into_inner)
+                {
+                    Some(e) => e,
+                    None => CoreError::ClassNotFound(target),
+                },
+            );
+        }
+    };
     decompile_winner(winner, &target, opts.debug)
 }
 
@@ -1030,6 +1054,65 @@ mod tests {
                 assert!(msg.contains("greater than zero"), "msg: {msg}");
             }
             other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    /// Stored-only ZIP (CRC left 0: the production read path does not check it).
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut cd = Vec::new();
+        for (name, data) in entries {
+            let off = out.len() as u32;
+            let (nl, dl) = (name.len() as u16, data.len() as u32);
+            out.extend_from_slice(&[0x50, 0x4b, 3, 4, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&dl.to_le_bytes());
+            out.extend_from_slice(&dl.to_le_bytes());
+            out.extend_from_slice(&nl.to_le_bytes());
+            out.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            cd.extend_from_slice(&[
+                0x50, 0x4b, 1, 2, 20, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
+            cd.extend_from_slice(&dl.to_le_bytes());
+            cd.extend_from_slice(&dl.to_le_bytes());
+            cd.extend_from_slice(&nl.to_le_bytes());
+            cd.extend_from_slice(&[0; 12]);
+            cd.extend_from_slice(&off.to_le_bytes());
+            cd.extend_from_slice(name.as_bytes());
+        }
+        let cd_off = out.len() as u32;
+        out.extend_from_slice(&cd);
+        out.extend_from_slice(&[0x50, 0x4b, 5, 6, 0, 0, 0, 0]);
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_off.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    fn getclass_reports_corrupt_dex_on_single_and_multi_paths() {
+        // Header bytes only: magic OK, but far too short to parse.
+        let bad: &[u8] = b"dex\n035\0\0\0\0\0";
+        let dir = std::env::temp_dir();
+        for (tag, names) in [
+            ("one", &["classes.dex"][..]),
+            ("two", &["classes.dex", "classes2.dex"][..]),
+        ] {
+            let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (*n, bad)).collect();
+            let path = dir.join(format!("asc_corrupt_dex_{tag}_{}.apk", std::process::id()));
+            std::fs::write(&path, stored_zip(&entries)).unwrap();
+            let r = run_getclass(
+                &GetClassJob::new(&path, "Lcom/x/Y;"),
+                &GetClassOptions::default(),
+            );
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                matches!(r, Err(CoreError::Apk(_))),
+                "{tag}: corrupt DEX must be an engine error, got {r:?}"
+            );
         }
     }
 
