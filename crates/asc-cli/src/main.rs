@@ -162,6 +162,13 @@ enum FindRefsKind {
 
 fn dispatch(cli: &Cli) -> Result<(), CoreError> {
     let shared = &cli.shared;
+    // The oracle rejects `--threads 0` with exit 1 for every command
+    // (`ThreadPoolExecutor(max_workers=0)` / `list_classes`).
+    if shared.threads == 0 {
+        return Err(CoreError::Usage(
+            "Worker count must be greater than zero".into(),
+        ));
+    }
     match &cli.cmd {
         Cmd::Getclass { apk, class } => run_getclass_cmd(
             apk,
@@ -286,13 +293,6 @@ fn run_listclass_cmd(
     debug: bool,
 ) -> Result<(), CoreError> {
     let started = Instant::now();
-    // The oracle rejects `--threads 0` with exit 1
-    // (`apk_handler.list_classes`: `if self.max_workers <= 0`).
-    if threads == 0 {
-        return Err(CoreError::Usage(
-            "Worker count must be greater than zero".into(),
-        ));
-    }
     // `ListClassesJob::new` rejects empty prefixes via
     // `DecompileError::ClassNotFound`; map that into a clean exit-1
     // `CoreError::Usage` so the CLI prints `Error: ...` like the oracle.

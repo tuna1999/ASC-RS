@@ -13,13 +13,13 @@ pub const MAP_TYPE_METHOD_ID_ITEM: u16 = 0x0005;
 pub const MAP_TYPE_CLASS_DEF_ITEM: u16 = 0x0006;
 pub const MAP_TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
 pub const MAP_TYPE_METHOD_HANDLE_ITEM: u16 = 0x0008;
-pub const MAP_TYPE_TYPE_LIST: u16 = 0x1000;
-pub const MAP_TYPE_STRING_DATA: u16 = 0x1002;
+pub const MAP_TYPE_TYPE_LIST: u16 = 0x1001;
+pub const MAP_TYPE_STRING_DATA: u16 = 0x2002;
 pub const MAP_TYPE_CODE_ITEM: u16 = 0x2001;
 pub const MAP_TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
-pub const MAP_TYPE_ANNOTATION_SET: u16 = 0x2003;
-pub const MAP_TYPE_CLASS_DATA_ITEM: u16 = 0x2002;
-pub const MAP_TYPE_DEBUG_INFO_ITEM: u16 = 0x2005;
+pub const MAP_TYPE_ANNOTATION_SET: u16 = 0x1003;
+pub const MAP_TYPE_CLASS_DATA_ITEM: u16 = 0x2000;
+pub const MAP_TYPE_DEBUG_INFO_ITEM: u16 = 0x2003;
 
 /// A single map entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

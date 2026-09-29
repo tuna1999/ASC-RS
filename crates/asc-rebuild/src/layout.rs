@@ -300,6 +300,31 @@ pub(crate) fn emit(
         lo.static_values_count = 1;
     }
 
+    // ---------- call_site arrays + method_handles rows ----------
+    // encoded_array_items are unaligned: when a static-values run precedes,
+    // the call-site run follows it byte-for-byte so one map entry covers both.
+    let mut call_site_data_offs: Vec<u32> = vec![0; maps.call_sites.len() as usize];
+    if !maps.call_sites.is_empty() {
+        if lo.static_values_off == 0 {
+            align_to_4(&mut out);
+        }
+        lo.call_site_arrays_off = out.len() as u32;
+        for (rank, &old_cs) in closure.call_sites.iter().enumerate() {
+            let rec = closure
+                .call_site_records
+                .iter()
+                .find(|(c, _, _)| c.0 == old_cs)
+                .ok_or(RebuildError::Internal("call_site record not found"))?;
+            let arr_off = out.len() as u32;
+            let mut payload = Vec::new();
+            crate::rewrite::rewrite_encoded_value(&rec.2, &mut payload, maps, 0)?;
+            out.extend_from_slice(&payload);
+            call_site_data_offs[rank] = arr_off;
+        }
+        lo.call_site_arrays_size = (out.len() as u32) - lo.call_site_arrays_off;
+        lo.call_site_array_count = closure.call_sites.len() as u32;
+    }
+
     // ---------- annotations region ----------
     let mut new_item_off_map: std::collections::HashMap<u32, u32> =
         std::collections::HashMap::new();
@@ -608,27 +633,6 @@ pub(crate) fn emit(
         )?;
         out.extend_from_slice(&new_raw);
         lo.class_data_size = (out.len() as u32) - lo.class_data_off;
-    }
-
-    // ---------- call_site arrays + method_handles rows ----------
-    let mut call_site_data_offs: Vec<u32> = vec![0; maps.call_sites.len() as usize];
-    if !maps.call_sites.is_empty() {
-        align_to_4(&mut out);
-        lo.call_site_arrays_off = out.len() as u32;
-        for (rank, &old_cs) in closure.call_sites.iter().enumerate() {
-            let rec = closure
-                .call_site_records
-                .iter()
-                .find(|(c, _, _)| c.0 == old_cs)
-                .ok_or(RebuildError::Internal("call_site record not found"))?;
-            let arr_off = out.len() as u32;
-            let mut payload = Vec::new();
-            crate::rewrite::rewrite_encoded_value(&rec.2, &mut payload, maps, 0)?;
-            out.extend_from_slice(&payload);
-            call_site_data_offs[rank] = arr_off;
-        }
-        lo.call_site_arrays_size = (out.len() as u32) - lo.call_site_arrays_off;
-        lo.call_site_array_count = closure.call_sites.len() as u32;
     }
 
     // ---------- pool regions ----------
