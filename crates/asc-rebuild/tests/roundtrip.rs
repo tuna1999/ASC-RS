@@ -488,3 +488,42 @@ fn rebuilt_dex_pool_references_all_resolve() {
         rv.string(f.name).expect("field name resolves");
     }
 }
+
+/// Every concrete (non-abstract, non-native) method of the rebuilt class
+/// must carry its own code item: `code_off != 0` and unique. Regression:
+/// `rewrite_class_data` used to index the per-method code offsets by list
+/// ordinal while layout stored them by NEW method index, so methods lost
+/// their bodies whenever any closure method sorted below the class's own.
+fn assert_concrete_methods_have_unique_code(bytes: &[u8], target: &str) {
+    let view = DexView::parse(bytes).expect("source parses");
+    let out = rebuild(&view, target).expect("rebuild succeeds");
+    let rebuilt = DexView::parse(&out.bytes).expect("rebuilt DEX parses");
+    let cd = rebuilt.class_def(0).unwrap();
+    let data = rebuilt.class_data(cd.class_data_off).unwrap().unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for em in data
+        .direct_methods
+        .iter()
+        .chain(data.virtual_methods.iter())
+    {
+        const ABSTRACT_OR_NATIVE: u32 = 0x0400 | 0x0100;
+        if em.access_flags & ABSTRACT_OR_NATIVE != 0 {
+            assert_eq!(em.code_off, 0, "abstract/native method has code");
+            continue;
+        }
+        assert_ne!(em.code_off, 0, "concrete method lost its code item");
+        assert!(seen.insert(em.code_off), "two methods share one code item");
+    }
+}
+
+#[test]
+fn rebuilt_methods_keep_their_own_code_items() {
+    let Some(bytes) = read_bytes("workload_classes.dex") else {
+        eprintln!("workload_classes.dex missing; skipping");
+        return;
+    };
+    assert_concrete_methods_have_unique_code(
+        &bytes,
+        "Lcom/google/android/material/timepicker/ClockFaceView;",
+    );
+}

@@ -53,17 +53,9 @@ impl<I> IndexMap<I> {
     pub(crate) fn lookup(&self, old: u32) -> Result<u32, RebuildError> {
         match self.inner.get(old as usize) {
             Some(Some(n)) => Ok(*n),
-            Some(None) => {
-                eprintln!(
-                    "DBG miss old={} count={}\n{}",
-                    old,
-                    self.inner.len(),
-                    std::backtrace::Backtrace::force_capture()
-                );
-                Err(RebuildError::Internal(
-                    "referenced index was not selected (pool lookup miss)",
-                ))
-            }
+            Some(None) => Err(RebuildError::Internal(
+                "referenced index was not selected (pool lookup miss)",
+            )),
             None => Err(RebuildError::Internal(
                 "index out of bounds (pool lookup overflow)",
             )),

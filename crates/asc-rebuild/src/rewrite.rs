@@ -526,8 +526,8 @@ fn write_index(out: &mut Vec<u8>, idx: u32, arg: u8) -> Result<(), RebuildError>
     Ok(())
 }
 
-/// Re-encodes a `class_data_item` body. `code_offs` is a per-method list
-/// (direct + virtual) carrying the NEW code-item offsets (or 0 for
+/// Re-encodes a `class_data_item` body. `code_offs` is indexed by NEW
+/// method index and carries the NEW code-item offsets (0 for
 /// abstract/native methods). The caller computes them after laying out
 /// the rest of the DEX.
 pub(crate) fn rewrite_class_data(
@@ -630,7 +630,7 @@ pub(crate) fn rewrite_class_data(
         .unwrap_or(EMPTY_METHODS);
     let mut sel_iter = selected_direct.iter();
     let mut prev_new: Option<u32> = None;
-    for i in 0..direct_n {
+    for _ in 0..direct_n {
         let (_delta, n) = asc_dex::leb::uleb128_to_u32(&raw[p..])?;
         p += n;
         let (access, n) = asc_dex::leb::uleb128_to_u32(&raw[p..])?;
@@ -651,7 +651,7 @@ pub(crate) fn rewrite_class_data(
             crate::util::ULEB_GENERIC_MAX,
         )?;
         write_uleb128_to(&mut new_raw, access as u64, crate::util::ULEB_GENERIC_MAX)?;
-        let code_off_new = code_offs.get(i as usize).copied().unwrap_or(0);
+        let code_off_new = code_offs.get(new_idx as usize).copied().unwrap_or(0);
         write_uleb128_to(
             &mut new_raw,
             code_off_new as u64,
@@ -667,7 +667,7 @@ pub(crate) fn rewrite_class_data(
         .unwrap_or(EMPTY_METHODS2);
     let mut sel_iter = selected_virtual.iter();
     let mut prev_new: Option<u32> = None;
-    for i in 0..virtual_n {
+    for _ in 0..virtual_n {
         let (_delta, n) = asc_dex::leb::uleb128_to_u32(&raw[p..])?;
         p += n;
         let (access, n) = asc_dex::leb::uleb128_to_u32(&raw[p..])?;
@@ -688,10 +688,7 @@ pub(crate) fn rewrite_class_data(
             crate::util::ULEB_GENERIC_MAX,
         )?;
         write_uleb128_to(&mut new_raw, access as u64, crate::util::ULEB_GENERIC_MAX)?;
-        let code_off_new = code_offs
-            .get(direct_n as usize + i as usize)
-            .copied()
-            .unwrap_or(0);
+        let code_off_new = code_offs.get(new_idx as usize).copied().unwrap_or(0);
         write_uleb128_to(
             &mut new_raw,
             code_off_new as u64,

@@ -579,6 +579,7 @@ pub(crate) fn emit(
                 }
                 code_bytes.extend_from_slice(&reencoded.raw);
 
+                align_to_4(&mut out);
                 new_code_off_per_method[new_method_idx] = out.len() as u32;
                 out.extend_from_slice(&code_bytes);
                 lo.code_item_count += 1;

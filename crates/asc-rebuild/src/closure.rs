@@ -264,13 +264,14 @@ impl Closure {
 
         let (class_data, class_data_raw) = if cd.class_data_off != 0 {
             let off = cd.class_data_off as usize;
-            let raw = view.physical()[off..].to_vec();
             let cd_data =
                 view.class_data(cd.class_data_off)?
                     .ok_or(asc_dex::DexError::InvalidLength {
                         off,
                         message: "class_data returned None for nonzero off",
                     })?;
+            // class_data() succeeded, so `off` is inside the buffer.
+            let raw = view.physical()[off..].to_vec();
             (Some(cd_data), raw)
         } else {
             (None, Vec::new())
