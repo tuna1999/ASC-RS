@@ -490,8 +490,10 @@ impl<'a> Parser<'a> {
         }
         let bytes = &self.bytes[*pos..*pos + byte_len];
         let units = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c));
         let out: String = char::decode_utf16(units)
             .map(|r| r.unwrap_or('\u{FFFD}'))
             .collect();
