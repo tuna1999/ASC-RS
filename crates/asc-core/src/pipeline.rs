@@ -45,7 +45,7 @@
 //! naturally. Total cost is bounded by the next-to-finish in-flight
 //! entry's processing time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 #[cfg(test)]
 use std::path::Path;
@@ -334,6 +334,18 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
         });
     }
     let mut out: Vec<RenderedMatch> = Vec::with_capacity(by_caller.len());
+    // `resolve_first_line` needs each caller's source-side `code_off`.
+    // Looking it up per match re-scans every class_def, which is
+    // O(callers × class_defs) — measured at 14–84% of findrefs wall
+    // time on the corpus.
+    //
+    // One index pass costs a full class_def walk; the per-caller scan
+    // stops at the first match, so it averages half that. The index
+    // therefore only pays off past a couple of callers — below that we
+    // keep the scan, which is measurably faster for narrow queries
+    // (e.g. 1 hit on workload.apk: 43.6 ms scanned vs 46.4 ms indexed).
+    let indexed: Option<HashMap<u32, u32>> =
+        (by_caller.len() > LINEAR_SCAN_CALLER_LIMIT).then(|| source_code_off_index(view));
     for (mid, (matched, min_code_off)) in &by_caller {
         let Some(caller_str) = render_caller(view, mid) else {
             continue;
@@ -366,7 +378,13 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
         // line. None when the body has no debug_info_item; we do not
         // fail the match on malformed debug streams — we just skip
         // the line number (the GUI then opens at line 0 / start).
-        let first_line = min_code_off.and_then(|off| resolve_first_line(view, *mid, off));
+        let first_line = min_code_off.and_then(|off| {
+            let abs = match &indexed {
+                Some(index) => index.get(mid).copied(),
+                None => scan_source_code_off(view, *mid),
+            }?;
+            resolve_first_line(view, abs, off)
+        });
         out.push(RenderedMatch {
             caller: caller_str,
             matched: matched_strs,
@@ -376,16 +394,16 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
     out
 }
 
-/// Resolve the 1-indexed source line of the smallest matched code
-/// offset in a caller method. Returns `None` when the body has no
-/// `debug_info_item` (or the offset lands on a malformed stream).
-fn resolve_first_line(view: &DexView<'_>, mid: u32, code_off: u32) -> Option<u32> {
-    // Walk every class_data_item once, picking the `code_off` for the
-    // matching `method_idx`. For the typical 64 MiB corpus this is
-    // < 1ms; if it ever becomes hot we'll cache it on the worker.
-    let n = view.class_def_count();
-    let mut found_code_off: Option<u32> = None;
-    for ci in 0..n {
+/// Caller count above which [`source_code_off_index`] beats a per-caller
+/// linear scan. Both were measured on the corpus; 2 callers is where the
+/// one-time full walk overtakes repeated early-exit scans.
+const LINEAR_SCAN_CALLER_LIMIT: usize = 2;
+
+/// Scan the class-defs for a single method's source-side `code_off`,
+/// stopping at the first match. Used for narrow queries where building
+/// [`source_code_off_index`] would cost more than it saves.
+fn scan_source_code_off(view: &DexView<'_>, mid: u32) -> Option<u32> {
+    for ci in 0..view.class_def_count() {
         let Ok(def) = view.class_def(ci) else {
             continue;
         };
@@ -401,15 +419,49 @@ fn resolve_first_line(view: &DexView<'_>, mid: u32, code_off: u32) -> Option<u32
             .chain(data.virtual_methods.iter())
         {
             if m.method_idx.0 == mid {
-                found_code_off = Some(m.code_off);
-                break;
+                return Some(m.code_off);
             }
         }
-        if found_code_off.is_some() {
-            break;
+    }
+    None
+}
+
+/// Index every source-side method's `code_off` in one pass over the
+/// class-defs: `method_idx → code_off`.
+///
+/// First class-def wins for a duplicated `method_idx`, matching the
+/// linear scan this replaces. Malformed class-defs / class_data are
+/// skipped rather than aborting the walk, exactly as before.
+fn source_code_off_index(view: &DexView<'_>) -> HashMap<u32, u32> {
+    let mut index = HashMap::new();
+    for ci in 0..view.class_def_count() {
+        let Ok(def) = view.class_def(ci) else {
+            continue;
+        };
+        if def.class_data_off == 0 {
+            continue;
+        }
+        let Ok(Some(data)) = view.class_data(def.class_data_off) else {
+            continue;
+        };
+        for m in data
+            .direct_methods
+            .iter()
+            .chain(data.virtual_methods.iter())
+        {
+            index.entry(m.method_idx.0).or_insert(m.code_off);
         }
     }
-    let code_off_abs = found_code_off?;
+    index
+}
+
+/// Resolve the 1-indexed source line of the smallest matched code
+/// offset in a caller method. Returns `None` when the body has no
+/// `debug_info_item` (or the offset lands on a malformed stream).
+///
+/// `code_off_abs` is the caller's source-side `code_off`, from
+/// [`source_code_off_index`].
+fn resolve_first_line(view: &DexView<'_>, code_off_abs: u32, code_off: u32) -> Option<u32> {
     if code_off_abs == 0 {
         return None;
     }

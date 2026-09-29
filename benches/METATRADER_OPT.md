@@ -1,136 +1,157 @@
-# MetaTrader perf optimization report — 2026-09-26
+# Perf optimization report — 2026-09-28
 
-Target: `corpus/apk/MetaTrader-5-Forex-Stocks_500.6119_apkcube.apk`
-(36.3 MB, 1× classes.dex 7.7 MB raw / 3.7 MB deflate, 8564 classes).
+Supersedes the 2026-09-26 pass, which measured `MetaTrader-5-Forex-Stocks_500.6119_apkcube.apk`.
+That APK is no longer in `corpus/`; every number below was re-measured on the
+current corpus with `target/release/asc-rs.exe` rebuilt from HEAD.
 
-## Research summary (cited)
+## Environment
 
-- **clap arg ordering**: `#[arg(global = true)]` makes flags accepted in
-  any position (verified via [docs.rs/clap](https://docs.rs/clap/latest/clap/struct.Arg.html)).
-- **DEX pool layout**: `Vec` for indexed lookup, `HashMap` for reverse
-  lookup (verified via [source.android.com DEX format spec](https://source.android.com/docs/core/runtime/dex-format)).
-- **droidsaw-dex**: pinned `=1.0.0`. Has `find_class` API doing
-  exact→exact-short→substring in one call
-  ([droidsaw/droidsaw-dex main branch](https://github.com/droidsaw/droidsaw-dex)).
-  `decompile_class_with_census` is the public fast-path API.
-- **flate2 backend**: `flate2 + zlib-rs` is ~2.35× faster than
-  `miniz_oxide` on repetitive data but the workspace already pinned
-  `rust_backend` (= miniz_oxide). Skip — MetaTrader's 3.7 MB deflate
-  inflates in ~5 ms already.
-- **ahash vs std HashMap**: only 2 HashMap usages in the engine and
-  neither is on the hot path. Skip.
+| Item | Value |
+|------|-------|
+| OS | Windows 11 Enterprise 10.0.26200 |
+| CPU | i7-12700T, 20 logical cores |
+| rustc | 1.97.1 (8bab26f4f 2026-07-14), LLVM 22.1.6 |
+| Binary | `target/release/asc-rs.exe`, 2,674,688 B |
 
-## What was implemented
+## Corpus (current)
 
-### P2 — CLI arg ordering (`global = true`)
-**File**: `crates/asc-cli/src/main.rs:66-97`
+| APK | DEXes | Raw DEX | Compression |
+|-----|------:|--------:|-------------|
+| `workload.apk` | 1 | 9.1 MB | STORED |
+| `com.aurora.store_60.apk` | 2 | 6.7 MB | DEFLATED |
+| `org.fdroid.fdroid_1016000.apk` | 2 | 14.0 MB | DEFLATED |
+| `com.locket.Locket.apk` | 8 | 53.3 MB | STORED |
 
-Added `SharedFlags` struct with `#[arg(global = true)]` on `-o`,
-`--threads`, `--debug`, `--format`. Verified all four work in any
-position on every subcommand.
+`workload.apk` and `com.locket.Locket.apk` are **STORED**, so `read_entry`
+returns a borrowed mmap slice and the DEFLATE path never runs for them.
 
-### P1+P3 — DexFile parse cache + droidsaw `find_class` O(1) lookup
-**File**: `crates/asc-decompile/src/droidsaw.rs:30-148`
-**Deps**: `crates/asc-decompile/Cargo.toml:11` (added `crc32fast`)
+## Method
 
-`DroidsawBackend` now holds `Arc<Mutex<HashMap<u32, Arc<DexFile>>>>`
-keyed by `crc32fast::hash(dex_bytes)`. Bounded FIFO at 16 entries.
-Replaces the manual `for cd in &dex.class_defs { dex.get_type_descriptor(...) }`
-loop with `dex.find_class(&descriptor)` (single O(n)→O(1) call, with
-internal collision safety).
+Speedups below are **head-to-head on one machine**: two binaries built from
+`ff52317` (PRE, before this work) and from the final tree (POST), measured
+back to back in an interleaved loop (N=15, page cache warm, median). Both
+were `--release` builds of the same source except for the three changes
+described here. Wall time is `time.perf_counter()` around `subprocess.run`,
+so it includes ~9 ms of process spawn on both sides.
 
-### P7a — per-phase debug timing
-**Files**:
-- `crates/asc-core/src/pipeline.rs:571-598` — `decompile_winner` prints
-  `[DEBUG] phase=X us=Y` for dex_view_parse / rebuild / decompile.
-- `crates/asc-rebuild/src/lib.rs:98-112` — `rebuild` prints sub-phase
-  timing (`closure_us`, `remap_us`, `layout_us`) when
-  `ASC_REBUILD_DEBUG=1` is set (zero cost otherwise).
+## P0 — findrefs: index caller `code_off` once
 
-### P7b — warm-cache benchmark example
-**File**: `crates/asc-core/examples/multi_getclass.rs`
+`crates/asc-core/src/pipeline.rs` — `resolve_first_line` scanned **every**
+`class_def` to find a caller's `code_off`, once **per caller**. That is
+O(callers × class_defs). Replaced with `source_code_off_index`, a single
+pass building `method_idx → code_off`.
 
-Decompiles 10 `Lnet/...` classes from MetaTrader in one process,
-prints cold-first-call vs warm-subsequent-average.
+The old code carried the comment *"if it ever becomes hot we'll cache it on
+the worker"* — it had become hot.
 
-## What was deferred (and why)
+## P1 — getclass: index the closure's source `code_off` once
 
-- **`--regex` flag for string locator** — feature parity tweak, not
-  perf; asc-rs literal-substring is documented as the correct semantics.
-- **Switch flate2 → zlib-rs** — saves ~1-3 ms on inflate; the
-  3.7 MB MetaTrader DEX already inflates in ~5 ms (cited). Touches
-  a workspace-wide dep, not worth the churn.
-- **ahash everywhere** — only 2 HashMap call sites, neither hot.
-- **Closure walk optimization** — identified as the actual bottleneck
-  (287/330 ms in MetaTrader MainActivity getclass; see profile below).
-  Algorithmically complex (dependency closure over bytecode, proto
-  refs, annotations, call_sites, method_handles); risk-vs-reward poor
-  for ~30 ms gain on a 330 ms operation. Out of scope for this pass.
+`crates/asc-rebuild/src/closure.rs` — `find_source_code_off` had the same
+O(methods × class_defs) shape, called once per method in `augment_pass`.
+Replaced with `source_code_off_index`. `to_walk` is snapshotted before the
+loop, so the index stays valid while `walk_code_item` mutates `self.methods`.
 
-## Per-phase profile of `getclass MainActivity` (MetaTrader)
+Instrumented measurement of the old code:
 
-```
-phase=dex_view_parse us=0
-phase=rebuild        us=302154    ← bottleneck
-  closure_us=286587   (95% of rebuild)
-  remap_us=381        (negligible)
-  layout_us=14859     (4% of rebuild)
-phase=decompile      us=486       (negligible; droidsaw-dex cold parse is fast)
-phase=rebuilt_bytes  bytes=53372
-Total                us=358711    (median cold CLI)
+| case | to_walk | class_defs | class_data reads | lookup |
+|------|--------:|-----------:|-----------------:|-------:|
+| ClockFaceView | 74 | 6220 | 59,792 | 143,211 µs |
+| Locket Analytics | 38 | 6181 | 27,901 | 82,437 µs |
+
+`class_data reads ≈ to_walk × class_defs`. After the change `closure_us`
+went 165,403 µs → 5,093 µs on ClockFaceView (**~32×**), from 95–96% of
+`rebuild` down to a minor share.
+
+## P2 — release profile
+
+```toml
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
 ```
 
-Oracle median: 297 ms. We are 30-60 ms slower on cold getclass;
-**the gap is entirely in `asc-rebuild::closure::Closure::compute`**.
+`panic` is left at `unwind` **on purpose**: `asc-decompile` wraps the
+third-party droidsaw-dex parser in `catch_unwind` and `asc-gui` worker
+threads do the same. `panic = "abort"` would delete those guards. The
+`asc-decompile` panic-guard test (6 tests) passes under this profile.
 
-## Bench numbers (N=5 cold CLI invocations on MetaTrader)
+Build 46 s → 118 s. `asc-rs.exe` 2,786,816 B → 2,674,688 B.
 
-| Case                          | asc-rs (opt) | Python oracle | Speedup |
-|------------------------------|-------------:|--------------:|--------:|
-| findrefs string https://     |    81.6 ms   |    394.3 ms   |   4.8×  |
-| findrefs type MainActivity   |    ~80 ms    |    ~400 ms    |   ~5×   |
-| findrefs method onCreate     |    96.5 ms   |    426.9 ms   |   4.4×  |
-| findrefs field priceClose    |    73.9 ms   |    395.2 ms   |   5.3×  |
-| getclass MainActivity (cold) |   330.4 ms   |    297.7 ms   |   0.9×  |
-| listclass (oracle has none)  |    41.3 ms   |    83.8 ms    |   2.0×  |
+## Results
 
-Cold CLI numbers are within noise of pre-optimization baseline
-(findrefs was already 5.9×, getclass was 0.84×; cache can't help
-across separate processes).
+| case | PRE | POST | speedup |
+|------|----:|-----:|--------:|
+| `findrefs string Context` workload (28) | 68.0 ms | 46.9 ms | 1.45× |
+| `findrefs string get` workload (219) | 259.1 ms | 53.7 ms | **4.82×** |
+| `findrefs string https://` aurora (57) | 123.6 ms | 90.6 ms | 1.37× |
+| `findrefs string https://` fdroid | 154.6 ms | 144.7 ms | 1.07× |
+| `findrefs string Context` locket, 8 dex (725) | 1169.1 ms | 221.2 ms | **5.28×** |
+| `getclass ClockFaceView` workload | 147.2 ms | 37.3 ms | **3.95×** |
+| `getclass Locket Analytics` (8 dex) | 128.3 ms | 60.6 ms | 2.12× |
 
-## Warm-cache win (in-process, GUI-like workflow)
+Narrow queries (few callers) are unchanged, by design — see below:
 
-`target/release/examples/multi_getclass.exe`:
+| case | PRE | POST | speedup |
+|------|----:|-----:|--------:|
+| `findrefs string compare` workload (1 caller) | 42.5 ms | 42.8 ms | 0.99× |
+| `findrefs string hashCode` workload (2) | 45.3 ms | 45.2 ms | 1.00× |
+| `findrefs method onClick` aurora (10) | 89.4 ms | 90.3 ms | 0.99× |
 
-```
-cold_first_call_ms=125.2
-warm_subsequent_avg_ms=50.0      ← 2.5× faster than cold
-total_ms=575.0 (10 classes)
-```
+## Index vs linear scan threshold
 
-Estimated unoptimized cold for 10 distinct classes: ~1250 ms.
-**Real win: 2.2× speedup on a 10-class GUI session.**
+Building the index costs one full class-def walk (~24 ms on a 6,220-class
+DEX). The old per-caller scan stops at the first match, so it averages half
+that. An index-only version therefore **regressed** narrow queries — a
+1-caller findrefs went 43.6 ms → 46.4 ms (0.94×, reproduced across runs).
+
+`render_hits` now picks per query: `LINEAR_SCAN_CALLER_LIMIT = 2`. At or
+below that caller count it uses the original early-exit scan; above it, it
+builds the index. Break-even was measured, not guessed.
+
+`findrefs method onClick` aurora at 0.99× is inside measurement noise
+(N=41: median 0.991×, min 0.988×, stdev ≈13% CV) — not a real regression.
+Its engine-only cost is ~78 ms of the ~90 ms wall.
+
+## Rejected after measurement
+
+| Idea | Why not |
+|------|---------|
+| Index unconditionally | Regressed 1-caller queries to 0.94×. Fixed with the threshold above. |
+| Drop `.to_vec()` on `read_entry` | Measured 1.35 ms for 9.1 MB = **1.7%** of findrefs. Not worth the signature churn. |
+| `zlib-rs` instead of `miniz_oxide` | Irrelevant — the large corpus APKs are STORED, so inflate does not run. |
+| Reuse the 64 KiB inflate scratch buffer | Only affects DEFLATED entries; ≤1 ms there. |
+| `madvise` / `PrefetchVirtualMemory` on the mmap | Needs a new `unsafe` block in `asc-apk`; cold page-fault cost did not measure as significant. |
+| `parking_lot::RwLock` for the droidsaw parse cache | Cache is read-mostly and tiny (16 entries); not contended in practice. |
 
 ## Gates
 
 | Gate | Result |
 |------|--------|
-| `cargo fmt --all -- --check` | ✅ clean |
-| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | ✅ clean |
-| `cargo test --workspace --release` | ✅ 244+ tests PASS (no FAILED) |
-| `python tests/differential/run_differential.py target/release/asc-rs.exe` | ✅ **12/12 PASS** |
-| `cargo build --release` | ✅ `asc-rs.exe` 2.78 MB |
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
+| `cargo test --workspace --release` | 358 passed, 0 failed |
+| `cargo test --release -p asc-decompile` (panic guard) | 6 passed — `catch_unwind` intact under LTO |
+| `python tests/differential/run_differential.py target/release/asc-rs.exe` | 12 PASS / 0 FAIL |
+| `python benches/perf_compare.py --selftest` | selftest OK |
+| `asc-gui --selfcheck corpus/apk/workload.apk` | exit 0, 6220 classes |
+| stdout byte-identical to pre-change baseline | verified (3520 / 9036 / 4184 / 1218 B) |
 
-## Conclusion
+## Note on prior numbers
 
-- **CLI cold getclass**: still ~0.9× of oracle (closure walk is the
-  bottleneck, not droidsaw-dex).
-- **GUI / multi-class warm**: **2.2× faster** on a 10-class batch via
-  the parse cache.
-- **findrefs**: unchanged at 5–6× faster than oracle (already
-  optimal — `asc_query::find_refs` is O(1) per code_off after the
-  wave-3 HashMap dedup in `CodeOwners::build`).
-- **UX**: CLI flags now work in any position via `global = true`.
+`benches/ASC-RS-BENCH.md` (2026-09-14) reports `findrefs string Context
+workload` at 27.2 ms. The PRE binary built from `ff52317` measures 68.0 ms
+on this machine. The 2.5× gap is unexplained; the ASC-RS-BENCH machine or a
+regression between 2026-09-14 and 2026-09-26 are the candidates. The oracle
+column (`benches/BASELINE.md`) is unchanged and still valid.
 
-Risk: low — all 244+ tests pass, 12/12 differential parity holds,
-no API surface changes for downstream users.
+## Next candidates
+
+1. **Process spawn (~9 ms fixed).** Largest remaining fixed cost; ~20% of
+   post-change `getclass` wall time.
+2. **`getclass layout` phase** — 3.5 ms, now comparable to the closure walk.
+3. **`run_findrefs` is still serial across DEX entries.** `getclass` already
+   fans out over `WorkerPool`; findrefs does not. On the 8-dex Locket APK
+   that is 8 sequential index builds (~131 ms of a 221 ms run). Not yet
+   measured for a real win — parallelising changes hit ordering, which the
+   differential runner compares.

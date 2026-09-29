@@ -42,3 +42,17 @@ criterion = "0.5"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Release tuning for the two shipped binaries (asc-rs, asc-gui).
+#
+# `lto` + `codegen-units = 1` let LLVM inline across the
+# asc-dex/asc-query/asc-rebuild/asc-core crate boundaries, which the
+# hot DEX-parsing and closure walks sit on.
+#
+# `panic` is deliberately left at "unwind": asc-decompile wraps the
+# third-party droidsaw-dex parser in `catch_unwind`, and asc-gui worker
+# threads do the same. `panic = "abort"` would remove those guards.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
