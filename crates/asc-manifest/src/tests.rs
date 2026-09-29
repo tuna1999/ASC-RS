@@ -178,6 +178,117 @@ fn bad_string_index_in_attribute_errors_not_panics() {
     assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
 }
 
+/// Root header + a one-string UTF-16 pool containing `name` + a
+/// START_ELEMENT chunk whose type-specific fields are `fields`
+/// (20 bytes at chunk_start+16: ns, name, attributeStart,
+/// attributeSize, attributeCount, idIndex, classIndex, styleIndex).
+/// Used by the malformed-START_ELEMENT regression tests below.
+fn doc_with_start_element(name: &str, fields: [u8; 20]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0x0008_0003u32.to_le_bytes());
+    let root_size_placeholder = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+
+    let sp_start = bytes.len();
+    bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+    bytes.extend_from_slice(&0x001Cu16.to_le_bytes());
+    let sp_size_placeholder = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // stringCount
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // flags (UTF-16)
+    bytes.extend_from_slice(&28u32.to_le_bytes()); // stringsStart
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    let name_utf16: Vec<u16> = name.encode_utf16().collect();
+    bytes.extend_from_slice(&(name_utf16.len() as u16).to_le_bytes());
+    for unit in &name_utf16 {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.extend_from_slice(&[0, 0]); // NUL terminator
+    let sp_size = (bytes.len() - sp_start) as u32;
+    bytes[sp_size_placeholder..sp_size_placeholder + 4].copy_from_slice(&sp_size.to_le_bytes());
+
+    let se_start = bytes.len();
+    bytes.extend_from_slice(&0x0102u16.to_le_bytes());
+    bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+    let se_size_placeholder = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // lineNumber
+    bytes.extend_from_slice(&NO_INDEX.to_le_bytes()); // comment
+    bytes.extend_from_slice(&fields);
+    let se_size = (bytes.len() - se_start) as u32;
+    bytes[se_size_placeholder..se_size_placeholder + 4].copy_from_slice(&se_size.to_le_bytes());
+
+    let root_size = bytes.len() as u32;
+    bytes[root_size_placeholder..root_size_placeholder + 4]
+        .copy_from_slice(&root_size.to_le_bytes());
+    bytes
+}
+
+/// `ResXMLTree_attrExt` with a valid name index but the given
+/// attributeSize / attributeCount, so tests only vary what they test.
+fn start_element_fields(attr_size: u16, attr_count: u16) -> [u8; 20] {
+    let mut f = [0u8; 20];
+    f[0..4].copy_from_slice(&NO_INDEX.to_le_bytes()); // ns
+    f[4..8].copy_from_slice(&0u32.to_le_bytes()); // name = "manifest"
+    f[8..10].copy_from_slice(&20u16.to_le_bytes()); // attributeStart
+    f[10..12].copy_from_slice(&attr_size.to_le_bytes()); // attributeSize
+    f[12..14].copy_from_slice(&attr_count.to_le_bytes()); // attributeCount
+    f
+}
+
+#[test]
+fn string_pool_chunk_overrunning_root_errors_not_panics() {
+    // The string-pool header is only complete, but its declared
+    // chunk size runs past the root chunk end — so the string payload
+    // that follows actually lives outside the document.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0x0008_0003u32.to_le_bytes());
+    bytes.extend_from_slice(&36u32.to_le_bytes()); // root_size: 8 + 28
+    let sp_start = bytes.len();
+    bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+    bytes.extend_from_slice(&0x001Cu16.to_le_bytes());
+    bytes.extend_from_slice(&200u32.to_le_bytes()); // chunk_size → 208 > 36
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // stringCount
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+    bytes.extend_from_slice(&28u32.to_le_bytes()); // stringsStart
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    assert_eq!(sp_start, 8);
+    assert_eq!(bytes.len(), 36, "string pool header fills the root chunk");
+
+    // A UTF-16 string "x" plus padding that makes the declared chunk
+    // look complete when read against the file, not the root chunk.
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.push(b'x');
+    bytes.push(0);
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(&[0u8; 168]);
+
+    let err = parse_manifest(&bytes).unwrap_err();
+    assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
+}
+
+#[test]
+fn start_element_attribute_size_below_minimum_errors_not_panics() {
+    // attributeSize = 4 (< 20): every attribute read would run off the
+    // end of the chunk into the next one.
+    let bytes = doc_with_start_element("manifest", start_element_fields(4, 1));
+    let err = parse_manifest(&bytes).unwrap_err();
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
+}
+
+#[test]
+fn no_index_element_name_errors_not_panics() {
+    // name = NO_INDEX with an attribute whose name index is also
+    // NO_INDEX — neither may be used to index the string pool.
+    let mut fields = start_element_fields(20, 1);
+    fields[4..8].copy_from_slice(&NO_INDEX.to_le_bytes());
+    let bytes = doc_with_start_element("manifest", fields);
+    let err = parse_manifest(&bytes).unwrap_err();
+    assert!(matches!(err, ManifestError::BadChunk(_)), "got {err:?}");
+}
+
 #[test]
 fn utf8_string_pool_decodes() {
     // Build a string-pool chunk with the UTF-8 flag set, one string

@@ -373,7 +373,7 @@ impl<'a> Parser<'a> {
         if self.cursor != self.root_end {
             return Err(ManifestError::BadChunk(format!(
                 "trailing {} bytes at end of root chunk",
-                self.root_end - self.cursor
+                self.root_end.saturating_sub(self.cursor)
             )));
         }
         Ok(())
@@ -420,6 +420,15 @@ impl<'a> Parser<'a> {
         let chunk_end = chunk_start
             .checked_add(chunk_size)
             .ok_or_else(|| ManifestError::Truncated("string pool size overflow".into()))?;
+        // The string decoding below is bounded by `chunk_end`, so the
+        // chunk must lie inside both the root chunk and the file.
+        if chunk_end > self.root_end || chunk_end > self.bytes.len() {
+            return Err(ManifestError::Truncated(format!(
+                "string pool at {chunk_start} overruns root end ({chunk_end} > {}, file {})",
+                self.root_end,
+                self.bytes.len()
+            )));
+        }
         let body_off = chunk_start + STRING_POOL_BODY_OFF;
         if body_off + 20 > self.bytes.len() {
             return Err(ManifestError::Truncated(
@@ -522,8 +531,8 @@ impl<'a> Parser<'a> {
         }
         let prefix = read_u32(self.bytes, body_off)?;
         let uri = read_u32(self.bytes, body_off + 4)?;
-        self.validate_string_index(prefix, "start-ns prefix")?;
-        self.validate_string_index(uri, "start-ns uri")?;
+        self.validate_string_index(prefix, "start-ns prefix", true)?;
+        self.validate_string_index(uri, "start-ns uri", true)?;
         // We do not currently consult the namespace stack at element-
         // open time — namespaced element / attribute names arrive with
         // the **URI** as their ns string-pool index, which is what the
@@ -572,12 +581,17 @@ impl<'a> Parser<'a> {
         let _id_idx = read_u16(self.bytes, body_off + 14)?;
         let _class_idx = read_u16(self.bytes, body_off + 16)?;
         let _style_idx = read_u16(self.bytes, body_off + 18)?;
-        if attr_size == 0 {
-            return Err(ManifestError::BadChunk(
-                "start-element attributeSize == 0".into(),
-            ));
+        // An attribute is 20 bytes (`ns`, `name`, `rawValue`,
+        // `Res_value`{size,res0,dataType,data}); anything smaller can
+        // never hold one, and the fixed-offset reads below would index
+        // into the next attribute.
+        const ATTRIBUTE_MIN_SIZE: usize = 20;
+        if attr_size < ATTRIBUTE_MIN_SIZE {
+            return Err(ManifestError::BadChunk(format!(
+                "start-element attributeSize {attr_size} < {ATTRIBUTE_MIN_SIZE}"
+            )));
         }
-        self.validate_string_index(name_idx, "start-element name")?;
+        self.validate_string_index(name_idx, "start-element name", false)?;
         let name = self.strings[name_idx as usize].clone();
         // First attribute begins at offset `attr_start` past the
         // **attrExt start** (chunk_start + 16), which is `body_off`.
@@ -607,7 +621,7 @@ impl<'a> Parser<'a> {
             let _tv_res0 = self.bytes[attr_off + 14];
             let tv_type = self.bytes[attr_off + 15];
             let tv_data = read_u32(self.bytes, attr_off + 16)?;
-            self.validate_string_index(a_name, "attribute name")?;
+            self.validate_string_index(a_name, "attribute name", false)?;
             let a_name_str = self.strings[a_name as usize].clone();
             let value = self.render_typed_value(tv_type, tv_data, a_raw)?;
             attrs.push((a_name_str, value));
@@ -625,7 +639,7 @@ impl<'a> Parser<'a> {
             return Err(ManifestError::Truncated("end-element body".into()));
         }
         let name_idx = read_u32(self.bytes, body_off + 4)?;
-        self.validate_string_index(name_idx, "end-element name")?;
+        self.validate_string_index(name_idx, "end-element name", false)?;
         let name = self.strings[name_idx as usize].clone();
         match self.stack.last() {
             Some(frame) if frame.name == name => {}
@@ -673,7 +687,7 @@ impl<'a> Parser<'a> {
                 if raw_index == NO_INDEX {
                     None
                 } else {
-                    self.validate_string_index(raw_index, "string-typed rawValue")?;
+                    self.validate_string_index(raw_index, "string-typed rawValue", true)?;
                     Some(self.strings[raw_index as usize].clone())
                 }
             }
@@ -686,9 +700,23 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
-    fn validate_string_index(&self, idx: u32, ctx: &str) -> Result<(), ManifestError> {
+    /// Validate a string-pool index. `allow_no_index` is false for
+    /// fields that are always dereferenced (element / attribute names);
+    /// true for optional ones (namespace URIs, string-typed values,
+    /// where AOSP uses `NO_INDEX` to mean "absent").
+    fn validate_string_index(
+        &self,
+        idx: u32,
+        ctx: &str,
+        allow_no_index: bool,
+    ) -> Result<(), ManifestError> {
         if idx == NO_INDEX {
-            return Ok(());
+            if allow_no_index {
+                return Ok(());
+            }
+            return Err(ManifestError::BadChunk(format!(
+                "{ctx}: NO_INDEX is not a valid string index"
+            )));
         }
         if (idx as usize) >= self.strings.len() {
             return Err(ManifestError::BadChunk(format!(
