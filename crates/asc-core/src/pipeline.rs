@@ -735,12 +735,22 @@ impl ListClassesJob {
 /// Options for [`run_listclasses`]. `threads` is unused for now (the
 /// pipeline walks DEXes sequentially to keep the surface small); kept
 /// for symmetry with the other pipelines and for future fan-out.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ListClassesOptions {
-    /// Reserved for future parallel enumeration. Currently ignored.
+    /// Reserved for future parallel enumeration. Currently ignored, but
+    /// must be non-zero (oracle rejects a zero worker count).
     pub threads: usize,
     /// Reserved for future instrumentation.
     pub debug: bool,
+}
+
+impl Default for ListClassesOptions {
+    fn default() -> Self {
+        Self {
+            threads: 8,
+            debug: false,
+        }
+    }
 }
 
 /// Output of [`run_listclasses`].
