@@ -40,6 +40,25 @@ impl<I> IndexMap<I> {
         }
     }
 
+    /// Builds a map from an explicit output order: entry `rank` is
+    /// `Some(old)` for a source index, `None` for a slot with no source
+    /// counterpart (a string synthesized by a patch).
+    pub(crate) fn from_order(order: impl Iterator<Item = Option<u32>>, old_count: u32) -> Self {
+        let mut inner: Vec<Option<u32>> = vec![None; old_count as usize];
+        let mut count = 0;
+        for (rank, old) in order.enumerate() {
+            if let Some(old) = old {
+                inner[old as usize] = Some(rank as u32);
+            }
+            count += 1;
+        }
+        Self {
+            inner,
+            count,
+            _kind: PhantomData,
+        }
+    }
+
     #[inline]
     pub(crate) fn len(&self) -> u32 {
         self.count

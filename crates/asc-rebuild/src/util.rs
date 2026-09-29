@@ -81,14 +81,6 @@ pub fn push_raw_string_data(out: &mut Vec<u8>, sref: &asc_dex::DexStringRef<'_>)
     out.push(0x00);
 }
 
-/// Byte length of the string_data record [`push_raw_string_data`] would
-/// write (uleb prefix + raw payload + NUL).
-pub fn raw_string_data_len(sref: &asc_dex::DexStringRef<'_>) -> usize {
-    let mut probe = Vec::with_capacity(5 + sref.mutf8.len());
-    let _ = write_uleb128_to(&mut probe, sref.utf16_len as u64, ULEB_GENERIC_MAX);
-    probe.len() + sref.mutf8.len() + 1
-}
-
 /// Pads `out` with zero bytes until its length is a multiple of 4.
 #[inline]
 pub fn align_to_4(out: &mut Vec<u8>) {

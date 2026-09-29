@@ -85,6 +85,11 @@ struct SharedFlags {
     /// Only honored by `findrefs`; other subcommands ignore.
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text, global = true)]
     format: OutputFormat,
+    /// Decode Paranoid/LSParanoid-obfuscated strings: `getclass` shows
+    /// literals, `findrefs string` also matches decoded values.
+    /// Ignored by other subcommands.
+    #[arg(long = "paranoid", default_value_t = false, global = true)]
+    paranoid: bool,
 }
 
 /// Per-subcommand shared args.
@@ -176,6 +181,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.output.as_deref(),
             shared.threads,
             shared.debug,
+            shared.paranoid,
         ),
         Cmd::Findrefs { apk, kind } => run_findrefs_cmd(
             apk,
@@ -183,6 +189,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.output.as_deref(),
             shared.threads,
             shared.debug,
+            shared.paranoid,
             shared.format,
         ),
         Cmd::Listclass { apk, prefix } => run_listclass_cmd(
@@ -201,10 +208,15 @@ fn run_getclass_cmd(
     output: Option<&std::path::Path>,
     threads: usize,
     debug: bool,
+    paranoid: bool,
 ) -> Result<(), CoreError> {
     let started = Instant::now();
     let target = asc_core::normalize_class_name(class).map_err(CoreError::Class)?;
-    let opts = GetClassOptions { threads, debug };
+    let opts = GetClassOptions {
+        threads,
+        debug,
+        paranoid,
+    };
     let job = GetClassJob::new(apk.to_path_buf(), target.clone());
     let result = run_getclass(&job, &opts)?;
     let source = format_getclass_text(&result.source);
@@ -234,11 +246,16 @@ fn run_findrefs_cmd(
     output: Option<&std::path::Path>,
     threads: usize,
     debug: bool,
+    paranoid: bool,
     format: OutputFormat,
 ) -> Result<(), CoreError> {
     let started = Instant::now();
     let query = build_query(kind)?;
-    let opts = FindRefsOptions { threads, debug };
+    let opts = FindRefsOptions {
+        threads,
+        debug,
+        paranoid,
+    };
     let job = FindRefsJob::new(apk.to_path_buf(), query);
     let report = run_findrefs(&job, &opts)?;
 

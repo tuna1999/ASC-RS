@@ -1,0 +1,10 @@
+[package]
+name = "asc-paranoid"
+description = "Paranoid / LSParanoid string deobfuscation for ASC-RS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+asc-dex.workspace = true
+asc-bytecode.workspace = true

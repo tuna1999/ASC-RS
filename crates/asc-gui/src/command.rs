@@ -79,6 +79,9 @@ pub enum Command {
     ToggleInspector,
     ToggleBottomPanel,
     ToggleTheme,
+    /// Decode Paranoid/LSParanoid strings in decompiled classes and
+    /// string searches; re-decompiles the active class.
+    ToggleParanoid,
 
     // --- tasks ---
     CancelTask,

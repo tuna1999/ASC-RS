@@ -49,7 +49,9 @@ asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
 ```
 
 Class names accept Dalvik descriptor (`Lcom/foo/Bar;`) **or** dotted Java form (`com.foo.Bar`).
-Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`) can appear before or after the APK positional. Exit codes: `0` success, `1` not-found / invalid input, `2` engine error. Each command also accepts `--help`.
+Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`, `--paranoid`) can appear before or after the APK positional. Exit codes: `0` success, `1` not-found / invalid input, `2` engine error. Each command also accepts `--help`.
+
+`--paranoid` decodes strings hidden by [Paranoid](https://github.com/MichaelRocks/paranoid)/LSParanoid (v0.3.0+): `getclass` shows the literals, `findrefs string` also matches decoded values. Only calls whose id is a `const-wide` in the same basic block are decoded; ids from parameters/fields stay as `getString(...)` calls. Off by default (the oracle has no such mode); in the GUI: View → *Decode Paranoid strings*.
 
 ## Development
 

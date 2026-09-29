@@ -109,6 +109,9 @@ pub struct AscApp {
     pub(crate) goto_line_input: Option<String>,
     /// Settings dialog visibility (JADX-GUI-009).
     pub(crate) show_settings: bool,
+    /// Decode Paranoid strings (`GetClassOptions::paranoid` /
+    /// `FindRefsOptions::paranoid`) for new decompiles and searches.
+    pub(crate) paranoid: bool,
     pub(crate) status: Option<StatusLine>,
     pub(crate) last_error: Option<String>,
     pub(crate) commands: Vec<Command>,
@@ -170,6 +173,7 @@ impl AscApp {
             last_clipboard: None,
             goto_line_input: None,
             show_settings: false,
+            paranoid: false,
             status: None,
             last_error: None,
             commands: Vec::new(),
@@ -365,6 +369,7 @@ impl AscApp {
         self.tasks.spawn_decompile(
             self.session.as_ref().expect("session").path(),
             descriptor,
+            self.paranoid,
             ctx,
         );
     }
@@ -599,7 +604,8 @@ impl AscApp {
                 {
                     let apk = session.path().to_path_buf();
                     let label = self.search.label();
-                    self.tasks.spawn_findrefs(&apk, query, label, ctx);
+                    self.tasks
+                        .spawn_findrefs(&apk, query, label, self.paranoid, ctx);
                     // Record this query for the history dropdown
                     // (JADX-GUI-013 / ASC-GUI-036). GlobalSearch only
                     // focuses the input; it never submits a query.
@@ -720,6 +726,20 @@ impl AscApp {
                 };
                 design::set_theme(next);
                 design::apply(ctx);
+            }
+            Command::ToggleParanoid => {
+                self.paranoid = !self.paranoid;
+                // Cached/in-flight sources were built in the other mode.
+                self.tasks.cancel_kind(TaskKind::DecompileClass);
+                self.documents.clear();
+                self.active_doc = None;
+                if self.session.is_some()
+                    && let Some(d) = self.tabs.active_descriptor().map(str::to_string)
+                {
+                    self.spawn_decompile(&d, ctx);
+                }
+                let state = if self.paranoid { "on" } else { "off" };
+                self.set_status(format!("Paranoid string decoding {state}"), true);
             }
             Command::QuickSwitch { n } => {
                 // Ctrl+1..9 jumps to the n-th tab. The tab list is

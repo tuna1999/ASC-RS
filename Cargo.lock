@@ -344,6 +344,7 @@ dependencies = [
  "asc-bytecode",
  "asc-decompile",
  "asc-dex",
+ "asc-paranoid",
  "asc-query",
  "asc-rebuild",
  "droidsaw-dex",
@@ -397,6 +398,14 @@ dependencies = [
  "asc-apk",
  "crc32fast",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "asc-paranoid"
+version = "0.2.0"
+dependencies = [
+ "asc-bytecode",
+ "asc-dex",
 ]
 
 [[package]]

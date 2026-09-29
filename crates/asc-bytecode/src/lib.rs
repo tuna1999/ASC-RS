@@ -92,4 +92,4 @@ pub use crate::dex_ids::{
 };
 pub use crate::error::BytecodeError;
 pub use crate::opcode::{Format, OPCODE_TABLE, OpcodeInfo, RefKind, RefSlot, opcode_info};
-pub use crate::walker::{DexRef, RefInstruction, RefWalker, walk_verify};
+pub use crate::walker::{DexRef, RefInstruction, RefWalker, insn_width, walk_verify};

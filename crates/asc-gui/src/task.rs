@@ -246,11 +246,13 @@ impl TaskManager {
         id
     }
 
-    /// Spawn a `run_getclass` task for `descriptor`.
+    /// Spawn a `run_getclass` task for `descriptor` (`paranoid`: decode
+    /// Paranoid strings to literals).
     pub fn spawn_decompile(
         &mut self,
         apk: &Path,
         descriptor: impl Into<String>,
+        paranoid: bool,
         ctx: &egui::Context,
     ) -> TaskId {
         let descriptor = descriptor.into();
@@ -263,7 +265,7 @@ impl TaskManager {
         self.submit(
             TaskKind::DecompileClass,
             descriptor,
-            move || run_getclass_job(&apk, &target),
+            move || run_getclass_job(&apk, &target, paranoid),
             ctx,
         )
     }
@@ -295,6 +297,7 @@ impl TaskManager {
         apk: &Path,
         query: Query,
         label: impl Into<String>,
+        paranoid: bool,
         ctx: &egui::Context,
     ) -> TaskId {
         for t in &mut self.in_flight {
@@ -306,7 +309,7 @@ impl TaskManager {
         self.submit(
             TaskKind::FindRefs,
             label,
-            move || run_findrefs_job(&apk, &query),
+            move || run_findrefs_job(&apk, &query, paranoid),
             ctx,
         )
     }
@@ -331,7 +334,7 @@ impl TaskManager {
         self.submit(
             TaskKind::FindRefsClass,
             label,
-            move || run_findrefs_job(&apk, &query),
+            move || run_findrefs_job(&apk, &query, false),
             ctx,
         )
     }
@@ -447,15 +450,16 @@ impl TaskManager {
 /// Run one getclass engine job (worker-thread body): decompile, then
 /// build the document (tokenize + outline) here so the UI thread
 /// never pays for it.
-fn run_getclass_job(apk: &Path, descriptor: &str) -> TaskOutcome {
+fn run_getclass_job(apk: &Path, descriptor: &str, paranoid: bool) -> TaskOutcome {
     let normalized = match asc_core::normalize_class_name(descriptor) {
         Ok(t) => t,
         Err(e) => return TaskOutcome::Failed(e.to_string()),
     };
-    match asc_core::run_getclass(
-        &GetClassJob::new(apk, normalized),
-        &GetClassOptions::default(),
-    ) {
+    let opts = GetClassOptions {
+        paranoid,
+        ..GetClassOptions::default()
+    };
+    match asc_core::run_getclass(&GetClassJob::new(apk, normalized), &opts) {
         Ok(r) => TaskOutcome::Decompiled(std::sync::Arc::new(
             crate::state::documents::Document::new(descriptor.to_string(), r.dex_name, r.source),
         )),
@@ -502,11 +506,12 @@ fn per_dex_counts(
 }
 
 /// Run one findrefs engine job (worker-thread body).
-fn run_findrefs_job(apk: &Path, query: &Query) -> TaskOutcome {
-    match asc_core::run_findrefs(
-        &FindRefsJob::new(apk, query.clone()),
-        &FindRefsOptions::default(),
-    ) {
+fn run_findrefs_job(apk: &Path, query: &Query, paranoid: bool) -> TaskOutcome {
+    let opts = FindRefsOptions {
+        paranoid,
+        ..FindRefsOptions::default()
+    };
+    match asc_core::run_findrefs(&FindRefsJob::new(apk, query.clone()), &opts) {
         Ok(report) => TaskOutcome::Search(report),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
@@ -590,7 +595,7 @@ mod tests {
         let mut mgr = TaskManager::new();
         let ctx = ctx();
         let apk = std::path::Path::new("nonexistent_fixture_for_test.apk");
-        let id = mgr.spawn_findrefs(apk, Query::string("hello"), "string \"hello\"", &ctx);
+        let id = mgr.spawn_findrefs(apk, Query::string("hello"), "string \"hello\"", false, &ctx);
         // id.0 is a u64 counter; the first task gets 0 (and is
         // bumped to 1 on next submit). Just assert it is set.
         let _ = id.0;
@@ -617,8 +622,8 @@ mod tests {
         let mut mgr = TaskManager::new();
         let ctx = ctx();
         let apk = std::path::Path::new("nonexistent_fixture_for_test.apk");
-        let _ = mgr.spawn_findrefs(apk, Query::string("a"), "A", &ctx);
-        let _ = mgr.spawn_findrefs(apk, Query::string("b"), "B", &ctx);
+        let _ = mgr.spawn_findrefs(apk, Query::string("a"), "A", false, &ctx);
+        let _ = mgr.spawn_findrefs(apk, Query::string("b"), "B", false, &ctx);
         assert!(mgr.findrefs_running());
         mgr.cancel_kind(TaskKind::FindRefs);
         // Cancellation only flips the discarded flag; the in_flight
@@ -717,7 +722,13 @@ mod tests {
         );
         assert!(mgr.findrefs_running());
         // Starting B supersedes A.
-        let _b = mgr.spawn_findrefs(Path::new("nonexistent.apk"), Query::string("b"), "B", &ctx);
+        let _b = mgr.spawn_findrefs(
+            Path::new("nonexistent.apk"),
+            Query::string("b"),
+            "B",
+            false,
+            &ctx,
+        );
         assert_eq!(mgr.in_flight_count(), 2);
         // A lands late; B (a real engine job on a nonexistent APK)
         // fails fast and also lands. Drain everything.
@@ -744,10 +755,10 @@ mod tests {
         let mut mgr = TaskManager::new();
         let ctx = ctx();
         let apk = Path::new("x.apk");
-        let a = mgr.spawn_decompile(apk, "La;", &ctx);
-        let b = mgr.spawn_decompile(apk, "La;", &ctx);
+        let a = mgr.spawn_decompile(apk, "La;", false, &ctx);
+        let b = mgr.spawn_decompile(apk, "La;", false, &ctx);
         assert_eq!(a, b, "same descriptor dedups to the in-flight task");
-        let c = mgr.spawn_decompile(apk, "Lb;", &ctx);
+        let c = mgr.spawn_decompile(apk, "Lb;", false, &ctx);
         assert_ne!(a, c);
         assert_eq!(mgr.in_flight_count(), 2);
     }

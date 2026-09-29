@@ -11,6 +11,7 @@ asc-apk.workspace = true
 asc-dex.workspace = true
 asc-bytecode.workspace = true
 asc-query.workspace = true
+asc-paranoid.workspace = true
 asc-rebuild.workspace = true
 asc-decompile.workspace = true
 smallvec.workspace = true

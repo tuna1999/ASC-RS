@@ -252,6 +252,7 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
         ("Toggle Explorer (Ctrl+1)", Command::ToggleExplorer),
         ("Toggle Inspector (Ctrl+2)", Command::ToggleInspector),
         ("Toggle bottom panel (Ctrl+3)", Command::ToggleBottomPanel),
+        ("Toggle Paranoid string decoding", Command::ToggleParanoid),
         ("Cancel running task (Esc)", Command::CancelTask),
     ]
 }

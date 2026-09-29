@@ -172,6 +172,64 @@ pub fn decode_lossy<'a>(bytes: &'a [u8], utf16_len_hint: u32) -> Cow<'a, str> {
     }
 }
 
+/// Decodes MUTF-8 into raw UTF-16 code units, keeping unpaired
+/// surrogates and U+0000 intact (what the JVM `String` sees). Malformed
+/// bytes become U+FFFD.
+pub fn to_utf16(bytes: &[u8]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let cont = |i: usize| {
+        bytes
+            .get(i)
+            .filter(|&&b| b & 0xC0 == 0x80)
+            .map(|&b| (b & 0x3F) as u16)
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0 {
+            break;
+        }
+        if b < 0x80 {
+            out.push(b as u16);
+            i += 1;
+        } else if b & 0xE0 == 0xC0
+            && let Some(c1) = cont(i + 1)
+        {
+            out.push(((b & 0x1F) as u16) << 6 | c1);
+            i += 2;
+        } else if b & 0xF0 == 0xE0
+            && let (Some(c1), Some(c2)) = (cont(i + 1), cont(i + 2))
+        {
+            out.push(((b & 0x0F) as u16) << 12 | c1 << 6 | c2);
+            i += 3;
+        } else {
+            out.push(0xFFFD);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Encodes UTF-16 code units as MUTF-8 (no terminator): U+0000 → `C0 80`,
+/// every other unit (surrogates included) as its own 1–3 byte sequence.
+pub fn from_utf16(units: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(units.len());
+    for &u in units {
+        match u {
+            0x0001..=0x007F => out.push(u as u8),
+            0x0000 | 0x0080..=0x07FF => {
+                out.extend_from_slice(&[0xC0 | (u >> 6) as u8, 0x80 | (u & 0x3F) as u8])
+            }
+            _ => out.extend_from_slice(&[
+                0xE0 | (u >> 12) as u8,
+                0x80 | ((u >> 6) & 0x3F) as u8,
+                0x80 | (u & 0x3F) as u8,
+            ]),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +289,14 @@ mod tests {
         // ED A0 BD — high surrogate with no matching low surrogate: invalid.
         let s = decode_lossy(&[0xED, 0xA0, 0xBD], 1);
         assert_eq!(s.as_ref(), "\u{FFFD}");
+    }
+
+    #[test]
+    fn utf16_round_trip_keeps_nul_and_lone_surrogates() {
+        let units = [0x0000, 0x0041, 0x00E9, 0xD83D, 0x20AC, 0xDE00, 0xFFFF];
+        let enc = from_utf16(&units);
+        assert_eq!(&enc[..2], &[0xC0, 0x80]);
+        assert!(!enc.contains(&0));
+        assert_eq!(to_utf16(&enc), units);
     }
 }

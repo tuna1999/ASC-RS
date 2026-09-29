@@ -321,6 +321,14 @@ impl DocumentCache {
         self.order.retain(|d| d != descriptor);
     }
 
+    /// Drop every document (decompile mode changed). Keeps the
+    /// eviction counter.
+    pub fn clear(&mut self) {
+        self.docs.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
     /// Enforce the soft budget: evict least-recently-used documents
     /// (never `keep`, the active document, and never the last
     /// remaining document) until under budget or nothing evictable

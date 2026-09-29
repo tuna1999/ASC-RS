@@ -250,6 +250,40 @@ pub fn walk_verify(insns: &[u8], insns_units: u32) -> Result<(), BytecodeError> 
     Ok(())
 }
 
+/// Width in code units of the instruction (or payload pseudo-instruction)
+/// starting at `offset`, validated against `insns_units`. `insns` must
+/// hold at least `insns_units * 2` bytes.
+pub fn insn_width(insns: &[u8], offset: u32, insns_units: u32) -> Result<u32, BytecodeError> {
+    let byte_off = offset as usize * 2;
+    let first = insns
+        .get(byte_off..byte_off + 2)
+        .filter(|_| offset < insns_units)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
+        .ok_or(BytecodeError::TruncatedInstruction {
+            offset,
+            needed: 1,
+            available: 0,
+        })?;
+    if let Some(kind) = PayloadKind::from_first_unit(first) {
+        return payload_extent(insns, offset, insns_units, kind);
+    }
+    let opcode = (first & 0xFF) as u8;
+    let info = opcode_info(opcode);
+    if info.is_unknown {
+        return Err(BytecodeError::UnknownOpcode { offset, opcode });
+    }
+    let width = info.width_units as u32;
+    let available = insns_units - offset;
+    if width > available {
+        return Err(BytecodeError::TruncatedInstruction {
+            offset,
+            needed: width,
+            available,
+        });
+    }
+    Ok(width)
+}
+
 // `RefSlot` and `RefKind` are re-exported by the crate root so callers
 // can `use asc_bytecode::{RefSlot, RefKind}` without reaching into
 // `opcode` directly. Both are used by `asc-rebuild` to know where to

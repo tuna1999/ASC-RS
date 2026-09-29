@@ -141,6 +141,10 @@ pub struct FindRefsOptions {
     pub threads: usize,
     /// Emit per-stage timing information to stderr.
     pub debug: bool,
+    /// `string` queries also match Paranoid-obfuscated literals (the
+    /// decoded value is reported in `matched`). Off by default: the
+    /// oracle has no such mode.
+    pub paranoid: bool,
 }
 
 /// One getclass run.
@@ -169,6 +173,9 @@ pub struct GetClassOptions {
     pub threads: usize,
     /// Emit per-stage timing information to stderr.
     pub debug: bool,
+    /// Replace resolvable Paranoid `getString(id)` calls in the target
+    /// class with the decoded literal before decompiling.
+    pub paranoid: bool,
 }
 
 impl Default for GetClassOptions {
@@ -176,6 +183,7 @@ impl Default for GetClassOptions {
         Self {
             threads: 8,
             debug: false,
+            paranoid: false,
         }
     }
 }
@@ -197,9 +205,16 @@ pub struct GetClassResult {
 /// Open the APK once, iterate `classes*.dex` in central-directory
 /// offset order, expand each entry (handling DEX-041 containers),
 /// run `find_refs` per view, and aggregate into a [`SearchReport`].
-pub fn run_findrefs(job: &FindRefsJob, _opts: &FindRefsOptions) -> Result<SearchReport, CoreError> {
+pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchReport, CoreError> {
     let apk = Apk::open(&job.apk)?;
     let entries = apk.dex_entries();
+    let deobs = match &job.query {
+        Query::String { pattern } if opts.paranoid => {
+            Some((crate::paranoid::collect(&apk), pattern.as_str()))
+        }
+        _ => None,
+    };
+    let paranoid = deobs.as_ref().map(|(d, p)| (d.as_slice(), *p));
     let mut report = SearchReport::empty();
     for entry in entries {
         // `into_owned` is implicit: we always copy to a `Vec<u8>` so
@@ -215,14 +230,23 @@ pub fn run_findrefs(job: &FindRefsJob, _opts: &FindRefsOptions) -> Result<Search
                 continue;
             }
         };
-        scan_entry_bytes(&entry.name, &bytes, &job.query, &mut report);
+        scan_entry_bytes(&entry.name, &bytes, &job.query, paranoid, &mut report);
     }
     Ok(report)
 }
 
+/// Deobfuscator tables plus the string pattern for a `--paranoid` scan.
+type Paranoid<'a> = Option<(&'a [asc_paranoid::Deobfuscator], &'a str)>;
+
 /// Scan one entry's bytes: detect a DEX-041 container or a single
 /// DEX, run `find_refs` per logical view, aggregate into `report`.
-fn scan_entry_bytes(entry_name: &str, bytes: &[u8], query: &Query, report: &mut SearchReport) {
+fn scan_entry_bytes(
+    entry_name: &str,
+    bytes: &[u8],
+    query: &Query,
+    paranoid: Paranoid<'_>,
+    report: &mut SearchReport,
+) {
     if bytes.len() < 8 {
         report.errors.push(SearchError::from_parse(
             entry_name,
@@ -258,7 +282,7 @@ fn scan_entry_bytes(entry_name: &str, bytes: &[u8], query: &Query, report: &mut 
                     continue;
                 }
             };
-            run_engine_for_view(&name, &view, query, report);
+            run_engine_for_view(&name, &view, query, paranoid, report);
         }
     } else if magic.starts_with(b"dex\n") {
         // Single DEX entry.
@@ -274,7 +298,7 @@ fn scan_entry_bytes(entry_name: &str, bytes: &[u8], query: &Query, report: &mut 
                 return;
             }
         };
-        run_engine_for_view(entry_name, &view, query, report);
+        run_engine_for_view(entry_name, &view, query, paranoid, report);
     } else {
         // Not a DEX; skip silently (the oracle's `_inflate_and_hit`
         // also rejects non-`dex\n0..\0` magic). We do not record this
@@ -289,13 +313,17 @@ fn run_engine_for_view(
     dex_name: &str,
     view: &DexView<'_>,
     query: &Query,
+    paranoid: Paranoid<'_>,
     report: &mut SearchReport,
 ) {
     let engine_report = engine_find_refs(view, query);
     if !engine_report.errors.is_empty() {
         report.complete = false;
     }
-    let rendered = render_hits(view, &engine_report.hits);
+    let decoded = paranoid
+        .map(|(deobs, pattern)| crate::paranoid::decoded_hits(view, deobs, pattern))
+        .unwrap_or_default();
+    let rendered = render_hits(view, &engine_report.hits, &decoded);
     let engine_errors: Vec<SearchError> = engine_report
         .errors
         .iter()
@@ -309,26 +337,38 @@ fn run_engine_for_view(
     });
 }
 
-/// Render raw [`RefHit`]s into owned [`RenderedMatch`]es.
+/// Render raw [`RefHit`]s (plus `--paranoid` decoded-string hits as
+/// `(caller, offset, value)`) into owned [`RenderedMatch`]es.
 ///
 /// Group by caller method id, de-duplicate and sort matched refs,
 /// render each caller / matched pair into strings while the borrowed
 /// `view` is alive. Also resolves the smallest matched code-unit
 /// offset to a 1-indexed source line via `debug_info` (None when the
 /// method has no debug stream).
-fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
-    if hits.is_empty() {
+fn render_hits(
+    view: &DexView<'_>,
+    hits: &[RefHit],
+    decoded: &[(u32, u32, String)],
+) -> Vec<RenderedMatch> {
+    if hits.is_empty() && decoded.is_empty() {
         return Vec::new();
     }
-    // caller -> (sorted, dedup'd matched refs) + minimum code_off.
-    let mut by_caller: BTreeMap<u32, (Vec<DexRef>, Option<u32>)> = BTreeMap::new();
+    // caller -> (matched refs, decoded strings, minimum code_off).
+    type Caller<'d> = (Vec<DexRef>, Vec<&'d str>, Option<u32>);
+    let mut by_caller: BTreeMap<u32, Caller<'_>> = BTreeMap::new();
+    let offsets = hits
+        .iter()
+        .map(|h| (h.method.0, h.offset))
+        .chain(decoded.iter().map(|(m, off, _)| (*m, *off)));
+    for (method, offset) in offsets {
+        let entry = by_caller.entry(method).or_default();
+        entry.2 = Some(entry.2.map_or(offset, |prev| prev.min(offset)));
+    }
     for h in hits {
-        let entry = by_caller.entry(h.method.0).or_default();
-        entry.0.push(h.dex_ref);
-        entry.1 = Some(match entry.1 {
-            Some(prev) => prev.min(h.offset),
-            None => h.offset,
-        });
+        by_caller.entry(h.method.0).or_default().0.push(h.dex_ref);
+    }
+    for (m, _, value) in decoded {
+        by_caller.entry(*m).or_default().1.push(value);
     }
     let mut out: Vec<RenderedMatch> = Vec::with_capacity(by_caller.len());
     // `resolve_first_line` needs each caller's source-side `code_off`.
@@ -343,7 +383,7 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
     // (e.g. 1 hit on workload.apk: 43.6 ms scanned vs 46.4 ms indexed).
     let indexed: Option<HashMap<u32, u32>> =
         (by_caller.len() > LINEAR_SCAN_CALLER_LIMIT).then(|| source_code_off_index(view));
-    for (mid, (matched, min_code_off)) in &by_caller {
+    for (mid, (matched, decoded, min_code_off)) in &by_caller {
         let Some(caller_str) = render_caller(view, mid) else {
             continue;
         };
@@ -367,10 +407,14 @@ fn render_hits(view: &DexView<'_>, hits: &[RefHit]) -> Vec<RenderedMatch> {
             DexRef::MethodHandle(i) => (6, i.0),
         });
         sorted.dedup();
-        let matched_strs: Vec<String> = sorted
+        let mut matched_strs: Vec<String> = sorted
             .iter()
             .filter_map(|r| render_dex_ref(view, r))
             .collect();
+        let mut decoded = decoded.clone();
+        decoded.sort_unstable();
+        decoded.dedup();
+        matched_strs.extend(decoded.iter().map(|s| s.to_string()));
         // Resolve the smallest matched offset to a 1-indexed source
         // line. None when the body has no debug_info_item; we do not
         // fail the match on malformed debug streams — we just skip
@@ -547,7 +591,7 @@ pub fn run_getclass(
         let entry = &entries[0];
         let bytes = apk.read_entry(entry)?.as_slice().to_vec();
         if let Some(hit) = scan_one_for_class(&entry.name, &bytes, &target)? {
-            return decompile_winner(hit, &target, opts.debug);
+            return decompile_winner(hit, &target, opts, &apk);
         }
         return Err(CoreError::ClassNotFound(target));
     }
@@ -608,7 +652,7 @@ pub fn run_getclass(
             );
         }
     };
-    decompile_winner(winner, &target, opts.debug)
+    decompile_winner(winner, &target, opts, &apk)
 }
 
 /// A class-defining DEX found by `getclass`: the display name, the entry
@@ -662,18 +706,31 @@ fn scan_one_for_class(
 }
 
 /// Rebuild the winning DEX into a minimal standalone and decompile
-/// `target`.
+/// `target`. With `opts.paranoid`, Paranoid call sites in the class are
+/// patched to literals using deobfuscators from any DEX of `apk`.
 ///
-/// When `debug` is true, per-phase microsecond timings are written to
+/// When `opts.debug` is true, per-phase microsecond timings are written to
 /// stderr as `[DEBUG] phase=X us=Y` lines so callers can see how the
 /// wall time decomposes across (1) DexView parse for the rebuild,
 /// (2) asc-rebuild closure/remap/rewrite/layout, and (3) droidsaw-dex
 /// parse + census + emit.
-fn decompile_winner(hit: ClassHit, target: &str, debug: bool) -> Result<GetClassResult, CoreError> {
+fn decompile_winner(
+    hit: ClassHit,
+    target: &str,
+    opts: &GetClassOptions,
+    apk: &Apk,
+) -> Result<GetClassResult, CoreError> {
+    let debug = opts.debug;
     let started = std::time::Instant::now();
     let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
     let parse_us = started.elapsed().as_micros();
-    let rebuilt = asc_rebuild::rebuild(&view, target).map_err(CoreError::Rebuild)?;
+    let patches = if opts.paranoid {
+        crate::paranoid::class_patches(&view, target, &crate::paranoid::collect(apk))
+    } else {
+        Vec::new()
+    };
+    let rebuilt =
+        asc_rebuild::rebuild_patched(&view, target, &patches).map_err(CoreError::Rebuild)?;
     let rebuild_us = started.elapsed().as_micros() - parse_us;
     let backend = asc_decompile::droidsaw::DroidsawBackend::new();
     let source = backend

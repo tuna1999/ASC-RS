@@ -25,13 +25,14 @@
 
 use crate::closure::{Closure, MethodIter};
 use crate::error::RebuildError;
+use crate::patch::{Plan, Slot, push_new_string_data};
 use crate::remap::PoolMaps;
 use crate::rewrite::{
     rewrite_annotation_item, rewrite_annotation_set, rewrite_annotation_set_ref_list,
     rewrite_annotations_directory, rewrite_bytecode, rewrite_catch_handler_list,
     rewrite_class_data, rewrite_debug_info, rewrite_static_values,
 };
-use crate::util::{align_to_4, push_raw_string_data, raw_string_data_len};
+use crate::util::{align_to_4, push_raw_string_data};
 
 use asc_dex::{ClassDef, DexHeader, DexView, StringIdx, TypeIdx};
 
@@ -189,6 +190,7 @@ pub(crate) fn emit(
     view: &DexView<'_>,
     closure: &Closure,
     maps: &PoolMaps,
+    plan: &Plan,
 ) -> Result<LayoutOut, RebuildError> {
     let mut lo = LayoutOut::default();
     let mut out = Vec::with_capacity(1024 * 1024);
@@ -212,12 +214,18 @@ pub(crate) fn emit(
     // ---------- string_data region ----------
     align_to_4(&mut out);
     lo.string_data_off = out.len() as u32;
-    for &old_idx in &closure.strings {
-        let sref = view.string(StringIdx(old_idx))?;
-        push_raw_string_data(&mut out, &sref);
+    let mut per_string_off: Vec<u32> = Vec::with_capacity(plan.order.len());
+    for slot in &plan.order {
+        per_string_off.push(out.len() as u32);
+        match slot {
+            Slot::Old(old_idx) => {
+                push_raw_string_data(&mut out, &view.string(StringIdx(*old_idx))?)
+            }
+            Slot::New(units) => push_new_string_data(&mut out, units),
+        }
     }
     lo.string_data_size = (out.len() as u32) - lo.string_data_off;
-    lo.string_data_count = closure.strings.len() as u32;
+    lo.string_data_count = plan.order.len() as u32;
 
     // ---------- type_list (interfaces) ----------
     let mut proto_params_off: Vec<u32> = vec![0; maps.protos.len() as usize];
@@ -564,6 +572,7 @@ pub(crate) fn emit(
                 {
                     let insns = &mut code_bytes[16..16 + insns_byte_len];
                     rewrite_bytecode(insns, insns_size, maps)?;
+                    plan.apply(src_code_off, insns)?;
                 }
 
                 let new_dbg_off = dbg_off_per_method.get(new_method_idx).copied().unwrap_or(0);
@@ -639,13 +648,6 @@ pub(crate) fn emit(
     // string_ids (each entry = offset of the corresponding string_data record).
     align_to_4(&mut out);
     lo.string_ids_off = out.len() as u32;
-    let mut cur_off = lo.string_data_off;
-    let mut per_string_off: Vec<u32> = Vec::with_capacity(maps.strings.len() as usize);
-    for &old_idx in &closure.strings {
-        per_string_off.push(cur_off);
-        let sref = view.string(StringIdx(old_idx))?;
-        cur_off += raw_string_data_len(&sref) as u32;
-    }
     for &off in &per_string_off {
         out.extend_from_slice(&off.to_le_bytes());
     }

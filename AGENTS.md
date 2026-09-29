@@ -17,7 +17,8 @@ Strict layered DAG; `asc-core` is the only fan-in node. CLI and GUI depend on `a
 L0 asc-dex        zero-copy DEX 035..041 reader (only dep: thiserror)
 L1 asc-apk        mmap ZIP + bounded inflate      asc-bytecode  opcode table + RefWalker
 L2 asc-manifest   binary AXML                     asc-query     locators, find_refs, CodeOwners
-   asc-rebuild    closure + remap + rewrite + layout (minimal DEX)
+   asc-rebuild    closure + remap + rewrite + layout (minimal DEX) + StringPatch
+   asc-paranoid   Paranoid/LSParanoid detect + decode (opt-in `--paranoid`)
 L3 asc-decompile  ClassDecompiler trait + DroidsawBackend (no internal deps: the firewall)
 L4 asc-core       run_findrefs / run_getclass / WorkerPool / text+json emitters
 L5 asc-cli (bin asc-rs, single main.rs)   asc-gui (bin asc-gui)
@@ -35,7 +36,7 @@ L5 asc-cli (bin asc-rs, single main.rs)   asc-gui (bin asc-gui)
 
 | Path | Purpose |
 |---|---|
-| `crates/asc-{dex,bytecode,apk,manifest,query,rebuild,decompile,core}/` | Engine layers (see DAG) |
+| `crates/asc-{dex,bytecode,apk,manifest,query,rebuild,paranoid,decompile,core}/` | Engine layers (see DAG) |
 | `crates/asc-cli/` | `asc-rs` clap binary |
 | `crates/asc-gui/src/` | `app.rs` (shell + dispatch), `app/render.rs` (`eframe::App` impl), `app/tests.rs`, `command.rs`, `task.rs`, `session.rs`, `selfcheck.rs`, `state/` (documents, tabs, navigation, search), `ui/` |
 | `tests/` | `differential/` runner, `fixtures/golden/` + `capture_golden.py`, `compatibility/parity_matrix.md`, `gui_features/` manifest |

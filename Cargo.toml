@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/asc-dex",
     "crates/asc-bytecode",
+    "crates/asc-paranoid",
     "crates/asc-apk",
     "crates/asc-query",
     "crates/asc-rebuild",
@@ -23,6 +24,7 @@ rust-version = "1.93"
 # internal crates
 asc-dex = { path = "crates/asc-dex" }
 asc-bytecode = { path = "crates/asc-bytecode" }
+asc-paranoid = { path = "crates/asc-paranoid" }
 asc-apk = { path = "crates/asc-apk" }
 asc-query = { path = "crates/asc-query" }
 asc-rebuild = { path = "crates/asc-rebuild" }

@@ -135,6 +135,16 @@ impl eframe::App for AscApp {
                     ui.toggle_value(&mut self.show_inspector, "Inspector  (Ctrl+2)");
                     ui.toggle_value(&mut self.show_bottom, "Bottom panel  (Ctrl+3)");
                     ui.separator();
+                    let mut paranoid = self.paranoid;
+                    if ui
+                        .toggle_value(&mut paranoid, "Decode Paranoid strings")
+                        .on_hover_text("Show Paranoid/LSParanoid-obfuscated literals in decompiled code and match them in string searches")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ToggleParanoid);
+                    }
+                    ui.separator();
                     let next = if design::theme() == design::Theme::Dark {
                         "light"
                     } else {

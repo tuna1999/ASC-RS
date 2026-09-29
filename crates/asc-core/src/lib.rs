@@ -39,6 +39,7 @@
 
 pub mod class_name;
 pub mod format;
+mod paranoid;
 pub mod pipeline;
 pub mod report;
 pub mod worker;
