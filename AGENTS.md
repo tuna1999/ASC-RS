@@ -106,6 +106,7 @@ Fuzz (from `fuzz/`): `cargo run --release --bin fuzz-runner -- --list`; `./run.s
 - **Release ZIP** packs only git-tracked `Cargo.toml, Cargo.lock, README.md, .gitignore, crates, tests, benches, fuzz, docs, seeds`; not `reference/`, `scripts/`, `AGENTS.md`. Deterministic (fixed 1980 timestamp, DEFLATED, mode 0o100644).
 - GUI is eframe/egui (glow). The agent is headless: GUI changes end with a hand-visual repro handed to the user.
 - **Skills stay in sync with features.** Any change that adds or alters user-visible behavior (new CLI subcommand/flag, output format, exit code, new tolerance/limitation, GUI capability) MUST update the matching skill in the same change — `skills/apk-analysis/SKILL.md` for `asc-rs` CLI behavior. Update the command list, "Choosing the command" table, Output notes, and Pitfalls as applicable; document only verified behavior. A feature is not done until its skill reflects it.
+- **Versioning:** the agent decides version bumps autonomously when a change adds meaningful user-visible value (new subcommand/flag, GUI capability, notable perf/robustness gain). Bump the `version` in the root `Cargo.toml` (workspace `[workspace.package]`) in the same change: patch for fixes/refactors, minor for new features, major for breaking CLI/output changes. Pure internal refactors and docs do not bump. No release tag is created unless the user asks.
 
 ## Testing & QA
 

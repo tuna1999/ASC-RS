@@ -307,7 +307,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "asc-apk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "asc-bytecode"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-dex",
  "thiserror 2.0.20",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "asc-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-core",
  "asc-manifest",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "asc-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-apk",
  "asc-bytecode",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "asc-decompile"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crc32fast",
  "criterion",
@@ -368,14 +368,14 @@ dependencies = [
 
 [[package]]
 name = "asc-dex"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "asc-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-apk",
  "asc-core",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "asc-manifest"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-apk",
  "crc32fast",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "asc-paranoid"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-bytecode",
  "asc-dex",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "asc-query"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asc-bytecode",
  "asc-dex",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "asc-rebuild"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "adler2",
  "asc-bytecode",
