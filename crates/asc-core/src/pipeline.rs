@@ -869,7 +869,10 @@ mod tests {
 
     #[test]
     fn dex_view_round_trips_after_parse() {
-        let path = Path::new("corpus/apk/workload.apk");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/apk/workload.apk"
+        ));
         let Ok(apk) = Apk::open(path) else { return };
         let entries = apk.dex_entries();
         if entries.is_empty() {
@@ -929,7 +932,10 @@ mod tests {
         // with `L` and end with `;`, and the full enumeration must be
         // non-empty and stable across repeated runs. Skips when the
         // corpus APK is unavailable (CI without checked-in fixtures).
-        let path = Path::new("corpus/apk/workload.apk");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/apk/workload.apk"
+        ));
         if !path.exists() {
             return;
         }
@@ -952,7 +958,10 @@ mod tests {
 
     #[test]
     fn run_listclasses_prefix_filter_keeps_matches_only() {
-        let path = Path::new("corpus/apk/workload.apk");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/apk/workload.apk"
+        ));
         if !path.exists() {
             return;
         }
@@ -970,7 +979,10 @@ mod tests {
 
     #[test]
     fn run_listclasses_rejects_empty_prefix() {
-        let path = Path::new("corpus/apk/workload.apk");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/apk/workload.apk"
+        ));
         if !path.exists() {
             return;
         }
@@ -981,7 +993,10 @@ mod tests {
     #[test]
     fn run_listclasses_rejects_zero_threads() {
         // Mirrors oracle's `apk_handler.list_classes:418` rejection.
-        let path = Path::new("corpus/apk/workload.apk");
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/apk/workload.apk"
+        ));
         if !path.exists() {
             return;
         }

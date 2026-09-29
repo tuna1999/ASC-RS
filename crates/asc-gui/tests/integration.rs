@@ -9,7 +9,9 @@ use std::path::Path;
 
 #[test]
 fn selfcheck_on_workload_apk() {
-    let apk = Path::new("corpus").join("apk").join("workload.apk");
+    let apk = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/apk")
+        .join("workload.apk");
     if !apk.exists() {
         eprintln!("corpus fixture missing; skipping");
         return;
@@ -49,7 +51,9 @@ fn selfcheck_on_workload_apk() {
 
 #[test]
 fn open_session_then_list_classes() {
-    let apk = Path::new("corpus").join("apk").join("workload.apk");
+    let apk = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/apk")
+        .join("workload.apk");
     if !apk.exists() {
         eprintln!("corpus fixture missing; skipping");
         return;
@@ -72,7 +76,9 @@ fn open_session_then_list_classes() {
 #[test]
 fn findrefs_history_caps_at_max() {
     use asc_gui::{FindRefsHistoryEntry, MAX_FINDREFS_HISTORY, WorkspaceSession};
-    let apk = Path::new("corpus").join("apk").join("workload.apk");
+    let apk = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/apk")
+        .join("workload.apk");
     if !apk.exists() {
         eprintln!("corpus fixture missing; skipping");
         return;

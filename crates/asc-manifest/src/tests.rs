@@ -12,7 +12,9 @@
 use super::*;
 
 fn corpus(name: &str) -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new("corpus").join("apk").join(name);
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/apk")
+        .join(name);
     p.exists().then_some(p)
 }
 
