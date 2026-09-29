@@ -80,17 +80,12 @@ pub fn normalize_class_name(input: &str) -> Result<String, DecompileError> {
             "Class name cannot be empty".into(),
         ));
     }
-    if s.starts_with('L') && s.ends_with(';') {
+    if s.starts_with('L') && s.ends_with(';') && s.contains('/') {
         return Ok(s.to_owned());
     }
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('L');
-    for ch in s.chars() {
-        if ch == '.' {
-            out.push('/');
-        } else {
-            out.push(ch);
-        }
+    let mut out = s.replace('.', "/");
+    if !out.starts_with('L') {
+        out.insert(0, 'L');
     }
     if !out.ends_with(';') {
         out.push(';');
