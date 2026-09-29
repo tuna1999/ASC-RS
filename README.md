@@ -71,3 +71,17 @@ python scripts/build_release.py v0.2.0 --output dist   # byte-reproducible sourc
 python benches/perf_compare.py --selftest              # paired sign-test + Bonferroni + 3% floor gate (synthetic)
 python benches/perf_compare.py --samples 31            # real binary comparison against target/release/asc-rs.exe
 ```
+
+## AI skill: `apk-analysis`
+
+`skills/apk-analysis/SKILL.md` teaches an AI agent how to drive `asc-rs` (command choice, output formats, exit codes, pitfalls).
+
+Install by copying (or symlinking) the folder into your agent's skills directory:
+
+```bash
+# Claude Code (global)         cp -r skills/apk-analysis ~/.claude/skills/
+# Claude Code (this project)   cp -r skills/apk-analysis .claude/skills/
+# omp                          cp -r skills/apk-analysis ~/.omp/agent/skills/
+```
+
+Build the CLI first (`cargo build --release -p asc-cli`). Then ask the agent e.g. *"use apk-analysis: who calls `getSystemService` in `app.apk`?"*. The agent runs `asc-rs` itself; the skill is picked up by its `description` trigger.
