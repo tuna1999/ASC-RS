@@ -385,18 +385,18 @@ impl AscApp {
 
     /// Close a tab; documents stay cached (cheap) until evicted.
     pub(crate) fn close_tab(&mut self, descriptor: &str) {
-        if let Some(next) = self.tabs.close(descriptor) {
-            if self.documents.contains(&next) {
+        let was_active = self.tabs.active_descriptor() == Some(descriptor);
+        let next = self.tabs.close(descriptor);
+        if !was_active {
+            // A background tab closed: the visible document is unchanged.
+            return;
+        }
+        match next {
+            Some(next) if self.documents.contains(&next) => {
                 self.active_doc = self.documents.get(&next);
                 self.pending_scroll = Some(0);
-            } else {
-                self.active_doc = None;
             }
-        } else {
-            self.active_doc = None;
-        }
-        if self.active_doc.as_ref().map(|d| d.descriptor.as_str()) == Some(descriptor) {
-            self.active_doc = None;
+            _ => self.active_doc = None,
         }
     }
 
@@ -593,19 +593,17 @@ impl AscApp {
             } => self.navigate_to(&descriptor, pin, line, origin, ctx),
             Command::GlobalSearch | Command::RunSearch => {
                 self.focus_search = true;
-                if let Some(session) = &self.session
+                if matches!(cmd, Command::RunSearch)
+                    && let Some(session) = &self.session
                     && let Some(query) = self.search.query()
                 {
                     let apk = session.path().to_path_buf();
                     let label = self.search.label();
                     self.tasks.spawn_findrefs(&apk, query, label, ctx);
                     // Record this query for the history dropdown
-                    // (JADX-GUI-013 / ASC-GUI-036). Only on
-                    // RunSearch — GlobalSearch is just a focus
-                    // toggle, not a query submission.
-                    if matches!(cmd, Command::RunSearch) {
-                        self.search.commit_to_history();
-                    }
+                    // (JADX-GUI-013 / ASC-GUI-036). GlobalSearch only
+                    // focuses the input; it never submits a query.
+                    self.search.commit_to_history();
                     self.set_status(format!("findrefs running: {}", self.search.input), true);
                 }
             }

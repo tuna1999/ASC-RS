@@ -235,6 +235,14 @@ impl AscApp {
                     self.active_doc = Some(d);
                 }
                 None => {
+                    // Never render another class's source under this tab.
+                    if self
+                        .active_doc
+                        .as_ref()
+                        .is_some_and(|d| d.descriptor != active)
+                    {
+                        self.active_doc = None;
+                    }
                     // Document not cached (loading, evicted, or failed).
                     if self.active_doc.as_ref().map(|d| d.descriptor.as_str()) != Some(&active)
                         && !self.documents.contains(&active)

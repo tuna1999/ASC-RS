@@ -65,9 +65,12 @@ pub(crate) fn decode_java_unicode_escapes(s: &str) -> String {
             i += 1;
             continue;
         }
-        let code_unit = match u32::from_str_radix(&s[j..j + 4], 16) {
-            Ok(v) => v,
-            Err(_) => {
+        let code_unit = match s
+            .get(j..j + 4)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+        {
+            Some(v) => v,
+            None => {
                 if pending_high.take().is_some() {
                     out.push_str(&s[pending_high_start..i]);
                 }
@@ -601,6 +604,12 @@ mod tests {
     #[test]
     fn decode_empty_input() {
         assert_eq!(decode_java_unicode_escapes(""), "");
+    }
+
+    #[test]
+    fn decode_escape_window_splitting_a_multibyte_char_is_preserved() {
+        // `\u` followed by 4 bytes whose last byte splits a 3-byte char.
+        assert_eq!(decode_java_unicode_escapes("\\u€€"), "\\u€€");
     }
 
     #[test]

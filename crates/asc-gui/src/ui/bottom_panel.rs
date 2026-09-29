@@ -254,8 +254,8 @@ impl AscApp {
                         .interact(egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
-                        // 1-indexed line in the GUI; backend stores 1-indexed.
-                        let line = code_off.map(|n| n as usize);
+                        // Backend stores a 1-indexed line; navigation is 0-indexed.
+                        let line = code_off.map(|n| n.saturating_sub(1) as usize);
                         activate = Some((idx, descriptor.clone(), line));
                     }
                 }

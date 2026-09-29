@@ -22,11 +22,13 @@ fn is_ident(b: u8) -> bool {
 }
 
 fn rfind_byte(bytes: &[u8], needle: u8, upto: usize) -> Option<usize> {
-    (0..upto).rev().find(|&i| bytes[i] == needle)
+    (0..upto.min(bytes.len()))
+        .rev()
+        .find(|&i| bytes[i] == needle)
 }
 
 fn find_byte(bytes: &[u8], needle: u8, from: usize, to: usize) -> Option<usize> {
-    (from..to).find(|&i| bytes[i] == needle)
+    (from..to.min(bytes.len())).find(|&i| bytes[i] == needle)
 }
 
 /// Whether `s` is a plain Java identifier.
@@ -171,7 +173,10 @@ fn method_range_from_signature_line(text: &str, off: usize) -> Option<(usize, us
     let search_end = (line_end + 1).min(b.len());
     let mut open_brace = find_byte(b, b'{', line_start, search_end);
     if open_brace.is_none() {
-        // Brace alone on the next line.
+        // Brace alone on the next line (none when the line is the last).
+        if line_end >= b.len() {
+            return None;
+        }
         let next_line_end = find_byte(b, b'\n', line_end + 1, b.len()).unwrap_or(b.len());
         if text[line_end + 1..next_line_end].trim() != "{" {
             return None;
@@ -410,6 +415,15 @@ mod tests {
         let (start, end) = find_method_range(t, off).unwrap();
         assert!(t[start..].starts_with("    void m()"));
         assert_eq!(&t[end - 1..end], "}");
+    }
+
+    #[test]
+    fn find_method_range_at_end_of_source_without_newline_does_not_panic() {
+        for t in ["class A {\n    foo(bar)", "class A {\n    void m()", "x"] {
+            for off in 0..=t.len() + 1 {
+                let _ = find_method_range(t, off);
+            }
+        }
     }
     #[test]
     fn matching_brace_nested_and_line_comment() {
