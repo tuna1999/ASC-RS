@@ -23,6 +23,27 @@ fn table_is_exhaustive_and_wide() {
     assert_eq!(OPCODE_TABLE.len(), 256);
 }
 
+/// `read_index` indexes `insns` without bounds reasoning: every slot must
+/// lie fully inside its instruction's declared width.
+#[test]
+fn every_ref_slot_fits_inside_instruction_width() {
+    for (op, info) in OPCODE_TABLE.iter().enumerate() {
+        for (slot, _) in info.primary.iter().chain(info.secondary.iter()) {
+            assert!(
+                matches!(slot.bits, 16 | 32),
+                "opcode 0x{op:02x}: bits {}",
+                slot.bits
+            );
+            let units = slot.unit_off as u32 + slot.bits as u32 / 16;
+            assert!(
+                units <= info.width_units as u32,
+                "opcode 0x{op:02x}: slot ends at unit {units} > width {}",
+                info.width_units
+            );
+        }
+    }
+}
+
 #[test]
 fn unknown_opcodes_are_marked_unknown() {
     // Reserved / unassigned opcode bytes from the AOSP table:
