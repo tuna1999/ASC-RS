@@ -187,7 +187,7 @@ impl<'a> DexView<'a> {
             ValueType::Array => {
                 let (count, n) = crate::leb::uleb128(&bytes[p..])?;
                 p += n;
-                let mut out = Vec::with_capacity(count as usize);
+                let mut out = Vec::with_capacity((count as usize).min(bytes.len()));
                 for _ in 0..count {
                     let (v, k) = self.encoded_value_depth(bytes, p, depth + 1)?;
                     p += k;
@@ -200,7 +200,7 @@ impl<'a> DexView<'a> {
                 p += n;
                 let (count, n) = crate::leb::uleb128(&bytes[p..])?;
                 p += n;
-                let mut elements = Vec::with_capacity(count as usize);
+                let mut elements = Vec::with_capacity((count as usize).min(bytes.len()));
                 for _ in 0..count {
                     let (name_idx, n) = crate::leb::uleb128(&bytes[p..])?;
                     p += n;
@@ -227,9 +227,13 @@ impl<'a> DexView<'a> {
         bytes: &'a [u8],
         off: usize,
     ) -> Result<(Vec<EncodedValue>, usize), DexError> {
-        let (count, n) = crate::leb::uleb128(&bytes[off..])?;
+        let tail = bytes.get(off..).ok_or(DexError::OffsetOutOfBounds {
+            off,
+            file: bytes.len(),
+        })?;
+        let (count, n) = crate::leb::uleb128(tail)?;
         let mut p = off + n;
-        let mut out = Vec::with_capacity(count as usize);
+        let mut out = Vec::with_capacity((count as usize).min(bytes.len()));
         for _ in 0..count {
             let (v, k) = self.encoded_value(bytes, p)?;
             p += k;
@@ -275,11 +279,15 @@ impl<'a> DexView<'a> {
         bytes: &'a [u8],
         off: usize,
     ) -> Result<(EncodedAnnotation, usize), DexError> {
-        let (type_idx, n) = crate::leb::uleb128(&bytes[off..])?;
+        let tail = bytes.get(off..).ok_or(DexError::OffsetOutOfBounds {
+            off,
+            file: bytes.len(),
+        })?;
+        let (type_idx, n) = crate::leb::uleb128(tail)?;
         let mut p = off + n;
         let (count, n) = crate::leb::uleb128(&bytes[p..])?;
         p += n;
-        let mut elements = Vec::with_capacity(count as usize);
+        let mut elements = Vec::with_capacity((count as usize).min(bytes.len()));
         for _ in 0..count {
             let (name_idx, n) = crate::leb::uleb128(&bytes[p..])?;
             p += n;
@@ -382,7 +390,7 @@ impl<'a> DexView<'a> {
         let params_size = crate::read::read_u32(self.physical, p + 12)?;
 
         let mut q = p + 16;
-        let mut fields = Vec::with_capacity(fields_size as usize);
+        let mut fields = Vec::with_capacity((fields_size as usize).min(self.physical.len() / 8));
         for _ in 0..fields_size {
             if q + 8 > self.physical.len() {
                 return Err(DexError::Truncated {
@@ -399,7 +407,7 @@ impl<'a> DexView<'a> {
             q += 8;
         }
 
-        let mut methods = Vec::with_capacity(methods_size as usize);
+        let mut methods = Vec::with_capacity((methods_size as usize).min(self.physical.len() / 8));
         for _ in 0..methods_size {
             if q + 8 > self.physical.len() {
                 return Err(DexError::Truncated {
@@ -416,7 +424,7 @@ impl<'a> DexView<'a> {
             q += 8;
         }
 
-        let mut params = Vec::with_capacity(params_size as usize);
+        let mut params = Vec::with_capacity((params_size as usize).min(self.physical.len() / 8));
         for _ in 0..params_size {
             if q + 8 > self.physical.len() {
                 return Err(DexError::Truncated {

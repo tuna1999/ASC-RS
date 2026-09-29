@@ -306,7 +306,7 @@ impl<'a> DexView<'a> {
         let (size_signed, n) = crate::leb::sleb128(&raw[q..])?;
         let mut p = q + n;
         let count = size_signed.unsigned_abs() as usize;
-        let mut pairs = Vec::with_capacity(count);
+        let mut pairs = Vec::with_capacity(count.min(raw.len()));
         for _ in 0..count {
             let (t, n) = crate::leb::uleb128(&raw[p..])?;
             p += n;

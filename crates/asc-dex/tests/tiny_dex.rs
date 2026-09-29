@@ -181,3 +181,45 @@ fn reads_map_list() {
     assert_eq!(entries[1].ty, map::MAP_TYPE_CODE_ITEM);
     assert_eq!(entries[1].offset, layout::CODE_OFF);
 }
+
+/// Regression: call_site/method_handle pools come from the map_list, not
+/// from header bytes 0x70.. (which are string_ids in a <=040 DEX).
+#[test]
+fn no_call_site_or_method_handle_pool_without_map_entries() {
+    let buf = tiny_dex();
+    let view = DexView::parse(&buf).unwrap();
+    assert_eq!(view.call_site_count(), 0);
+    assert_eq!(view.method_handle_count(), 0);
+}
+
+/// Regression: a string_ids entry pointing past EOF must not panic the
+/// pool iterator (it yields an empty string, like `string()` errors).
+#[test]
+fn string_iter_survives_out_of_range_data_off() {
+    let mut buf = tiny_dex();
+    let at = layout::STRING_IDS_OFF as usize + 4;
+    buf[at..at + 4].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+    let view = DexView::parse(&buf).unwrap();
+    assert_eq!(view.strings().count(), layout::STRING_IDS_SIZE as usize);
+}
+
+/// Regression: encoded_array/encoded_annotation at an out-of-range offset
+/// return an error instead of slicing out of bounds.
+#[test]
+fn encoded_array_rejects_out_of_range_offset() {
+    let buf = tiny_dex();
+    let view = DexView::parse(&buf).unwrap();
+    let far = buf.len() + 10;
+    assert!(view.encoded_array(view.physical(), far).is_err());
+    assert!(view.encoded_annotation(view.physical(), far).is_err());
+}
+
+/// Regression: a file-supplied element count (2^40) must not drive an
+/// allocation of that size; parsing fails with a truncation error.
+#[test]
+fn encoded_array_huge_count_is_bounded() {
+    static HUGE: [u8; 6] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x20];
+    let buf = tiny_dex();
+    let view = DexView::parse(&buf).unwrap();
+    assert!(view.encoded_array(&HUGE, 0).is_err());
+}

@@ -520,7 +520,7 @@ impl<'a> DexView<'a> {
         }
         let handle_type = crate::read::read_u16(self.physical, entry)?;
         let field_or_method_idx = crate::read::read_u16(self.physical, entry + 4)?;
-        if handle_type <= 5 {
+        if handle_type <= 3 {
             Ok(MethodHandleItem {
                 handle_type,
                 target: FieldOrMethod::Field(FieldIdx(field_or_method_idx as u32)),
@@ -550,43 +550,27 @@ impl<'a> DexView<'a> {
         Ok((len, off + n))
     }
 
-    /// Returns `(off, count)` for the `call_site_ids` pool (DEX 038+).
-    /// Older formats simply have no pool — count is reported as 0.
+    /// Returns `(off, count)` for the `call_site_ids` pool (DEX 038+). The
+    /// header has no such fields; the pool is located via the map_list.
+    /// Absent pool (pre-038) reports `(0, 0)`.
     fn call_site_pool(&self) -> Result<(u32, u32), DexError> {
-        // call_site_ids_size @ 0x70..0x74
-        // call_site_ids_off  @ 0x74..0x78
-        let end = self
-            .header_off
-            .checked_add(0x78)
-            .ok_or(DexError::InvalidHeader {
-                off: self.header_off,
-                message: "header_off overflow",
-            })?;
-        if end > self.physical.len() {
-            return Ok((0, 0));
-        }
-        let base = self.header_off;
-        let size = crate::read::read_u32(self.physical, base + 0x70)?;
-        let off = crate::read::read_u32(self.physical, base + 0x74)?;
-        Ok((off, size))
+        self.map_pool(crate::map::MAP_TYPE_CALL_SITE_ID_ITEM)
     }
 
-    /// Returns `(off, count)` for the `method_handles` pool (DEX 038+).
+    /// Returns `(off, count)` for the `method_handles` pool (DEX 038+),
+    /// located via the map_list. Absent pool reports `(0, 0)`.
     fn method_handle_pool(&self) -> Result<(u32, u32), DexError> {
-        let end = self
-            .header_off
-            .checked_add(0x80)
-            .ok_or(DexError::InvalidHeader {
-                off: self.header_off,
-                message: "header_off overflow",
-            })?;
-        if end > self.physical.len() {
-            return Ok((0, 0));
+        self.map_pool(crate::map::MAP_TYPE_METHOD_HANDLE_ITEM)
+    }
+
+    fn map_pool(&self, ty: u16) -> Result<(u32, u32), DexError> {
+        for item in self.map_list()? {
+            let item = item?;
+            if item.ty == ty {
+                return Ok((item.offset, item.size));
+            }
         }
-        let base = self.header_off;
-        let size = crate::read::read_u32(self.physical, base + 0x78)?;
-        let off = crate::read::read_u32(self.physical, base + 0x7C)?;
-        Ok((off, size))
+        Ok((0, 0))
     }
 }
 
@@ -667,9 +651,13 @@ impl<'a> Iterator for StringIter<'a> {
             return None;
         }
         let data_off = crate::read::read_u32(self.physical, entry_off).unwrap_or(0) as usize;
-        let (utf16_len, n) = match crate::leb::uleb128_to_u32(&self.physical[data_off..]) {
-            Ok(v) => v,
-            Err(_) => {
+        let (utf16_len, n) = match self
+            .physical
+            .get(data_off..)
+            .map(crate::leb::uleb128_to_u32)
+        {
+            Some(Ok(v)) => v,
+            _ => {
                 self.pos += 1;
                 return Some((
                     idx,

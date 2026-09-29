@@ -95,7 +95,8 @@ impl<'a> DexView<'a> {
         let mut q = p + n;
         let (params_size, n) = crate::leb::uleb128_to_u32(&self.physical[q..])?;
         q += n;
-        let mut parameter_names = Vec::with_capacity(params_size as usize);
+        let mut parameter_names =
+            Vec::with_capacity((params_size as usize).min(self.physical.len()));
         for _ in 0..params_size {
             let (v, n) = crate::leb::uleb128_to_u32(&self.physical[q..])?;
             q += n;
