@@ -5,7 +5,7 @@ use eframe::egui;
 
 use crate::app::AscApp;
 use crate::command::Command;
-use crate::state::{NavOrigin, SearchKind};
+use crate::state::{NavOrigin, SearchKind, SearchRow};
 
 /// Which bottom view is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,28 +136,7 @@ impl AscApp {
     /// REFERENCES tab: callers of the active class (Analysis ▸ Find
     /// references, or the palette).
     fn draw_references(&mut self, ui: &mut egui::Ui) {
-        let rows: Vec<(String, String, String, String, Option<u32>)> = self
-            .references
-            .as_ref()
-            .map(|r| {
-                r.rows
-                    .iter()
-                    .map(|row| {
-                        (
-                            row.dex_name.clone(),
-                            format!(
-                                "{}.{}",
-                                super::short_name(&row.caller_class),
-                                row.caller_member
-                            ),
-                            row.caller_class.clone(),
-                            row.matched.join(" "),
-                            row.code_off,
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rows = self.references.as_ref().map_or(&[][..], |r| &r.rows[..]);
         if rows.is_empty() {
             ui.weak(if self.tasks.findrefs_class_running() {
                 "collecting references…"
@@ -166,34 +145,14 @@ impl AscApp {
             });
             return;
         }
-        self.draw_result_rows(ui, rows, false);
+        let activate = Self::result_rows_ui(ui, rows, None);
+        self.activate_result_row(activate, false);
     }
 
     /// Virtualized search-result rows: DEX · caller · matched
     /// entities. Selection navigates (preview) and keeps the list.
     fn draw_search_results(&mut self, ui: &mut egui::Ui) {
-        let rows: Vec<(String, String, String, String, Option<u32>)> = self
-            .search
-            .results()
-            .map(|r| {
-                r.rows
-                    .iter()
-                    .map(|row| {
-                        (
-                            row.dex_name.clone(),
-                            format!(
-                                "{}.{}",
-                                super::short_name(&row.caller_class),
-                                row.caller_member
-                            ),
-                            row.caller_class.clone(),
-                            row.matched.join(" "),
-                            row.code_off,
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rows = self.search.results().map_or(&[][..], |r| &r.rows[..]);
         if rows.is_empty() {
             ui.weak(if self.tasks.findrefs_running() {
                 "searching…"
@@ -202,30 +161,36 @@ impl AscApp {
             });
             return;
         }
-        self.draw_result_rows(ui, rows, true);
+        let activate = Self::result_rows_ui(ui, rows, self.search.selected());
+        self.activate_result_row(activate, true);
     }
 
-    /// Shared virtualized result rows. `track_selection` keeps the
-    /// clicked row highlighted in SEARCH RESULTS (the REFERENCES list
-    /// is transient). When the row carries a code-unit offset
-    /// (`JADX-GUI-012`), clicking jumps to that line in the editor.
-    fn draw_result_rows(
-        &mut self,
+    /// Shared virtualized result rows; only the visible range is
+    /// formatted. `selected` highlights the clicked row in SEARCH RESULTS
+    /// (the REFERENCES list is transient). When the row carries a
+    /// code-unit offset (`JADX-GUI-012`), clicking jumps to that line in
+    /// the editor. Returns the clicked `(row, descriptor, line)`.
+    fn result_rows_ui(
         ui: &mut egui::Ui,
-        rows: Vec<(String, String, String, String, Option<u32>)>,
-        track_selection: bool,
-    ) {
+        rows: &[SearchRow],
+        selected: Option<usize>,
+    ) -> Option<(usize, String, Option<usize>)> {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
         let row_h = T.row_list;
-        let selected = self.search.selected();
-        let mut activate: Option<(usize, String, Option<usize>)> = None;
+        let mut activate = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_h, rows.len(), |ui, range| {
                 for idx in range {
-                    let (dex, caller, descriptor, matched, code_off) = &rows[idx];
-                    let is_sel = track_selection && selected == Some(idx);
+                    let row = &rows[idx];
+                    let caller = format!(
+                        "{}.{}",
+                        super::short_name(&row.caller_class),
+                        row.caller_member
+                    );
+                    let matched = row.matched.join(" ");
+                    let is_sel = selected == Some(idx);
                     let frame = if is_sel {
                         egui::Frame::new().fill(T.row_sel_bg)
                     } else {
@@ -236,7 +201,9 @@ impl AscApp {
                             ui.horizontal(|ui| {
                                 ui.set_min_height(row_h);
                                 ui.monospace(
-                                    egui::RichText::new(dex).small().color(T.text_disabled),
+                                    egui::RichText::new(&row.dex_name)
+                                        .small()
+                                        .color(T.text_disabled),
                                 );
                                 ui.monospace(egui::RichText::new(caller).color(if is_sel {
                                     T.text
@@ -244,7 +211,7 @@ impl AscApp {
                                     T.accent
                                 }));
                                 ui.monospace(
-                                    egui::RichText::new(truncate(matched, 96))
+                                    egui::RichText::new(truncate(&matched, 96))
                                         .small()
                                         .color(T.text_secondary),
                                 );
@@ -255,11 +222,19 @@ impl AscApp {
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
                         // Backend stores a 1-indexed line; navigation is 0-indexed.
-                        let line = code_off.map(|n| n.saturating_sub(1) as usize);
-                        activate = Some((idx, descriptor.clone(), line));
+                        let line = row.code_off.map(|n| n.saturating_sub(1) as usize);
+                        activate = Some((idx, row.caller_class.clone(), line));
                     }
                 }
             });
+        activate
+    }
+
+    fn activate_result_row(
+        &mut self,
+        activate: Option<(usize, String, Option<usize>)>,
+        track_selection: bool,
+    ) {
         if let Some((idx, descriptor, line)) = activate {
             if track_selection {
                 self.search.select(Some(idx));
