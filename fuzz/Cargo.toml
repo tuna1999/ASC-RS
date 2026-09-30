@@ -36,7 +36,8 @@ dex = ["dep:asc-dex"]
 bytecode = ["dep:asc-bytecode"]
 apk = ["dep:asc-apk"]
 rebuild = ["dep:asc-rebuild"]
-all = ["dex", "bytecode", "apk", "rebuild"]
+resources = ["dep:asc-resources"]
+all = ["dex", "bytecode", "apk", "rebuild", "resources"]
 
 # -------- Optional path deps --------
 # These MUST stay optional so a missing/unbuilt sibling crate never breaks
@@ -48,6 +49,7 @@ asc-dex = { path = "../crates/asc-dex", optional = true }
 asc-bytecode = { path = "../crates/asc-bytecode", optional = true }
 asc-apk = { path = "../crates/asc-apk", optional = true }
 asc-rebuild = { path = "../crates/asc-rebuild", optional = true }
+asc-resources = { path = "../crates/asc-resources", optional = true }
 
 [dev-dependencies]
 # Integration smoke tests live as `tests/*.rs`; only std needed.

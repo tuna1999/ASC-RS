@@ -27,6 +27,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_zip_directory" => emit_zip(&dir)?,
             "fuzz_elf" => emit_elf(&dir)?,
             "fuzz_signing" => emit_signing(&dir)?,
+            "fuzz_arsc" => emit_arsc(&dir)?,
             "fuzz_rebuild" => {
                 // Reuses the dex_minimal seed; nothing extra to emit
                 // unless the directory is empty (e.g. on first run
@@ -141,6 +142,26 @@ fn emit_signing(dir: &Path) -> io::Result<usize> {
     b.extend([0u8; 2]);
     let mut n = write_bytes(dir.join("signing_v2_empty.bin"), &b)?;
     n += write_bytes(dir.join("signing_empty.bin"), b"")?;
+    Ok(n)
+}
+
+fn emit_arsc(dir: &Path) -> io::Result<usize> {
+    // Table header + empty global pool + one empty package (id 0x7f).
+    let mut pool = vec![1u8, 0, 28, 0, 28, 0, 0, 0];
+    pool.extend([0u8; 20]);
+    pool[20..24].copy_from_slice(&28u32.to_le_bytes()); // stringsStart
+    let mut pkg = vec![0u8; 288];
+    pkg[..4].copy_from_slice(&[0x00, 0x02, 0x20, 0x01]);
+    pkg[4..8].copy_from_slice(&288u32.to_le_bytes());
+    pkg[8] = 0x7f;
+    let size = (12 + pool.len() + pkg.len()) as u32;
+    let mut t = vec![0x02, 0x00, 0x0c, 0x00];
+    t.extend(size.to_le_bytes());
+    t.extend(1u32.to_le_bytes());
+    t.extend(&pool);
+    t.extend(&pkg);
+    let mut n = write_bytes(dir.join("arsc_empty_package.bin"), &t)?;
+    n += write_bytes(dir.join("arsc_empty.bin"), b"")?;
     Ok(n)
 }
 

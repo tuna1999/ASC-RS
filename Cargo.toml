@@ -9,6 +9,7 @@ members = [
     "crates/asc-rebuild",
     "crates/asc-decompile",
     "crates/asc-manifest",
+    "crates/asc-resources",
     "crates/asc-core",
     "crates/asc-cli",
     "crates/asc-gui",
@@ -16,7 +17,7 @@ members = [
 exclude = ["fuzz", "reference/asc"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.93"
 
@@ -30,6 +31,7 @@ asc-query = { path = "crates/asc-query" }
 asc-rebuild = { path = "crates/asc-rebuild" }
 asc-decompile = { path = "crates/asc-decompile" }
 asc-manifest = { path = "crates/asc-manifest" }
+asc-resources = { path = "crates/asc-resources" }
 asc-core = { path = "crates/asc-core" }
 # external
 thiserror = "2"

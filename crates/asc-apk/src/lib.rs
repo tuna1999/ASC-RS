@@ -34,6 +34,7 @@ mod entry;
 mod error;
 mod inflate;
 pub mod signing;
+pub mod string_pool;
 mod zip;
 
 pub use crate::apk::{Apk, ZipView};

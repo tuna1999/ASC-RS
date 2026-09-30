@@ -215,6 +215,7 @@ when the matching crate lands.
 | `fuzz_zip_directory`  | `asc-apk`     | `ZipView::parse`, `entry.name()`, `ZipView::classes_dex_offsets()`  |
 | `fuzz_elf`            | `asc-apk`     | `elf::parse_elf(&[u8]) -> Result<ElfInfo, &str>`                    |
 | `fuzz_signing`        | `asc-apk`     | `signing::scan`, `der::parse_cert`, `der::parse_pkcs7`              |
+| `fuzz_arsc`           | `asc-resources` | `asc_resources::parse`, `Table::render`, `describe_config`        |
 | `fuzz_rebuild`        | `asc-rebuild` | `rebuild(view, type_idx) -> Result<Vec<u8>, Error>`                 |
 
 `dummy` is always compiled and never touches a sibling crate —

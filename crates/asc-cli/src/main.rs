@@ -3,7 +3,8 @@
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
 //! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`,
-//! `asc-rs inspect <apk|dex>`, `asc-rs native <apk|dex>`, and `asc-rs cert <apk>`,
+//! `asc-rs inspect <apk|dex>`, `asc-rs native <apk|dex>`, `asc-rs cert <apk>`, and
+//! `asc-rs resources <apk>`,
 //! with `--format text|json`, `-o/--output`, `--threads`, `--debug`.
 //!
 //! All engine logic lives in `asc-core`; this binary is a thin
@@ -24,10 +25,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use asc_core::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
-    ListClassesOptions, format_cert_text, format_getclass_json, format_getclass_text,
-    format_inspect_text, format_listclasses_json, format_listclasses_text, format_native_text,
-    format_search_report_json, format_search_report_text, run_cert, run_findrefs, run_getclass,
-    run_inspect, run_listclasses, run_native,
+    ListClassesOptions, ResourcesQuery, format_cert_text, format_getclass_json,
+    format_getclass_text, format_inspect_text, format_listclasses_json, format_listclasses_text,
+    format_native_text, format_resources_text, format_search_report_json,
+    format_search_report_text, run_cert, run_findrefs, run_getclass, run_inspect, run_listclasses,
+    run_native, run_resources,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -43,6 +45,22 @@ fn main() -> ExitCode {
     }
     if let Cmd::Cert { apk } = &cli.cmd {
         return run_cert_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
+    }
+    if let Cmd::Resources {
+        apk,
+        id,
+        strings,
+        limit,
+    } = &cli.cmd
+    {
+        return run_resources_cmd(
+            apk,
+            id.as_deref(),
+            strings.as_deref(),
+            *limit,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
     }
     match dispatch(&cli) {
         Ok(()) => ExitCode::from(EXIT_OK),
@@ -158,6 +176,20 @@ enum Cmd {
         /// Path to the APK.
         apk: PathBuf,
     },
+    /// Inspect resources.arsc: inventory, lookup by ID, key/value search.
+    Resources {
+        /// Path to the APK.
+        apk: PathBuf,
+        /// Show every config variant of this resource ID (`0x7f020000`).
+        #[arg(long, conflicts_with = "strings")]
+        id: Option<String>,
+        /// Substring (case-sensitive) over key names and string values.
+        #[arg(long)]
+        strings: Option<String>,
+        /// Maximum hits printed.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
 }
 
 /// The four findrefs query kinds.
@@ -232,7 +264,9 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.debug,
             shared.format,
         ),
-        Cmd::Manifest { .. } | Cmd::Cert { .. } => unreachable!("handled in main"),
+        Cmd::Manifest { .. } | Cmd::Cert { .. } | Cmd::Resources { .. } => {
+            unreachable!("handled in main")
+        }
         Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),
         Cmd::Native { apk } => run_native_cmd(apk, shared.output.as_deref(), shared.format),
     }
@@ -494,6 +528,68 @@ fn run_cert_cmd(
     } else {
         EXIT_INTERNAL
     })
+}
+
+/// `asc-rs resources <apk>`: `resources.arsc` inventory / lookup / search.
+/// `-o` is exclusive; every error and an incomplete table exit 2 (output
+/// is still printed for an incomplete table), like `cert`.
+fn run_resources_cmd(
+    apk: &std::path::Path,
+    id: Option<&str>,
+    pattern: Option<&str>,
+    limit: usize,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let id = match id.map(parse_resource_id).transpose() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let q = ResourcesQuery {
+        id,
+        pattern: pattern.map(str::to_owned),
+        limit,
+    };
+    let report = match run_resources(apk, &q) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let rendered = match format {
+        OutputFormat::Text => format_resources_text(&report, id.is_some() || pattern.is_some()),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, rendered.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_INTERNAL);
+            }
+        }
+        None => {
+            print!("{rendered}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(if report.complete {
+        EXIT_OK
+    } else {
+        EXIT_INTERNAL
+    })
+}
+
+/// `0x7f020000` (hex) or plain decimal.
+fn parse_resource_id(s: &str) -> Result<u32, String> {
+    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u32::from_str_radix(h, 16),
+        None => s.parse(),
+    };
+    r.map_err(|_| format!("invalid resource id {s:?} (expected 0x7f020000 or decimal)"))
 }
 
 /// `asc-rs manifest <apk>`: text dump of the parsed manifest. Parse

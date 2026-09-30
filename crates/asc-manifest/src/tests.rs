@@ -307,28 +307,6 @@ fn no_index_element_name_errors_not_panics() {
 }
 
 #[test]
-fn utf16_pool_string_decodes_surrogate_pairs() {
-    // "a😀" = 3 UTF-16 units (U+D83D U+DE00 surrogate pair); a lone high
-    // surrogate still degrades to U+FFFD.
-    for (s, want) in [
-        (vec![0x61u16, 0xD83D, 0xDE00], "a\u{1F600}"),
-        (vec![0x61u16, 0xD83D], "a\u{FFFD}"),
-    ] {
-        let mut bytes = vec![3, 0, 8, 0, 0, 0, 0, 0];
-        bytes.extend_from_slice(&(s.len() as u16).to_le_bytes());
-        for u in &s {
-            bytes.extend_from_slice(&u.to_le_bytes());
-        }
-        bytes.extend_from_slice(&[0, 0]);
-        let len = bytes.len() as u32;
-        bytes[4..8].copy_from_slice(&len.to_le_bytes());
-        let p = Parser::new(&bytes).expect("root header");
-        let mut pos = 8;
-        assert_eq!(p.read_utf16_string(&mut pos, bytes.len()).unwrap(), want);
-    }
-}
-
-#[test]
 fn utf8_string_pool_decodes() {
     // Build a string-pool chunk with the UTF-8 flag set, one string
     // "main", followed by a START_ELEMENT and END_ELEMENT for "main".
@@ -344,7 +322,7 @@ fn utf8_string_pool_decodes() {
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&1u32.to_le_bytes()); // count
     bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
-    bytes.extend_from_slice(&RES_STRING_POOL_UTF8_FLAG.to_le_bytes());
+    bytes.extend_from_slice(&(1u32 << 8).to_le_bytes()); // UTF-8 flag
     bytes.extend_from_slice(&32u32.to_le_bytes()); // stringsStart
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]

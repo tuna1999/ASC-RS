@@ -70,6 +70,7 @@ fn contract_targets_are_disabled_with_default_features() {
         "fuzz_zip_directory",
         "fuzz_elf",
         "fuzz_signing",
+        "fuzz_arsc",
         "fuzz_rebuild",
     ];
     let reg = registry();

@@ -140,6 +140,11 @@ pub fn registry() -> Vec<TargetInfo> {
             default_seed: "signing_block",
         },
         TargetInfo {
+            name: "fuzz_arsc",
+            func: fuzz_targets::fuzz_arsc::run,
+            default_seed: "arsc_table",
+        },
+        TargetInfo {
             name: "fuzz_rebuild",
             func: fuzz_targets::fuzz_rebuild::run,
             default_seed: "dex_minimal",

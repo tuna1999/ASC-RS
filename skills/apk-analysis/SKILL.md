@@ -20,8 +20,9 @@ asc-rs manifest <apk> [-o FILE]                  # package, version, SDKs, permi
 asc-rs inspect <apk|dex> [-o FILE]               # entry inventory, DEX coverage/checksums, packer signals, manifest-vs-DEX check
 asc-rs native  <apk|dex> [-o FILE]               # lib/ + assets/*.so ELF inventory, DEX native methods, JNI export name match
 asc-rs cert    <apk> [-o FILE]                   # signing certs: JAR v1 + APK Signature Scheme v2/v3 (display only, NOT verified)
+asc-rs resources <apk> [--id 0x7f020000 | --strings PAT] [--limit N] [-o FILE]   # resources.arsc inventory / lookup / search
 ```
-Input: an APK/ZIP **or a bare `.dex`** (DEX 035..041; e.g. a runtime-dumped DEX). A bare DEX is one virtual entry named after the file; `manifest` and `cert` on it exit `2` ("requires an APK"); an unparseable or CDEX/ODEX/VDEX file exits `2` with a clear error instead of empty output.
+Input: an APK/ZIP **or a bare `.dex`** (DEX 035..041; e.g. a runtime-dumped DEX). A bare DEX is one virtual entry named after the file; `manifest`, `cert` and `resources` on it exit `2` ("requires an APK"); an unparseable or CDEX/ODEX/VDEX file exits `2` with a clear error instead of empty output.
 Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (timings to stderr), `--format text|json` (all commands), `--paranoid` (decode Paranoid/LSParanoid strings; off by default).
 
 ## Choosing the command
@@ -38,6 +39,7 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 | Is this sample packed / is there hidden payload? | `inspect` |
 | Which native libs/methods exist, which `Java_*` exports match? | `native` |
 | Who signed this APK / do two samples share a signer? | `cert` |
+| Resource names/values, lure text in `resources.arsc`, ID lookup | `resources` |
 | Read a class's shape | `getclass` |
 
 ## Output
@@ -62,6 +64,10 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 ## Signing certificates (`cert`)
 
 Lists JAR v1 (`META-INF/*.RSA|DSA|EC`) and APK Signature Scheme v2/v3/v3.1 signers with SHA-256/SHA-1 fingerprints, subject/issuer/serial/validity, algorithm IDs (full `u32`) and the v3 SDK range. **Nothing is verified**: no signature, digest, chain or trust check, so a fingerprint identifies a certificate, not the integrity or authorship of the APK (`verification: not_performed` in text and JSON). Roles: `signer` is the first v2/v3 certificate or the v1 certificate matching the SignerInfo issuer+serial; the rest are `chain`, or `unmatched` if the v1 signer cannot be identified. Scheme equality is stated only when SHA-256 sets match; differences are shown (not an error). Unknown signing-block pair IDs are listed verbatim. `subject == issuer` is shown but never claimed as self-signed. Subjects print in encoded order (openssl `-nameopt RFC2253` prints reversed). `no signing material found` does not mean unsigned/valid. Malformed signing data prints the partial report and exits `2`, as does a raw `.dex` or unreadable input; ZIP64 archives report the signing block as `unsupported` (scheme status `unknown`).
+
+## Resource table (`resources`)
+
+Reads `resources.arsc`: without filters it prints packages, entry/config counts and per-type counts. `--id 0x7f020000` lists every config variant of that ID (ID = package<<24 | (type+typeIdOffset)<<16 | entry index; the key-string index is a different field). `--strings PAT` is a case-sensitive substring over key names (`matched=key`) and string values (`matched=value`, including bag items); `--limit N` (default 100) caps printed hits, `matches:` still shows the total. `TYPE_STRING` values come from the table's global pool; references print as raw `@0x…` IDs (system `0x01…` included, never resolved). A `res/…` value is the path the table claims, not proof the file is a valid resource. Config text is `default` or locale/dpi/vNN plus `raw=<hex>`. No `resources.arsc` entry: text says so, exit `0`. Undecodable string slots read as empty and are noted in `diagnostic:` lines; a malformed chunk is skipped (the walk never guesses the next chunk), the report says `INCOMPLETE` and the exit code is `2`. Raw DEX or an unparseable table exits `2`. Values are display strings and not aapt2-equivalent; compact/sparse/offset16 layouts follow AOSP but are only synthetic-tested (the corpus has dense layouts, package `0x7f`).
 
 ## Native libraries (`native`)
 

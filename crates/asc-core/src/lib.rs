@@ -45,6 +45,7 @@ pub mod native;
 mod paranoid;
 pub mod pipeline;
 pub mod report;
+pub mod resources;
 pub mod worker;
 
 pub use crate::cert::{CertReport, format_cert_text, run_cert};
@@ -61,5 +62,6 @@ pub use crate::pipeline::{
     run_getclass, run_listclasses,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
+pub use crate::resources::{ResourcesQuery, ResourcesReport, format_resources_text, run_resources};
 pub use crate::worker::{WorkerOutcome, WorkerPool};
 pub use asc_decompile::diagnose::unbound_locals;

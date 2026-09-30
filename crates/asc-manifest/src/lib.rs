@@ -64,8 +64,6 @@ const RES_XML_END_NAMESPACE_TYPE: u16 = 0x0101;
 const RES_XML_START_ELEMENT_TYPE: u16 = 0x0102;
 const RES_XML_END_ELEMENT_TYPE: u16 = 0x0103;
 
-const RES_STRING_POOL_UTF8_FLAG: u32 = 1 << 8;
-
 const NO_INDEX: u32 = 0xFFFF_FFFF;
 
 /// Sanity caps. These are large enough to cover every real APK in the
@@ -78,7 +76,6 @@ const MAX_CHILDREN: usize = 1 << 20;
 
 /// Offset (relative to the chunk's start) of the type-specific fields
 /// for each chunk type we recognize.
-const STRING_POOL_BODY_OFF: usize = 8;
 const XML_TREE_BODY_OFF: usize = 16; // namespace / element events all use this
 
 // ---------------------------------------------------------------------------
@@ -441,102 +438,21 @@ impl<'a> Parser<'a> {
                 self.bytes.len()
             )));
         }
-        let body_off = chunk_start + STRING_POOL_BODY_OFF;
-        if body_off + 20 > self.bytes.len() {
-            return Err(ManifestError::Truncated(
-                "string pool header overruns EOF".into(),
-            ));
-        }
-        let string_count = read_u32(self.bytes, body_off)?;
-        let _style_count = read_u32(self.bytes, body_off + 4)?;
-        let flags = read_u32(self.bytes, body_off + 8)?;
-        let strings_start = read_u32(self.bytes, body_off + 12)?;
-        let _styles_start = read_u32(self.bytes, body_off + 16)?;
-        if string_count > MAX_STRING_COUNT {
-            return Err(ManifestError::BadChunk(format!(
-                "string pool count {string_count} exceeds cap"
-            )));
-        }
-        if strings_start > chunk_size as u32 {
-            return Err(ManifestError::BadChunk(format!(
-                "stringsStart {strings_start} > chunk_size {chunk_size}"
-            )));
-        }
-        let utf8 = (flags & RES_STRING_POOL_UTF8_FLAG) != 0;
-        let offsets_off = body_off + 20;
-        let offsets_end = (string_count as usize)
-            .checked_mul(4)
-            .and_then(|n| offsets_off.checked_add(n))
-            .filter(|&e| e <= chunk_end)
-            .ok_or_else(|| ManifestError::Truncated("string offset table".into()))?;
-        let strings_base = chunk_start + strings_start as usize;
-        let mut decoded: Vec<String> = Vec::with_capacity(string_count as usize);
-        let mut total_bytes: u64 = 0;
-        for (i, off) in (offsets_off..offsets_end).step_by(4).enumerate() {
-            // Address each string through the offset table like Android's
-            // `ResStringPool::stringAt`. The framework decodes lazily, so
-            // malware plants garbage in unreferenced slots; an undecodable
-            // entry becomes "" instead of failing the whole manifest.
-            let mut pos = strings_base.saturating_add(read_u32(self.bytes, off)? as usize);
-            let s = if utf8 {
-                self.read_utf8_string(&mut pos, chunk_end)
-            } else {
-                self.read_utf16_string(&mut pos, chunk_end)
-            }
-            .unwrap_or_default();
-            total_bytes = total_bytes.saturating_add(s.len() as u64);
-            decoded.push(s);
-            if total_bytes > MAX_STRING_BYTES {
-                return Err(ManifestError::BadChunk(format!(
-                    "decoded string pool exceeds cap at index {i}"
-                )));
-            }
-        }
-        self.strings = decoded;
+        let pool = asc_apk::string_pool::parse(
+            self.bytes,
+            chunk_start,
+            chunk_end,
+            asc_apk::string_pool::Limits {
+                max_count: MAX_STRING_COUNT,
+                max_bytes: MAX_STRING_BYTES,
+            },
+        )
+        .map_err(|e| match e {
+            asc_apk::string_pool::PoolError::Truncated(s) => ManifestError::Truncated(s),
+            asc_apk::string_pool::PoolError::Bad(s) => ManifestError::BadChunk(s),
+        })?;
+        self.strings = pool.strings;
         Ok(())
-    }
-
-    fn read_utf16_string(
-        &self,
-        pos: &mut usize,
-        chunk_end: usize,
-    ) -> Result<String, ManifestError> {
-        if *pos + 2 > chunk_end {
-            return Err(ManifestError::Truncated("UTF-16 char length".into()));
-        }
-        let char_len = read_u16(self.bytes, *pos)? as usize;
-        *pos += 2;
-        let byte_len = char_len
-            .checked_mul(2)
-            .ok_or_else(|| ManifestError::BadChunk("UTF-16 char length overflow".into()))?;
-        if *pos + byte_len + 2 > chunk_end {
-            return Err(ManifestError::Truncated("UTF-16 payload".into()));
-        }
-        let bytes = &self.bytes[*pos..*pos + byte_len];
-        let units = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&c| u16::from_le_bytes(c));
-        let out: String = char::decode_utf16(units)
-            .map(|r| r.unwrap_or('\u{FFFD}'))
-            .collect();
-        *pos += byte_len + 2; // skip payload + NUL terminator
-        Ok(out)
-    }
-
-    fn read_utf8_string(&self, pos: &mut usize, chunk_end: usize) -> Result<String, ManifestError> {
-        if *pos + 2 > chunk_end {
-            return Err(ManifestError::Truncated("UTF-8 char length".into()));
-        }
-        let _char_len = decode_uleb128(self.bytes, pos)?;
-        let byte_len = decode_uleb128(self.bytes, pos)? as usize;
-        if *pos + byte_len + 1 > chunk_end {
-            return Err(ManifestError::Truncated("UTF-8 payload".into()));
-        }
-        let raw = &self.bytes[*pos..*pos + byte_len];
-        *pos += byte_len + 1; // +1 for NUL terminator
-        Ok(String::from_utf8_lossy(raw).into_owned())
     }
 
     fn handle_start_namespace(
@@ -1079,27 +995,6 @@ fn read_u32(bytes: &[u8], off: usize) -> Result<u32, ManifestError> {
         bytes[off + 2],
         bytes[off + 3],
     ]))
-}
-
-/// AOSP's `decodeLength` for UTF-8 string-pool prefixes:
-/// one byte if the high bit is clear; otherwise two bytes with the high
-/// bit stripped (so the value fits in 15 bits).
-fn decode_uleb128(bytes: &[u8], pos: &mut usize) -> Result<u32, ManifestError> {
-    let b0 = bytes
-        .get(*pos)
-        .copied()
-        .ok_or_else(|| ManifestError::Truncated(format!("uleb128 read at {pos} past EOF")))?;
-    *pos += 1;
-    if b0 & 0x80 == 0 {
-        Ok(b0 as u32)
-    } else {
-        let b1 = bytes
-            .get(*pos)
-            .copied()
-            .ok_or_else(|| ManifestError::Truncated(format!("uleb128 read at {pos} past EOF")))?;
-        *pos += 1;
-        Ok((((b0 & 0x7F) as u32) << 8) | b1 as u32)
-    }
 }
 
 // ---------------------------------------------------------------------------

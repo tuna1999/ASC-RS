@@ -6,7 +6,7 @@
 
 - `findrefs string|type|method|field` — locate references in DEX bytecode.
 - `getclass <descriptor>` — locate a class, rebuild a minimal standalone DEX, decompile to Java.
-- `listclass`, `manifest`, `inspect`, `native`, `cert` — class list, manifest dump, inventory/packer signals, ELF/JNI inventory, signing-cert display (`--format json` on all).
+- `listclass`, `manifest`, `inspect`, `native`, `cert`, `resources` — class list, manifest dump, inventory/packer signals, ELF/JNI inventory, signing-cert display, resources.arsc view (`--format json` on all).
 
 Pillars: **lazy** DEX access, **zero-copy** pools, **bounded memory**. No whole-APK preprocessing, no global xref graphs, no Python/JVM/Node at runtime. Outputs: `target/release/asc-rs.exe` (CLI) and `asc-gui.exe` (egui workbench). Oracle + spec live (read-only) under `reference/` (`BEHAVIOR.md`, `FREEZE.md`; `reference/asc/` is gitignored, never write to it).
 
@@ -18,6 +18,7 @@ Strict layered DAG; `asc-core` is the only fan-in node. CLI and GUI depend on `a
 L0 asc-dex        zero-copy DEX 035..041 reader (only dep: thiserror)
 L1 asc-apk        mmap ZIP + bounded inflate      asc-bytecode  opcode table + RefWalker
 L2 asc-manifest   binary AXML                     asc-query     locators, find_refs, CodeOwners
+   asc-resources  resources.arsc reader (shares asc-apk `string_pool` with asc-manifest)
    asc-rebuild    closure + remap + rewrite + layout (minimal DEX) + StringPatch
    asc-paranoid   Paranoid/LSParanoid detect + decode (opt-in `--paranoid`)
 L3 asc-decompile  ClassDecompiler trait + DroidsawBackend (no internal deps: the firewall)

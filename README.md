@@ -26,6 +26,7 @@ preprocessing, no global xref graphs, no fully-materialized object graphs.
 | `crates/asc-rebuild` | Minimal standalone DEX reconstruction (closure, remap, rewrite, valid emit) |
 | `crates/asc-decompile` | Backend-neutral class decompiler abstraction |
 | `crates/asc-manifest` | Binary AXML (AndroidManifest) parsing |
+| `crates/asc-resources` | Bounded `resources.arsc` reader |
 | `crates/asc-core` | Orchestration: getclass/findrefs/listclass pipelines, bounded parallelism, cancellation |
 | `crates/asc-cli` | CLI parity frontend |
 | `crates/asc-gui` | eframe/egui desktop UI (behind feature, ships later) |
@@ -52,9 +53,10 @@ asc-rs manifest   <apk>                             # package, permissions, comp
 asc-rs inspect    <apk|dex>                         # inventory, DEX coverage/checksums, packer signals
 asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match
 asc-rs cert       <apk>                             # signing certs (v1/v2/v3), fingerprints; display only, no verification
+asc-rs resources <apk> [--id ID | --strings PAT]    # resources.arsc inventory, ID lookup, key/value search
 ```
 
-`<apk>` may also be a bare `.dex` file (DEX 035..041) for `findrefs`/`getclass`/`listclass`/`inspect`/`native`; `manifest` and `cert` require an APK. CDEX/ODEX/VDEX are rejected with an error.
+`<apk>` may also be a bare `.dex` file (DEX 035..041) for `findrefs`/`getclass`/`listclass`/`inspect`/`native`; `manifest`, `cert` and `resources` require an APK. CDEX/ODEX/VDEX are rejected with an error.
 
 Class names accept Dalvik descriptor (`Lcom/foo/Bar;`) **or** dotted Java form (`com.foo.Bar`).
 Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`, `--paranoid`) can appear before or after the APK positional. Exit codes: `0` success, `1` not-found / invalid input, `2` engine error. Each command also accepts `--help`.
