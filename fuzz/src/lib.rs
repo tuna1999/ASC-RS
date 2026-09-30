@@ -130,6 +130,11 @@ pub fn registry() -> Vec<TargetInfo> {
             default_seed: "zip_eocd_only",
         },
         TargetInfo {
+            name: "fuzz_elf",
+            func: fuzz_targets::fuzz_elf::run,
+            default_seed: "elf_header",
+        },
+        TargetInfo {
             name: "fuzz_rebuild",
             func: fuzz_targets::fuzz_rebuild::run,
             default_seed: "dex_minimal",

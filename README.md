@@ -50,6 +50,7 @@ asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
 asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
 asc-rs manifest   <apk>                             # package, permissions, components
 asc-rs inspect    <apk|dex>                         # inventory, DEX coverage/checksums, packer signals
+asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match
 ```
 
 `<apk>` may also be a bare `.dex` file (DEX 035..041) for `findrefs`/`getclass`/`listclass`; `manifest` requires an APK. CDEX/ODEX/VDEX are rejected with an error.

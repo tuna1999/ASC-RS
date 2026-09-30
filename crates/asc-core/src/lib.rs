@@ -40,6 +40,7 @@
 pub mod class_name;
 pub mod format;
 pub mod inspect;
+pub mod native;
 mod paranoid;
 pub mod pipeline;
 pub mod report;
@@ -51,6 +52,7 @@ pub use crate::format::{
     format_listclasses_text, format_search_report_json, format_search_report_text,
 };
 pub use crate::inspect::{InspectReport, format_inspect_text, run_inspect};
+pub use crate::native::{NativeReport, format_native_text, run_native};
 pub use crate::pipeline::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult,
     ListClassesJob, ListClassesOptions, ListClassesResult, logical_dex_name, run_findrefs,

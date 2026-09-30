@@ -17,4 +17,5 @@ pub mod fuzz_encoded_value;
 pub mod fuzz_annotations;
 pub mod fuzz_dex041;
 pub mod fuzz_zip_directory;
+pub mod fuzz_elf;
 pub mod fuzz_rebuild;

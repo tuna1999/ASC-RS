@@ -25,6 +25,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_mutf8" => emit_mutf8(&dir)?,
             "fuzz_ref_walker" => emit_bytecode(&dir)?,
             "fuzz_zip_directory" => emit_zip(&dir)?,
+            "fuzz_elf" => emit_elf(&dir)?,
             "fuzz_rebuild" => {
                 // Reuses the dex_minimal seed; nothing extra to emit
                 // unless the directory is empty (e.g. on first run
@@ -112,6 +113,18 @@ fn emit_bytecode(dir: &Path) -> io::Result<usize> {
         dir.join("bytecode_random_64.bin"),
         &random_deterministic(64, 0xC0DE_CAFE),
     )?;
+    Ok(n)
+}
+
+fn emit_elf(dir: &Path) -> io::Result<usize> {
+    // ELF64 LE header only: parses, reports "no readable symbol table".
+    let mut h = vec![0u8; 0x40];
+    h[..4].copy_from_slice(b"\x7fELF");
+    h[4] = 2;
+    h[5] = 1;
+    h[0x12] = 183;
+    let mut n = write_bytes(dir.join("elf64_header_only.bin"), &h)?;
+    n += write_bytes(dir.join("elf_empty.bin"), b"")?;
     Ok(n)
 }
 

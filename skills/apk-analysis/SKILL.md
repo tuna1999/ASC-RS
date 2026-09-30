@@ -18,6 +18,7 @@ asc-rs getclass <apk> <Lpkg/Cls; | pkg.Cls>      # decompile ONE class
 asc-rs listclass <apk> [-o FILE]                 # all class descriptors, DEX order
 asc-rs manifest <apk> [-o FILE]                  # package, version, SDKs, permissions, components
 asc-rs inspect <apk|dex> [-o FILE]               # entry inventory, DEX coverage/checksums, packer signals, manifest-vs-DEX check
+asc-rs native  <apk|dex> [-o FILE]               # lib/ + assets/*.so ELF inventory, DEX native methods, JNI export name match
 ```
 Input: an APK/ZIP **or a bare `.dex`** (DEX 035..041; e.g. a runtime-dumped DEX). A bare DEX is one virtual entry named after the file; `manifest` on it exits `2` ("requires an APK"); an unparseable or CDEX/ODEX/VDEX file exits `2` with a clear error instead of empty output.
 Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (timings to stderr), `--format text|json` (findrefs, getclass, listclass, manifest), `--paranoid` (decode Paranoid/LSParanoid strings; off by default).
@@ -34,6 +35,7 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 | Class name unknown | `listclass`, filter output, then `getclass` |
 | Package, permissions, exported components, receivers | `manifest` |
 | Is this sample packed / is there hidden payload? | `inspect` |
+| Which native libs/methods exist, which `Java_*` exports match? | `native` |
 | Read a class's shape | `getclass` |
 
 ## Output
@@ -53,6 +55,10 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 2. `findrefs` with the narrowest predicate (`--class` + name beats name alone). Matching is substring: short names (`get`, `http`) flood results.
 3. `getclass` on interesting callers/classes.
 4. Redirect big output: `-o out.txt` (findrefs appends; `listclass` and `manifest` overwrite and print nothing to stdout).
+
+## Native libraries (`native`)
+
+Scans `lib/**.so` and `assets/**.so` (in memory, never written to disk; 64 MiB cap each) and every native method (`ACC_NATIVE`) in both direct and virtual lists of all DEX (including DEX-041 members). Methods are joined to libs by JNI symbol name (short and long form). A match is a *candidate* link, not proof. `unbound` = no `Java_*` export of that name: dynamic registration (`RegisterNatives`) is possible but NOT detected or resolved. `abi_dir` is reported next to `e_machine` and can disagree (`MISMATCH`). Symbol table comes from section headers, else `PT_DYNAMIC`; `symbol_source: none` or `[INCOMPLETE]` means exports are unknown, not zero. Split APKs (`config.*.apk`) carry libs but no DEX: pair them with the base APK by hand. Both `--format json` and text list every native method.
 
 ## Packed APKs
 

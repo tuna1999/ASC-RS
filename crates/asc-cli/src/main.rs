@@ -2,8 +2,8 @@
 //!
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
-//! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`, and
-//! `asc-rs inspect <apk|dex>`,
+//! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`,
+//! `asc-rs inspect <apk|dex>`, and `asc-rs native <apk|dex>`,
 //! with `--format text|json`, `-o/--output`, `--threads`, `--debug`.
 //!
 //! All engine logic lives in `asc-core`; this binary is a thin
@@ -25,8 +25,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use asc_core::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
     ListClassesOptions, format_getclass_json, format_getclass_text, format_inspect_text,
-    format_listclasses_json, format_listclasses_text, format_search_report_json,
-    format_search_report_text, run_findrefs, run_getclass, run_inspect, run_listclasses,
+    format_listclasses_json, format_listclasses_text, format_native_text,
+    format_search_report_json, format_search_report_text, run_findrefs, run_getclass, run_inspect,
+    run_listclasses, run_native,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -142,6 +143,12 @@ enum Cmd {
         /// Path to the APK or raw DEX.
         apk: PathBuf,
     },
+    /// List native libraries (lib/, assets/*.so) and DEX native methods,
+    /// joined by JNI export name.
+    Native {
+        /// Path to the APK or raw DEX.
+        apk: PathBuf,
+    },
 }
 
 /// The four findrefs query kinds.
@@ -218,6 +225,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         ),
         Cmd::Manifest { .. } => unreachable!("handled in main"),
         Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),
+        Cmd::Native { apk } => run_native_cmd(apk, shared.output.as_deref(), shared.format),
     }
 }
 
@@ -398,6 +406,28 @@ fn run_inspect_cmd(
     let report = run_inspect(apk)?;
     let rendered = match format {
         OutputFormat::Text => format_inspect_text(&report),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => std::fs::write(p, rendered.as_bytes())
+            .map_err(|e| CoreError::Usage(format!("write {p:?}: {e}")))?,
+        None => {
+            print!("{rendered}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    Ok(())
+}
+
+/// `asc-rs native <apk|dex>`: `-o` is exclusive like `inspect`.
+fn run_native_cmd(
+    apk: &std::path::Path,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> Result<(), CoreError> {
+    let report = run_native(apk)?;
+    let rendered = match format {
+        OutputFormat::Text => format_native_text(&report),
         OutputFormat::Json => to_json(&report),
     };
     match output {
