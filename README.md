@@ -51,9 +51,10 @@ asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
 asc-rs manifest   <apk>                             # package, permissions, components
 asc-rs inspect    <apk|dex>                         # inventory, DEX coverage/checksums, packer signals
 asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match
+asc-rs cert       <apk>                             # signing certs (v1/v2/v3), fingerprints; display only, no verification
 ```
 
-`<apk>` may also be a bare `.dex` file (DEX 035..041) for `findrefs`/`getclass`/`listclass`; `manifest` requires an APK. CDEX/ODEX/VDEX are rejected with an error.
+`<apk>` may also be a bare `.dex` file (DEX 035..041) for `findrefs`/`getclass`/`listclass`/`inspect`/`native`; `manifest` and `cert` require an APK. CDEX/ODEX/VDEX are rejected with an error.
 
 Class names accept Dalvik descriptor (`Lcom/foo/Bar;`) **or** dotted Java form (`com.foo.Bar`).
 Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`, `--paranoid`) can appear before or after the APK positional. Exit codes: `0` success, `1` not-found / invalid input, `2` engine error. Each command also accepts `--help`.

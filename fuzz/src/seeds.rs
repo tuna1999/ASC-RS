@@ -26,6 +26,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_ref_walker" => emit_bytecode(&dir)?,
             "fuzz_zip_directory" => emit_zip(&dir)?,
             "fuzz_elf" => emit_elf(&dir)?,
+            "fuzz_signing" => emit_signing(&dir)?,
             "fuzz_rebuild" => {
                 // Reuses the dex_minimal seed; nothing extra to emit
                 // unless the directory is empty (e.g. on first run
@@ -45,9 +46,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
         emitted += added;
         eprintln!(
             "  [{}] {} file(s) under seeds/{}",
-            t.name,
-            added,
-            t.default_seed
+            t.name, added, t.default_seed
         );
     }
     Ok(emitted)
@@ -57,7 +56,10 @@ fn emit_dummy(dir: &Path) -> io::Result<usize> {
     let mut n = 0;
     n += write_bytes(dir.join("empty.bin"), b"")?;
     n += write_bytes(dir.join("one.bin"), &[0x42])?;
-    n += write_bytes(dir.join("continuation.bin"), &[0x80, 0x80, 0x80, 0x80, 0x01])?;
+    n += write_bytes(
+        dir.join("continuation.bin"),
+        &[0x80, 0x80, 0x80, 0x80, 0x01],
+    )?;
     Ok(n)
 }
 
@@ -77,7 +79,10 @@ fn emit_dex(dir: &Path) -> io::Result<usize> {
 fn emit_uleb(dir: &Path) -> io::Result<usize> {
     let mut n = 0;
     n += write_bytes(dir.join("uleb_one.bin"), &[0x01])?;
-    n += write_bytes(dir.join("uleb_five_byte.bin"), &[0x80, 0x80, 0x80, 0x80, 0x01])?;
+    n += write_bytes(
+        dir.join("uleb_five_byte.bin"),
+        &[0x80, 0x80, 0x80, 0x80, 0x01],
+    )?;
     n += write_bytes(dir.join("uleb_corrupt_long.bin"), &{
         let mut v = vec![0x80u8; 9];
         v.push(0x01);
@@ -116,6 +121,29 @@ fn emit_bytecode(dir: &Path) -> io::Result<usize> {
     Ok(n)
 }
 
+fn emit_signing(dir: &Path) -> io::Result<usize> {
+    // 40 junk bytes + signing block (one v2 pair with an empty signer
+    // list) + EOCD whose cd_offset points just past the block.
+    let mut value = 0u32.to_le_bytes().to_vec();
+    let mut pair = (value.len() as u64 + 4).to_le_bytes().to_vec();
+    pair.extend(0x7109_871au32.to_le_bytes());
+    pair.append(&mut value);
+    let size = (pair.len() + 24) as u64;
+    let mut b = vec![0u8; 40];
+    b.extend(size.to_le_bytes());
+    b.extend(&pair);
+    b.extend(size.to_le_bytes());
+    b.extend(b"APK Sig Block 42");
+    let cd = b.len() as u32;
+    b.extend(0x0605_4b50u32.to_le_bytes());
+    b.extend([0u8; 12]);
+    b.extend(cd.to_le_bytes());
+    b.extend([0u8; 2]);
+    let mut n = write_bytes(dir.join("signing_v2_empty.bin"), &b)?;
+    n += write_bytes(dir.join("signing_empty.bin"), b"")?;
+    Ok(n)
+}
+
 fn emit_elf(dir: &Path) -> io::Result<usize> {
     // ELF64 LE header only: parses, reports "no readable symbol table".
     let mut h = vec![0u8; 0x40];
@@ -131,7 +159,10 @@ fn emit_elf(dir: &Path) -> io::Result<usize> {
 fn emit_zip(dir: &Path) -> io::Result<usize> {
     let mut n = 0;
     n += write_bytes(dir.join("zip_eocd_only.bin"), &zip_eocd_only())?;
-    n += write_bytes(dir.join("zip_one_stored_class.bin"), &zip_one_stored_class())?;
+    n += write_bytes(
+        dir.join("zip_one_stored_class.bin"),
+        &zip_one_stored_class(),
+    )?;
     n += write_bytes(dir.join("zip_multi_entry.bin"), &zip_multi_entry())?;
     n += write_bytes(dir.join("zip_empty.bin"), b"")?;
     n += write_bytes(

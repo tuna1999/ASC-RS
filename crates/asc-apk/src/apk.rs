@@ -101,6 +101,12 @@ impl Apk {
         self.raw_dex
     }
 
+    /// Scan the APK Signing Block (v2/v3/v3.1). Display only: nothing is
+    /// verified. Meaningless for raw DEX input.
+    pub fn signing_scan(&self) -> crate::signing::SigningScan {
+        crate::signing::scan(&self.mmap)
+    }
+
     /// All `classes*.dex` entries at the archive root, sorted in numeric
     /// order (`classes.dex` is group 1, `classes2.dex` is group 2, …).
     ///

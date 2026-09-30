@@ -16,7 +16,7 @@ members = [
 exclude = ["fuzz", "reference/asc"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.93"
 
@@ -38,6 +38,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 crc32fast = "1"
 smallvec = "1"
 sha1 = "0.10"
+sha2 = "0.10"
 adler2 = "2"
 rayon = "1"
 criterion = "0.8"

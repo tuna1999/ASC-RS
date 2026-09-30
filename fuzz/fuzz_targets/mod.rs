@@ -7,15 +7,16 @@
 //! `cargo build` in `fuzz/` stays green while the APIs land.
 
 pub mod dummy;
-pub mod fuzz_dex_header;
-pub mod fuzz_uleb128;
-pub mod fuzz_mutf8;
+pub mod fuzz_annotations;
 pub mod fuzz_class_data;
 pub mod fuzz_code_item;
-pub mod fuzz_ref_walker;
-pub mod fuzz_encoded_value;
-pub mod fuzz_annotations;
 pub mod fuzz_dex041;
-pub mod fuzz_zip_directory;
+pub mod fuzz_dex_header;
 pub mod fuzz_elf;
+pub mod fuzz_encoded_value;
+pub mod fuzz_mutf8;
 pub mod fuzz_rebuild;
+pub mod fuzz_ref_walker;
+pub mod fuzz_signing;
+pub mod fuzz_uleb128;
+pub mod fuzz_zip_directory;

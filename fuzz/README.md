@@ -61,6 +61,7 @@ fuzz/
     fuzz_dex041.rs
     fuzz_zip_directory.rs
     fuzz_elf.rs
+    fuzz_signing.rs
     fuzz_rebuild.rs
   seeds/              # committed seed corpus (one subdir per target)
 ```
@@ -213,6 +214,7 @@ when the matching crate lands.
 | `fuzz_dex041`         | `asc-dex`     | `DexView::parse_at`, `DexView::logical_header_offsets` (DEX-041 paths) |
 | `fuzz_zip_directory`  | `asc-apk`     | `ZipView::parse`, `entry.name()`, `ZipView::classes_dex_offsets()`  |
 | `fuzz_elf`            | `asc-apk`     | `elf::parse_elf(&[u8]) -> Result<ElfInfo, &str>`                    |
+| `fuzz_signing`        | `asc-apk`     | `signing::scan`, `der::parse_cert`, `der::parse_pkcs7`              |
 | `fuzz_rebuild`        | `asc-rebuild` | `rebuild(view, type_idx) -> Result<Vec<u8>, Error>`                 |
 
 `dummy` is always compiled and never touches a sibling crate —

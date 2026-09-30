@@ -247,7 +247,7 @@ pub(crate) fn parse_directory(buf: &[u8]) -> Result<Vec<DexEntry>, ApkError> {
 /// Locate the EOCD signature by scanning backwards from EOF within the
 /// PKWARE-mandated window. Mirrors the Python oracle's
 /// `mm.rfind(_EOCD_SIG, max(0, len(mm) - 65536 - 22))`.
-fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
+pub(crate) fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
     if len < EOCD_FIXED_LEN {
         return Err(ApkError::NotAZip);
     }

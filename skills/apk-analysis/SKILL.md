@@ -19,9 +19,10 @@ asc-rs listclass <apk> [-o FILE]                 # all class descriptors, DEX or
 asc-rs manifest <apk> [-o FILE]                  # package, version, SDKs, permissions, components
 asc-rs inspect <apk|dex> [-o FILE]               # entry inventory, DEX coverage/checksums, packer signals, manifest-vs-DEX check
 asc-rs native  <apk|dex> [-o FILE]               # lib/ + assets/*.so ELF inventory, DEX native methods, JNI export name match
+asc-rs cert    <apk> [-o FILE]                   # signing certs: JAR v1 + APK Signature Scheme v2/v3 (display only, NOT verified)
 ```
-Input: an APK/ZIP **or a bare `.dex`** (DEX 035..041; e.g. a runtime-dumped DEX). A bare DEX is one virtual entry named after the file; `manifest` on it exits `2` ("requires an APK"); an unparseable or CDEX/ODEX/VDEX file exits `2` with a clear error instead of empty output.
-Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (timings to stderr), `--format text|json` (findrefs, getclass, listclass, manifest), `--paranoid` (decode Paranoid/LSParanoid strings; off by default).
+Input: an APK/ZIP **or a bare `.dex`** (DEX 035..041; e.g. a runtime-dumped DEX). A bare DEX is one virtual entry named after the file; `manifest` and `cert` on it exit `2` ("requires an APK"); an unparseable or CDEX/ODEX/VDEX file exits `2` with a clear error instead of empty output.
+Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (timings to stderr), `--format text|json` (all commands), `--paranoid` (decode Paranoid/LSParanoid strings; off by default).
 
 ## Choosing the command
 
@@ -36,6 +37,7 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 | Package, permissions, exported components, receivers | `manifest` |
 | Is this sample packed / is there hidden payload? | `inspect` |
 | Which native libs/methods exist, which `Java_*` exports match? | `native` |
+| Who signed this APK / do two samples share a signer? | `cert` |
 | Read a class's shape | `getclass` |
 
 ## Output
@@ -54,7 +56,11 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 1. Malware/unknown sample: start with `manifest` (permissions + exported components/receivers are your first IOCs), then `listclass <apk>` → file, then filter for candidates (obfuscated APKs: search by package/pattern).
 2. `findrefs` with the narrowest predicate (`--class` + name beats name alone). Matching is substring: short names (`get`, `http`) flood results.
 3. `getclass` on interesting callers/classes.
-4. Redirect big output: `-o out.txt` (findrefs appends; `listclass` and `manifest` overwrite and print nothing to stdout).
+4. Redirect big output: `-o out.txt` (findrefs appends; `listclass`, `manifest`, `inspect`, `native` and `cert` overwrite and print nothing to stdout).
+
+## Signing certificates (`cert`)
+
+Lists JAR v1 (`META-INF/*.RSA|DSA|EC`) and APK Signature Scheme v2/v3/v3.1 signers with SHA-256/SHA-1 fingerprints, subject/issuer/serial/validity, algorithm IDs (full `u32`) and the v3 SDK range. **Nothing is verified**: no signature, digest, chain or trust check, so a fingerprint identifies a certificate, not the integrity or authorship of the APK (`verification: not_performed` in text and JSON). Roles: `signer` is the first v2/v3 certificate or the v1 certificate matching the SignerInfo issuer+serial; the rest are `chain`, or `unmatched` if the v1 signer cannot be identified. Scheme equality is stated only when SHA-256 sets match; differences are shown (not an error). Unknown signing-block pair IDs are listed verbatim. `subject == issuer` is shown but never claimed as self-signed. Subjects print in encoded order (openssl `-nameopt RFC2253` prints reversed). `no signing material found` does not mean unsigned/valid. Malformed signing data prints the partial report and exits `2`, as does a raw `.dex` or unreadable input; ZIP64 archives report the signing block as `unsupported` (scheme status `unknown`).
 
 ## Native libraries (`native`)
 

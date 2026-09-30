@@ -135,6 +135,11 @@ pub fn registry() -> Vec<TargetInfo> {
             default_seed: "elf_header",
         },
         TargetInfo {
+            name: "fuzz_signing",
+            func: fuzz_targets::fuzz_signing::run,
+            default_seed: "signing_block",
+        },
+        TargetInfo {
             name: "fuzz_rebuild",
             func: fuzz_targets::fuzz_rebuild::run,
             default_seed: "dex_minimal",
@@ -215,15 +220,11 @@ pub fn install_panic_hook(target: &str, crash_dir: &Path) {
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))
             .unwrap_or_else(|| "<unknown>".to_string());
-        eprintln!(
-            "PANIC caught by asc-fuzz hook: {payload} at {location}"
-        );
+        eprintln!("PANIC caught by asc-fuzz hook: {payload} at {location}");
 
-        if let (Some(target), Some(crash_dir), Some(slot)) = (
-            PANIC_TARGET.get(),
-            PANIC_CRASH_DIR.get(),
-            PANIC_INPUT.get(),
-        ) {
+        if let (Some(target), Some(crash_dir), Some(slot)) =
+            (PANIC_TARGET.get(), PANIC_CRASH_DIR.get(), PANIC_INPUT.get())
+        {
             if let Some(input) = slot.lock().ok().and_then(|g| g.clone()) {
                 match write_crash(crash_dir, target, &input) {
                     Ok(path) => eprintln!("Saved crashing input to {}", path.display()),
@@ -284,7 +285,7 @@ pub fn host_dex(fuzz: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(b"dex\n035\x00");
     buf.extend_from_slice(&[0u8; 4]); // checksum (unchecked by parse)
     buf.extend_from_slice(&[0u8; 20]); // signature (unchecked by parse)
-    // file_size placeholder at 0x20 — patched below.
+                                       // file_size placeholder at 0x20 — patched below.
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&0x70u32.to_le_bytes()); // header_size
     buf.extend_from_slice(&0x1234_5678u32.to_le_bytes()); // endian_tag

@@ -6,7 +6,7 @@
 
 - `findrefs string|type|method|field` — locate references in DEX bytecode.
 - `getclass <descriptor>` — locate a class, rebuild a minimal standalone DEX, decompile to Java.
-- `listclass`, `manifest`, `inspect`, `native` — class list, manifest dump, inventory/packer signals, ELF/JNI inventory (`--format json` on all).
+- `listclass`, `manifest`, `inspect`, `native`, `cert` — class list, manifest dump, inventory/packer signals, ELF/JNI inventory, signing-cert display (`--format json` on all).
 
 Pillars: **lazy** DEX access, **zero-copy** pools, **bounded memory**. No whole-APK preprocessing, no global xref graphs, no Python/JVM/Node at runtime. Outputs: `target/release/asc-rs.exe` (CLI) and `asc-gui.exe` (egui workbench). Oracle + spec live (read-only) under `reference/` (`BEHAVIOR.md`, `FREEZE.md`; `reference/asc/` is gitignored, never write to it).
 

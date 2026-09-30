@@ -28,10 +28,12 @@
 //! wraps a borrowed buffer. Both expose `dex_entries()`, `entry(name)`,
 //! `entries()`, `read_entry(entry)` and return `EntryBytes<'_>`.
 mod apk;
+pub mod der;
 pub mod elf;
 mod entry;
 mod error;
 mod inflate;
+pub mod signing;
 mod zip;
 
 pub use crate::apk::{Apk, ZipView};

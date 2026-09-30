@@ -3,7 +3,7 @@
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
 //! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`,
-//! `asc-rs inspect <apk|dex>`, and `asc-rs native <apk|dex>`,
+//! `asc-rs inspect <apk|dex>`, `asc-rs native <apk|dex>`, and `asc-rs cert <apk>`,
 //! with `--format text|json`, `-o/--output`, `--threads`, `--debug`.
 //!
 //! All engine logic lives in `asc-core`; this binary is a thin
@@ -24,10 +24,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use asc_core::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
-    ListClassesOptions, format_getclass_json, format_getclass_text, format_inspect_text,
-    format_listclasses_json, format_listclasses_text, format_native_text,
-    format_search_report_json, format_search_report_text, run_findrefs, run_getclass, run_inspect,
-    run_listclasses, run_native,
+    ListClassesOptions, format_cert_text, format_getclass_json, format_getclass_text,
+    format_inspect_text, format_listclasses_json, format_listclasses_text, format_native_text,
+    format_search_report_json, format_search_report_text, run_cert, run_findrefs, run_getclass,
+    run_inspect, run_listclasses, run_native,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -40,6 +40,9 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Cmd::Manifest { apk } = &cli.cmd {
         return run_manifest_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
+    }
+    if let Cmd::Cert { apk } = &cli.cmd {
+        return run_cert_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
     }
     match dispatch(&cli) {
         Ok(()) => ExitCode::from(EXIT_OK),
@@ -88,7 +91,7 @@ struct SharedFlags {
     #[arg(long = "debug", default_value_t = false, global = true)]
     debug: bool,
     /// Output format (text | json). Default: text.
-    /// Honored by `findrefs`, `getclass`, `listclass` and `manifest`.
+    /// Honored by every subcommand.
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text, global = true)]
     format: OutputFormat,
     /// Decode Paranoid/LSParanoid-obfuscated strings: `getclass` shows
@@ -147,6 +150,12 @@ enum Cmd {
     /// joined by JNI export name.
     Native {
         /// Path to the APK or raw DEX.
+        apk: PathBuf,
+    },
+    /// Display signing certificates (JAR v1, APK Signature Scheme v2/v3).
+    /// Nothing is verified.
+    Cert {
+        /// Path to the APK.
         apk: PathBuf,
     },
 }
@@ -223,7 +232,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.debug,
             shared.format,
         ),
-        Cmd::Manifest { .. } => unreachable!("handled in main"),
+        Cmd::Manifest { .. } | Cmd::Cert { .. } => unreachable!("handled in main"),
         Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),
         Cmd::Native { apk } => run_native_cmd(apk, shared.output.as_deref(), shared.format),
     }
@@ -439,6 +448,44 @@ fn run_native_cmd(
         }
     }
     Ok(())
+}
+
+/// `asc-rs cert <apk>`: display-only signing inventory. `-o` is exclusive.
+/// Raw DEX / unreadable input exits 2, like `manifest`; an incomplete report
+/// (malformed signing data) is still printed in full and exits 2.
+fn run_cert_cmd(
+    apk: &std::path::Path,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let report = match run_cert(apk) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let rendered = match format {
+        OutputFormat::Text => format_cert_text(&report),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, rendered.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_INTERNAL);
+            }
+        }
+        None => {
+            print!("{rendered}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(if report.complete {
+        EXIT_OK
+    } else {
+        EXIT_INTERNAL
+    })
 }
 
 /// `asc-rs manifest <apk>`: text dump of the parsed manifest. Parse

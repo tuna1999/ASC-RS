@@ -37,6 +37,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 // No `unsafe` in this crate.
 
+pub mod cert;
 pub mod class_name;
 pub mod format;
 pub mod inspect;
@@ -46,6 +47,7 @@ pub mod pipeline;
 pub mod report;
 pub mod worker;
 
+pub use crate::cert::{CertReport, format_cert_text, run_cert};
 pub use crate::class_name::normalize_class_name;
 pub use crate::format::{
     JsonReport, format_getclass_json, format_getclass_text, format_listclasses_json,
