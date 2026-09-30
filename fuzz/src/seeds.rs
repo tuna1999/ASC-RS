@@ -28,6 +28,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_elf" => emit_elf(&dir)?,
             "fuzz_signing" => emit_signing(&dir)?,
             "fuzz_arsc" => emit_arsc(&dir)?,
+            "fuzz_apk_open" | "fuzz_inspect" => emit_apk_file(&dir)?,
             "fuzz_rebuild" => {
                 // Reuses the dex_minimal seed; nothing extra to emit
                 // unless the directory is empty (e.g. on first run
@@ -174,6 +175,21 @@ fn emit_elf(dir: &Path) -> io::Result<usize> {
     h[0x12] = 183;
     let mut n = write_bytes(dir.join("elf64_header_only.bin"), &h)?;
     n += write_bytes(dir.join("elf_empty.bin"), b"")?;
+    Ok(n)
+}
+
+/// Seed corpus for the file-backed targets: `Apk::open` and the
+/// `asc_core` path entry points both take a path, so the seeds are whole
+/// container files rather than raw payloads.
+fn emit_apk_file(dir: &Path) -> io::Result<usize> {
+    let mut n = write_bytes(
+        dir.join("zip_one_stored_class.bin"),
+        &zip_one_stored_class(),
+    )?;
+    n += write_bytes(dir.join("zip_multi_entry.bin"), &zip_multi_entry())?;
+    n += write_bytes(dir.join("zip_eocd_only.bin"), &zip_eocd_only())?;
+    n += write_bytes(dir.join("dex_minimal.bin"), &dex_minimal_header())?;
+    n += write_bytes(dir.join("apk_empty.bin"), b"")?;
     Ok(n)
 }
 

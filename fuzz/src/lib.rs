@@ -13,10 +13,11 @@
 //! Targets are written against the **contract APIs** of sibling crates;
 //! every target is registered unconditionally but compiles its
 //! integration body behind a per-crate Cargo feature (`dex`,
-//! `bytecode`, `apk`, `rebuild` — all OFF by default). With features
-//! off, each target reports `FuzzOutcome::SkippedDisabled` so the
-//! registry remains populated and `cargo build` stays green while
-//! sibling agents finish landing the real APIs.
+//! `bytecode`, `apk`, `rebuild`, `resources`, `core` — all OFF by
+//! default). With features off, each target reports
+//! `FuzzOutcome::SkippedDisabled` so the registry remains populated
+//! and `cargo build` stays green while sibling agents finish landing
+//! the real APIs.
 
 #[path = "../fuzz_targets/mod.rs"]
 pub mod fuzz_targets;
@@ -149,6 +150,16 @@ pub fn registry() -> Vec<TargetInfo> {
             func: fuzz_targets::fuzz_rebuild::run,
             default_seed: "dex_minimal",
         },
+        TargetInfo {
+            name: "fuzz_apk_open",
+            func: fuzz_targets::fuzz_apk_open::run,
+            default_seed: "apk_file",
+        },
+        TargetInfo {
+            name: "fuzz_inspect",
+            func: fuzz_targets::fuzz_inspect::run,
+            default_seed: "apk_file",
+        },
     ]
 }
 
@@ -186,6 +197,39 @@ pub fn write_crash(crash_dir: &Path, target: &str, input: &[u8]) -> std::io::Res
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(p),
         Err(e) => Err(e),
     }
+}
+
+/// A fuzz input staged as a real file under the OS temp directory.
+/// Needed by every target whose contract API takes a path rather than
+/// bytes. The file is deleted on drop — including while unwinding out of
+/// a panicking target — so a run leaves nothing behind.
+pub struct TempFile(pub PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Write `input` to a file under [`std::env::temp_dir`] named
+/// `asc-fuzz-<pid>-<tag>-<fnv1a_hex>.bin` and return a guard that
+/// removes it. The name is unique per (process, tag, content): the
+/// runner is single-threaded, and a leftover file from a killed process
+/// can never be re-read by a later run.
+pub fn stage_temp_file(tag: &str, input: &[u8]) -> std::io::Result<TempFile> {
+    use std::io::Write;
+
+    let name = format!(
+        "asc-fuzz-{}-{}-{}.bin",
+        std::process::id(),
+        tag,
+        fnv1a_64(input)
+    );
+    let path = std::env::temp_dir().join(name);
+    let mut f = std::fs::File::create(&path)?;
+    f.write_all(input)?;
+    f.sync_all()?;
+    Ok(TempFile(path))
 }
 
 // -------- Panic hook machinery --------

@@ -22,7 +22,7 @@ feature — `dex`, `bytecode`, `apk`, `rebuild` — so `cargo build`
 in `fuzz/` stays green while sibling agents finish landing the real
 APIs. With features OFF, each contract target reports
 `FuzzOutcome::SkippedDisabled` and the registry remains fully
-populated (12 entries). At integration, flip the matching feature on:
+populated (16 entries). At integration, flip the matching feature on:
 
 ```bash
 cargo build --release --features dex        # turn on DEX targets
@@ -62,6 +62,9 @@ fuzz/
     fuzz_zip_directory.rs
     fuzz_elf.rs
     fuzz_signing.rs
+    fuzz_arsc.rs
+    fuzz_apk_open.rs
+    fuzz_inspect.rs
     fuzz_rebuild.rs
   seeds/              # committed seed corpus (one subdir per target)
 ```
@@ -216,6 +219,8 @@ when the matching crate lands.
 | `fuzz_elf`            | `asc-apk`     | `elf::parse_elf(&[u8]) -> Result<ElfInfo, &str>`                    |
 | `fuzz_signing`        | `asc-apk`     | `signing::scan`, `der::parse_cert`, `der::parse_pkcs7`              |
 | `fuzz_arsc`           | `asc-resources` | `asc_resources::parse`, `Table::render`, `describe_config`        |
+| `fuzz_apk_open`      | `asc-apk`     | `Apk::open(path)`, `entries()`, `read_entry_prefix`, `dex_entries()`, `signing_scan()` |
+| `fuzz_inspect`       | `asc-core`    | `run_inspect`, `run_native`, `run_cert`, `run_resources(path, query)` |
 | `fuzz_rebuild`        | `asc-rebuild` | `rebuild(view, type_idx) -> Result<Vec<u8>, Error>`                 |
 
 `dummy` is always compiled and never touches a sibling crate —
@@ -232,4 +237,8 @@ it exists for self-test only.
 - `cargo run --release --bin fuzz-runner -- --target dummy
   --regress crashes` exits nonzero when replaying the saved
   crash.
-- All 11 seed subdirectories are populated by `gen-seeds`.
+- All 16 seed subdirectories are populated by `gen-seeds`.
+- `fuzz_apk_open` and `fuzz_inspect` each ran 20 s
+  (`--seeds seeds/apk_file --verbose 1`) with no panic; both stage
+  every input into `%TEMP%` as a uniquely named file that is deleted
+  when the target returns.
