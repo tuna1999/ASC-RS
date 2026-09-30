@@ -110,6 +110,26 @@ pub(crate) fn inflate_into_vec(
     Ok(out)
 }
 
+/// Inflate at most `max` leading bytes of a raw DEFLATE slice without
+/// reading the rest of the stream. Returns the bytes plus `true` when the
+/// stream ended within `max` (i.e. the prefix is the whole entry).
+/// Corruption after the prefix is intentionally not detected.
+pub(crate) fn inflate_prefix(
+    compressed: &[u8],
+    max: usize,
+) -> Result<(Vec<u8>, bool), crate::ApkError> {
+    let mut decoder = flate2::read::DeflateDecoder::new(compressed);
+    let mut out = Vec::new();
+    let err = |e: std::io::Error| crate::ApkError::Deflate(e.to_string());
+    (&mut decoder)
+        .take(max as u64)
+        .read_to_end(&mut out)
+        .map_err(err)?;
+    let mut probe = [0u8; 1];
+    let complete = out.len() < max || decoder.read(&mut probe).map_err(err)? == 0;
+    Ok((out, complete))
+}
+
 /// Verify the CRC-32 of `data` against `expected`. Used by the optional
 /// `read_entry_verified` path; cheap (crc32fast is ~30 GB/s on modern CPUs).
 pub(crate) fn verify_crc32(data: &[u8], expected: u32) -> bool {

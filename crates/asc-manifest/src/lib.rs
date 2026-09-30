@@ -116,7 +116,7 @@ pub enum ManifestError {
 }
 
 /// One `<uses-permission>` or `<permission>` entry from the manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PermissionEntry {
     /// The permission name (e.g. `android.permission.INTERNET`).
     pub name: String,
@@ -128,7 +128,7 @@ pub struct PermissionEntry {
 }
 
 /// One intent filter attached to a component.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct IntentFilter {
     /// Action URIs (e.g. `android.intent.action.MAIN`).
     pub actions: Vec<String>,
@@ -137,7 +137,7 @@ pub struct IntentFilter {
 }
 
 /// One activity / service / receiver declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ComponentEntry {
     /// Class name (e.g. `com.aurora.store.MainActivity`).
     pub name: String,
@@ -154,7 +154,7 @@ pub struct ComponentEntry {
 }
 
 /// One `<provider>` declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProviderEntry {
     /// Class name.
     pub name: String,
@@ -171,7 +171,7 @@ pub struct ProviderEntry {
 }
 
 /// Top-level structured view of an Android manifest.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ManifestInfo {
     /// `package` attribute of the `<manifest>` element.
     pub package: Option<String>,
@@ -223,6 +223,11 @@ pub fn parse_manifest(axml: &[u8]) -> Result<ManifestInfo, ManifestError> {
 pub fn parse_from_apk(path: impl AsRef<Path>) -> Result<ManifestInfo, ManifestError> {
     let apk = asc_apk::Apk::open(path.as_ref())
         .map_err(|e| ManifestError::Truncated(format!("apk open: {e}")))?;
+    if apk.is_raw_dex() {
+        return Err(ManifestError::Truncated(
+            "input is a raw DEX; 'manifest' requires an APK".into(),
+        ));
+    }
     let entry = apk
         .entry("AndroidManifest.xml")
         .ok_or_else(|| ManifestError::Truncated("AndroidManifest.xml entry not found".into()))?;

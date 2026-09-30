@@ -492,16 +492,24 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
 }
 
 /// Count classes per DEX (preserving central-directory order) from the
-/// full class list.
-fn per_dex_counts(
+/// full class list. Logical DEX names of a DEX-041 container are not
+/// known up front, so unseen names are appended in first-seen order.
+pub(crate) fn per_dex_counts(
     classes: &[crate::session::ClassEntry],
     mut order: Vec<(String, usize)>,
 ) -> Vec<(String, usize)> {
     for c in classes {
-        if let Some((_, n)) = order.iter_mut().find(|(name, _)| *name == c.dex_name) {
-            *n += 1;
+        match order.iter_mut().find(|(name, _)| *name == c.dex_name) {
+            Some((_, n)) => *n += 1,
+            None => order.push((c.dex_name.clone(), 1)),
         }
     }
+    // A DEX-041 container is reported through its logical members only.
+    let names: Vec<String> = order.iter().map(|(n, _)| n.clone()).collect();
+    order.retain(|(name, n)| {
+        let prefix = format!("{name}!classes");
+        *n > 0 || !names.iter().any(|o| o.starts_with(&prefix))
+    });
     order
 }
 

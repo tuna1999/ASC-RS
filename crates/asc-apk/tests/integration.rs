@@ -725,3 +725,102 @@ fn corpus_aurora_apk_multidex_matches_dex_fixtures() {
         "classes2.dex content"
     );
 }
+
+// =========================================================================
+// Raw DEX input (no ZIP wrapper)
+// =========================================================================
+
+#[test]
+fn raw_dex_opens_as_single_borrowed_entry() {
+    let mut bytes = b"dex\n035\0".to_vec();
+    bytes.extend_from_slice(&[7u8; 64]);
+    let tmp = write_to_temp(&bytes);
+    let apk = Apk::open(tmp.path()).expect("open raw dex");
+    assert!(apk.is_raw_dex());
+    let entries = apk.dex_entries();
+    assert_eq!(entries.len(), 1);
+    let got = apk.read_entry(&entries[0]).expect("read");
+    assert!(matches!(got, EntryBytes::Borrowed(_)));
+    assert_eq!(got.as_slice(), bytes.as_slice());
+    // No ZIP CRC exists: verified read must refuse rather than pass.
+    assert!(matches!(
+        apk.read_entry_verified(&entries[0]),
+        Err(ApkError::Unsupported(_))
+    ));
+    // A foreign entry must not be interpreted as a ZIP local header.
+    let mut foreign = entries[0].clone();
+    foreign.name = "other".into();
+    assert!(apk.read_entry(&foreign).is_err());
+}
+
+#[test]
+fn zip_is_not_raw_dex() {
+    let mut b = ZipBuilder::new();
+    b.add_stored("classes.dex", b"dex\n035\0".to_vec());
+    let tmp = write_to_temp(&b.build());
+    assert!(!Apk::open(tmp.path()).expect("open").is_raw_dex());
+}
+
+#[test]
+fn cdex_odex_vdex_rejected_clearly() {
+    for magic in [&b"cdex001\0"[..], b"dey\n036\0", b"vdex027\0"] {
+        let tmp = write_to_temp(magic);
+        let err = Apk::open(tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, ApkError::Unsupported(m) if m.contains("CDEX")),
+            "{magic:?}: {err:?}"
+        );
+    }
+}
+
+// =========================================================================
+// Prefix sampling
+// =========================================================================
+
+#[test]
+fn prefix_sampling_stored_and_deflated() {
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let mut b = ZipBuilder::new();
+    b.add_stored("s.bin", big.clone());
+    b.add_deflated("d.bin", big.clone());
+    let tmp = write_to_temp(&b.build());
+    let apk = Apk::open(tmp.path()).expect("open");
+    for name in ["s.bin", "d.bin"] {
+        let e = apk.entry(name).unwrap();
+        let (p, complete) = apk.read_entry_prefix(&e, 1000).expect("prefix");
+        assert_eq!(p.as_slice(), &big[..1000], "{name}");
+        assert!(!complete, "{name}");
+        let (p, complete) = apk.read_entry_prefix(&e, big.len()).expect("exact");
+        assert_eq!(p.len(), big.len(), "{name}");
+        assert!(complete, "exact-size prefix is complete: {name}");
+        let (p, complete) = apk.read_entry_prefix(&e, big.len() * 2).expect("over");
+        assert_eq!(p.len(), big.len());
+        assert!(complete);
+    }
+}
+
+#[test]
+fn prefix_sampling_large_deflated_entry_is_not_full_extraction() {
+    // 64 MiB of zeros deflates to ~64 KiB; a 4 KiB prefix must succeed
+    // even under an inflate cap far below the entry size.
+    let mut b = ZipBuilder::new();
+    b.add_deflated("z.bin", vec![0u8; 64 << 20]);
+    let tmp = write_to_temp(&b.build());
+    let apk = Apk::open(tmp.path()).expect("open");
+    let e = apk.entry("z.bin").unwrap();
+    let (p, complete) = apk.read_entry_prefix(&e, 4096).expect("prefix");
+    assert_eq!(p.len(), 4096);
+    assert!(!complete);
+}
+
+#[test]
+fn prefix_sampling_raw_dex() {
+    let mut bytes = b"dex\n035\0".to_vec();
+    bytes.extend_from_slice(&[1u8; 100]);
+    let tmp = write_to_temp(&bytes);
+    let apk = Apk::open(tmp.path()).expect("open");
+    let e = &apk.dex_entries()[0];
+    let (p, complete) = apk.read_entry_prefix(e, 10).expect("prefix");
+    assert_eq!(p.as_slice(), &bytes[..10]);
+    assert!(!complete);
+}

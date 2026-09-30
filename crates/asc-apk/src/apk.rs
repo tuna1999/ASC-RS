@@ -30,6 +30,9 @@ pub struct Apk {
     /// suffix `.dex`), sorted numerically: `classes.dex`, `classes2.dex`,
     /// `classes10.dex`, …
     dex_indices: Vec<usize>,
+    /// `true` when the file is a bare DEX (no ZIP): `entries` then holds
+    /// exactly one virtual STORED entry spanning the whole mapping.
+    raw_dex: bool,
 }
 
 impl Apk {
@@ -54,13 +57,48 @@ impl Apk {
         //   * `Apk::drop` will run `Mmap::drop` before `File::drop`, so the
         //     mapping cannot outlive its file.
         let mmap = unsafe { Mmap::map(&file) }?;
+        if let Some(kind) = sniff_non_zip_dex(&mmap) {
+            return match kind {
+                Sniff::Dex => {
+                    let name = path.file_name().map_or_else(
+                        || "classes.dex".into(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    let len = mmap.len() as u64;
+                    let entries = vec![DexEntry {
+                        name,
+                        method: Compression::Stored,
+                        compressed_size: len,
+                        uncompressed_size: len,
+                        // No ZIP CRC exists for a raw file.
+                        crc32: 0,
+                        local_header_offset: 0,
+                    }];
+                    Ok(Apk {
+                        mmap,
+                        entries,
+                        dex_indices: vec![0],
+                        raw_dex: true,
+                    })
+                }
+                Sniff::Unsupported => Err(ApkError::Unsupported(
+                    "CDEX/ODEX/VDEX containers are not supported",
+                )),
+            };
+        }
         let entries = crate::zip::parse_directory(&mmap)?;
         let dex_indices = discover_dex_indices(&entries);
         Ok(Apk {
             mmap,
             entries,
             dex_indices,
+            raw_dex: false,
         })
+    }
+
+    /// `true` when the input was a bare `.dex` file rather than a ZIP/APK.
+    pub fn is_raw_dex(&self) -> bool {
+        self.raw_dex
     }
 
     /// All `classes*.dex` entries at the archive root, sorted in numeric
@@ -103,6 +141,9 @@ impl Apk {
     /// [`ApkError::SizeMismatch`] if the CRC does not match, to give
     /// callers a distinct signal.
     pub fn read_entry_verified(&self, entry: &DexEntry) -> Result<EntryBytes<'_>, ApkError> {
+        if self.raw_dex {
+            return Err(ApkError::Unsupported("raw DEX has no ZIP CRC to verify"));
+        }
         let bytes = self.read_entry(entry)?;
         if !verify_crc32(bytes.as_slice(), entry.crc32) {
             return Err(ApkError::SizeMismatch {
@@ -120,7 +161,50 @@ impl Apk {
         entry: &DexEntry,
         limits: InflateLimits,
     ) -> Result<EntryBytes<'_>, ApkError> {
+        if self.raw_dex {
+            // Only the virtual whole-file entry is readable; never treat an
+            // arbitrary entry as a ZIP local header in a non-ZIP file.
+            return if *entry == self.entries[0] {
+                Ok(EntryBytes::Borrowed(&self.mmap))
+            } else {
+                Err(ApkError::Unsupported("entry not present in raw DEX input"))
+            };
+        }
         read_entry_inner(&self.mmap, entry, limits)
+    }
+
+    /// Read at most `max` leading bytes of `entry` for sampling (entropy,
+    /// magic). STORED/raw entries borrow the mmap; DEFLATED entries inflate
+    /// only the prefix. The flag is `true` when the prefix is the whole
+    /// entry. Neither the CRC nor the rest of a DEFLATE stream is checked.
+    pub fn read_entry_prefix(
+        &self,
+        entry: &DexEntry,
+        max: usize,
+    ) -> Result<(EntryBytes<'_>, bool), ApkError> {
+        if self.raw_dex {
+            let all = self.read_entry(entry)?;
+            let EntryBytes::Borrowed(b) = all else {
+                unreachable!("raw DEX reads are borrowed")
+            };
+            return Ok((EntryBytes::Borrowed(&b[..b.len().min(max)]), b.len() <= max));
+        }
+        let data_off = crate::zip::resolve_local_data_offset(&self.mmap, entry)? as usize;
+        let comp_end = data_off
+            .checked_add(entry.compressed_size as usize)
+            .filter(|&e| e <= self.mmap.len())
+            .ok_or(ApkError::Truncated("compressed payload overruns EOF"))?;
+        let comp = &self.mmap[data_off..comp_end];
+        match entry.method {
+            Compression::Stored => Ok((
+                EntryBytes::Borrowed(&comp[..comp.len().min(max)]),
+                comp.len() <= max,
+            )),
+            Compression::Deflated => {
+                let (v, complete) = crate::inflate::inflate_prefix(comp, max)?;
+                Ok((EntryBytes::Inflated(v), complete))
+            }
+        }
     }
 }
 
@@ -128,6 +212,27 @@ impl Apk {
 // Both are `Sync`/`Send` for the same reasons.
 unsafe impl Send for Apk {}
 unsafe impl Sync for Apk {}
+
+enum Sniff {
+    Dex,
+    Unsupported,
+}
+
+/// Recognise a bare DEX (`dex\n` + 3 ASCII digits + NUL) and reject the
+/// sibling containers we cannot read. `None` = treat as ZIP.
+fn sniff_non_zip_dex(buf: &[u8]) -> Option<Sniff> {
+    if buf.len() >= 8
+        && &buf[..4] == b"dex\n"
+        && buf[4..7].iter().all(u8::is_ascii_digit)
+        && buf[7] == 0
+    {
+        Some(Sniff::Dex)
+    } else if buf.starts_with(b"cdex") || buf.starts_with(b"dey\n") || buf.starts_with(b"vdex") {
+        Some(Sniff::Unsupported)
+    } else {
+        None
+    }
+}
 
 /// In-memory ZIP view over a borrowed byte slice.
 ///

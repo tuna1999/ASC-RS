@@ -102,3 +102,60 @@ fn parse_rejects_unknown_header_size() {
     buf[0x24..0x28].copy_from_slice(&0x80u32.to_le_bytes());
     assert!(DexView::parse(&buf).is_err());
 }
+
+// ---- DexView::data_end ----
+
+/// Header-only DEX whose map (header + map_list items) sits at the end.
+fn map_at_end_dex() -> Vec<u8> {
+    let mut d = vec![0u8; 0x70];
+    d[..8].copy_from_slice(b"dex\n035\0");
+    d[0x24..0x28].copy_from_slice(&0x70u32.to_le_bytes());
+    d[0x28..0x2C].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    d[0x34..0x38].copy_from_slice(&0x70u32.to_le_bytes());
+    d.extend_from_slice(&2u32.to_le_bytes());
+    for (ty, size, off) in [(0x0000u16, 1u32, 0u32), (0x1000, 1, 0x70)] {
+        d.extend_from_slice(&ty.to_le_bytes());
+        d.extend_from_slice(&0u16.to_le_bytes());
+        d.extend_from_slice(&size.to_le_bytes());
+        d.extend_from_slice(&off.to_le_bytes());
+    }
+    let n = d.len() as u32;
+    d[0x20..0x24].copy_from_slice(&n.to_le_bytes());
+    d
+}
+
+#[test]
+fn data_end_known_for_plain_dex_and_ignores_appended_tail() {
+    use asc_dex::map::DataEnd;
+    let mut d = map_at_end_dex();
+    let len = d.len();
+    let end = |b: &[u8]| DexView::parse(b).unwrap().data_end();
+    assert_eq!(end(&d), DataEnd::Known(len));
+    d.extend_from_slice(&[0xAB; 4096]);
+    assert_eq!(
+        end(&d),
+        DataEnd::Known(len),
+        "appended bytes are not covered"
+    );
+}
+
+#[test]
+fn data_end_unknown_when_last_item_is_variable_size() {
+    use asc_dex::map::DataEnd;
+    // tiny_dex places variable-size data after the map.
+    let d = tiny_dex();
+    assert!(matches!(
+        DexView::parse(&d).unwrap().data_end(),
+        DataEnd::Unknown(_)
+    ));
+}
+
+#[test]
+fn data_end_unknown_for_041_container() {
+    use asc_dex::map::DataEnd;
+    let c = build_041_container();
+    assert!(matches!(
+        DexView::parse(&c).unwrap().data_end(),
+        DataEnd::Unknown(_)
+    ));
+}

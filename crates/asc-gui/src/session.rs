@@ -188,16 +188,16 @@ impl WorkspaceSession {
         None
     }
 
-    /// Linear class lookup against one DEX. Returns the dex name if
-    /// `descriptor` is defined here.
+    /// Linear class lookup against one DEX entry (every logical DEX of a
+    /// DEX-041 container). Returns the logical dex name if `descriptor` is
+    /// defined here.
     fn try_class_in_dex(&self, entry: &asc_apk::DexEntry, descriptor: &str) -> Option<String> {
         let bytes = self.apk.read_entry(entry).ok()?;
-        let view = DexView::parse(bytes.as_slice()).ok()?;
-        if asc_query::class_defines(&view, descriptor) {
-            Some(entry.name.clone())
-        } else {
-            None
-        }
+        logical_views(&entry.name, bytes.as_slice())
+            .ok()?
+            .into_iter()
+            .find(|(_, view)| asc_query::class_defines(view, descriptor))
+            .map(|(name, _)| name)
     }
 
     /// Build (or return cached) class list for `dex_idx`. Returns
@@ -248,39 +248,54 @@ impl WorkspaceSession {
     }
 }
 
-/// Walk `bytes` (one DEX) and emit a list of `[descriptor, dex_name]`
-/// pairs by iterating `class_defs`. Returns an empty list if the
-/// DEX header is malformed (defensive — `read_entry` should already
-/// have rejected those).
+/// Parse every logical DEX of one entry: a single view for DEX ≤040, one
+/// per logical header for a DEX-041 container (named like the CLI does).
+fn logical_views<'a>(
+    entry_name: &str,
+    bytes: &'a [u8],
+) -> SessionResult<Vec<(String, DexView<'a>)>> {
+    let fail = |name: &str| SessionError::NotFound(format!("failed to parse {name} as DEX"));
+    if bytes.starts_with(b"dex\n041\0") {
+        let offsets = DexView::logical_header_offsets(bytes).map_err(|_| fail(entry_name))?;
+        let count = offsets.len();
+        offsets
+            .iter()
+            .enumerate()
+            .map(|(i, &off)| {
+                let name = asc_core::logical_dex_name(entry_name, count, i);
+                DexView::parse_at(bytes, off)
+                    .map(|v| (name.clone(), v))
+                    .map_err(|_| fail(&name))
+            })
+            .collect()
+    } else {
+        let view = DexView::parse(bytes).map_err(|_| fail(entry_name))?;
+        Ok(vec![(entry_name.to_string(), view)])
+    }
+}
+
+/// Walk `bytes` (one DEX entry) and emit a list of `[descriptor, dex_name]`
+/// pairs by iterating `class_defs` of every logical DEX. Errors if a DEX
+/// header is malformed.
 fn build_class_list(dex_name: &str, bytes: &[u8]) -> SessionResult<Vec<ClassEntry>> {
-    let view = match DexView::parse(bytes) {
-        Ok(v) => v,
-        Err(_) => {
-            return Err(SessionError::NotFound(format!(
-                "failed to parse {dex_name} as DEX"
-            )));
+    let mut out = Vec::new();
+    for (name, view) in logical_views(dex_name, bytes)? {
+        let count = view.class_def_count();
+        out.reserve(count as usize);
+        for i in 0..count {
+            let Ok(def) = view.class_def(i) else { continue };
+            let Ok(sidx) = view.type_(def.class) else {
+                continue;
+            };
+            let Ok(sref) = view.string(sidx) else {
+                continue;
+            };
+            out.push(ClassEntry {
+                descriptor: sref.decode_lossy().into_owned(),
+                dex_name: name.clone(),
+                kind: ClassKind::from_flags(def.access_flags),
+            });
         }
-    };
-    let count = view.class_def_count();
-    let mut out = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let def = match view.class_def(i) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let sidx = match view.type_(def.class) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let sref = match view.string(sidx) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        out.push(ClassEntry {
-            descriptor: sref.decode_lossy().into_owned(),
-            dex_name: dex_name.to_string(),
-            kind: ClassKind::from_flags(def.access_flags),
-        });
     }
     Ok(out)
 }

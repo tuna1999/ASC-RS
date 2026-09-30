@@ -2,7 +2,8 @@
 //!
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
-//! `asc-rs listclass <apk> [--prefix P]`, and `asc-rs manifest <apk>`,
+//! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`, and
+//! `asc-rs inspect <apk|dex>`,
 //! with `--format text|json`, `-o/--output`, `--threads`, `--debug`.
 //!
 //! All engine logic lives in `asc-core`; this binary is a thin
@@ -23,8 +24,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use asc_core::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
-    ListClassesOptions, format_getclass_text, format_listclasses_text, format_search_report_json,
-    format_search_report_text, run_findrefs, run_getclass, run_listclasses,
+    ListClassesOptions, format_getclass_json, format_getclass_text, format_inspect_text,
+    format_listclasses_json, format_listclasses_text, format_search_report_json,
+    format_search_report_text, run_findrefs, run_getclass, run_inspect, run_listclasses,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -36,7 +38,7 @@ const EXIT_INTERNAL: u8 = 2;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Cmd::Manifest { apk } = &cli.cmd {
-        return run_manifest_cmd(apk, cli.shared.output.as_deref());
+        return run_manifest_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
     }
     match dispatch(&cli) {
         Ok(()) => ExitCode::from(EXIT_OK),
@@ -85,7 +87,7 @@ struct SharedFlags {
     #[arg(long = "debug", default_value_t = false, global = true)]
     debug: bool,
     /// Output format (text | json). Default: text.
-    /// Only honored by `findrefs`; other subcommands ignore.
+    /// Honored by `findrefs`, `getclass`, `listclass` and `manifest`.
     #[arg(long = "format", value_enum, default_value_t = OutputFormat::Text, global = true)]
     format: OutputFormat,
     /// Decode Paranoid/LSParanoid-obfuscated strings: `getclass` shows
@@ -133,6 +135,11 @@ enum Cmd {
     /// Dump AndroidManifest.xml: package, SDKs, permissions, components.
     Manifest {
         /// Path to the APK.
+        apk: PathBuf,
+    },
+    /// Inventory an APK/DEX and report packer signals and anomalies.
+    Inspect {
+        /// Path to the APK or raw DEX.
         apk: PathBuf,
     },
 }
@@ -190,6 +197,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.threads,
             shared.debug,
             shared.paranoid,
+            shared.format,
         ),
         Cmd::Findrefs { apk, kind } => run_findrefs_cmd(
             apk,
@@ -206,8 +214,10 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.output.as_deref(),
             shared.threads,
             shared.debug,
+            shared.format,
         ),
         Cmd::Manifest { .. } => unreachable!("handled in main"),
+        Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),
     }
 }
 
@@ -218,6 +228,7 @@ fn run_getclass_cmd(
     threads: usize,
     debug: bool,
     paranoid: bool,
+    format: OutputFormat,
 ) -> Result<(), CoreError> {
     let started = Instant::now();
     let target = asc_core::normalize_class_name(class).map_err(CoreError::Class)?;
@@ -228,7 +239,10 @@ fn run_getclass_cmd(
     };
     let job = GetClassJob::new(apk.to_path_buf(), target.clone());
     let result = run_getclass(&job, &opts)?;
-    let source = format_getclass_text(&result.source);
+    let source = match format {
+        OutputFormat::Text => format_getclass_text(&result.source),
+        OutputFormat::Json => to_json(&format_getclass_json(&result)),
+    };
     if debug {
         eprintln!(
             "[DEBUG] Hit DEX: {} (class_def_off=0x{:x})",
@@ -317,6 +331,7 @@ fn run_listclass_cmd(
     output: Option<&std::path::Path>,
     threads: usize,
     debug: bool,
+    format: OutputFormat,
 ) -> Result<(), CoreError> {
     let started = Instant::now();
     // `ListClassesJob::new` rejects empty prefixes via
@@ -331,14 +346,20 @@ fn run_listclass_cmd(
     };
     let opts = ListClassesOptions { threads, debug };
     let result = run_listclasses(&job, &opts)?;
-    let text = format_listclasses_text(&result);
-    // `format_listclasses_text` strips the trailing newline; the CLI
-    // writes one trailing newline. Empty results emit nothing (matches
-    // the oracle's zero-iteration writer in `cli.py:_handle_listclass`).
-    let rendered = if text.is_empty() {
-        String::new()
-    } else {
-        text + "\n"
+    let rendered = match format {
+        OutputFormat::Text => {
+            let text = format_listclasses_text(&result);
+            // `format_listclasses_text` strips the trailing newline; the CLI
+            // writes one trailing newline. Empty results emit nothing
+            // (matches the oracle's zero-iteration writer in
+            // `cli.py:_handle_listclass`).
+            if text.is_empty() {
+                String::new()
+            } else {
+                text + "\n"
+            }
+        }
+        OutputFormat::Json => to_json(&format_listclasses_json(&result)),
     };
 
     if debug {
@@ -368,9 +389,35 @@ fn run_listclass_cmd(
     Ok(())
 }
 
+/// `asc-rs inspect <apk|dex>`: `-o` is exclusive like `listclass`.
+fn run_inspect_cmd(
+    apk: &std::path::Path,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> Result<(), CoreError> {
+    let report = run_inspect(apk)?;
+    let rendered = match format {
+        OutputFormat::Text => format_inspect_text(&report),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => std::fs::write(p, rendered.as_bytes())
+            .map_err(|e| CoreError::Usage(format!("write {p:?}: {e}")))?,
+        None => {
+            print!("{rendered}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    Ok(())
+}
+
 /// `asc-rs manifest <apk>`: text dump of the parsed manifest. Parse
 /// failure exits 2 (engine error); `-o` is exclusive like `listclass`.
-fn run_manifest_cmd(apk: &std::path::Path, output: Option<&std::path::Path>) -> ExitCode {
+fn run_manifest_cmd(
+    apk: &std::path::Path,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
     let m = match asc_manifest::parse_from_apk(apk) {
         Ok(m) => m,
         Err(e) => {
@@ -378,7 +425,10 @@ fn run_manifest_cmd(apk: &std::path::Path, output: Option<&std::path::Path>) -> 
             return ExitCode::from(EXIT_INTERNAL);
         }
     };
-    let text = format_manifest_text(&m);
+    let text = match format {
+        OutputFormat::Text => format_manifest_text(&m),
+        OutputFormat::Json => to_json(&m),
+    };
     match output {
         Some(p) => {
             if let Err(e) = std::fs::write(p, text.as_bytes()) {
@@ -392,6 +442,13 @@ fn run_manifest_cmd(apk: &std::path::Path, output: Option<&std::path::Path>) -> 
         }
     }
     ExitCode::from(EXIT_OK)
+}
+
+/// Pretty JSON plus a trailing newline (parse-safe for `-o` files).
+fn to_json<T: serde::Serialize>(v: &T) -> String {
+    let mut s = serde_json::to_string_pretty(v).unwrap_or_default();
+    s.push('\n');
+    s
 }
 
 fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {

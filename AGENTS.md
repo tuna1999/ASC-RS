@@ -2,10 +2,11 @@
 
 ## Project Overview
 
-**ASC-RS** is a pure-Rust port of [MG1937/ASC](https://github.com/MG1937/ASC) (oracle frozen at commit `ccc6bae`). On-demand APK analysis via two CLI commands:
+**ASC-RS** is a pure-Rust port of [MG1937/ASC](https://github.com/MG1937/ASC) (oracle frozen at commit `ccc6bae`). On-demand APK/DEX analysis via CLI commands (inputs: APK or bare `.dex`):
 
 - `findrefs string|type|method|field` — locate references in DEX bytecode.
 - `getclass <descriptor>` — locate a class, rebuild a minimal standalone DEX, decompile to Java.
+- `listclass`, `manifest`, `inspect` — class list, manifest dump, inventory/packer signals (`--format json` on all).
 
 Pillars: **lazy** DEX access, **zero-copy** pools, **bounded memory**. No whole-APK preprocessing, no global xref graphs, no Python/JVM/Node at runtime. Outputs: `target/release/asc-rs.exe` (CLI) and `asc-gui.exe` (egui workbench). Oracle + spec live (read-only) under `reference/` (`BEHAVIOR.md`, `FREEZE.md`; `reference/asc/` is gitignored, never write to it).
 

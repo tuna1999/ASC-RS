@@ -20,6 +20,7 @@ pub const MAP_TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
 pub const MAP_TYPE_ANNOTATION_SET: u16 = 0x1003;
 pub const MAP_TYPE_CLASS_DATA_ITEM: u16 = 0x2000;
 pub const MAP_TYPE_DEBUG_INFO_ITEM: u16 = 0x2003;
+pub const MAP_TYPE_MAP_LIST: u16 = 0x1000;
 
 /// A single map entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,4 +132,86 @@ impl<'a> DexView<'a> {
             count,
         })
     }
+
+    /// Byte offset just past the last section the map (and link area)
+    /// describes, i.e. where declared DEX content ends. Bytes beyond it are
+    /// not covered by any section.
+    ///
+    /// Only extents that can be computed exactly are reported: the last
+    /// map item (by offset) must be a fixed-size table, the map itself or
+    /// `string_data`. Anything else, DEX-041 containers (shared sections),
+    /// or an unreadable map yields [`DataEnd::Unknown`]; callers must not
+    /// read that as "no trailing bytes".
+    pub fn data_end(&self) -> DataEnd {
+        if self.version().as_str() == "041" {
+            return DataEnd::Unknown("DEX-041 container has shared sections");
+        }
+        let Ok(iter) = self.map_list() else {
+            return DataEnd::Unknown("map_list unreadable");
+        };
+        let mut items = Vec::new();
+        for it in iter {
+            match it {
+                Ok(i) => items.push(i),
+                Err(_) => return DataEnd::Unknown("map_list truncated"),
+            }
+        }
+        let Some(last) = items.iter().max_by_key(|i| i.offset) else {
+            return DataEnd::Unknown("map_list empty");
+        };
+        let size = last.size as usize;
+        let start = last.offset as usize;
+        let fixed = |unit: usize| size.checked_mul(unit).and_then(|n| start.checked_add(n));
+        let end = match last.ty {
+            MAP_TYPE_HEADER_ITEM => Some(start + self.header.header_size as usize),
+            MAP_TYPE_STRING_ID_ITEM | MAP_TYPE_TYPE_ID_ITEM | MAP_TYPE_CALL_SITE_ID_ITEM => {
+                fixed(4)
+            }
+            MAP_TYPE_PROTO_ID_ITEM => fixed(12),
+            MAP_TYPE_FIELD_ID_ITEM | MAP_TYPE_METHOD_ID_ITEM | MAP_TYPE_METHOD_HANDLE_ITEM => {
+                fixed(8)
+            }
+            MAP_TYPE_CLASS_DEF_ITEM => fixed(32),
+            // The map_list item's own `size` is 1; the real length is the
+            // leading u32 count of the list.
+            MAP_TYPE_MAP_LIST => crate::read::read_u32(self.physical, start)
+                .ok()
+                .and_then(|c| (c as usize).checked_mul(12))
+                .and_then(|n| start.checked_add(4)?.checked_add(n)),
+            MAP_TYPE_STRING_DATA => self.string_data_end(start, size),
+            _ => return DataEnd::Unknown("last map item has a variable-size type"),
+        };
+        let Some(mut end) = end else {
+            return DataEnd::Unknown("last map item extent overflows");
+        };
+        if self.header.link_size > 0 {
+            end = end.max(self.header.link_off as usize + self.header.link_size as usize);
+        }
+        if end > self.physical.len() {
+            return DataEnd::Unknown("declared extent exceeds file");
+        }
+        DataEnd::Known(end)
+    }
+
+    /// End of `count` consecutive `string_data_item`s starting at `start`
+    /// (ULEB utf16 length, MUTF-8 bytes, NUL). `None` on any overrun.
+    fn string_data_end(&self, start: usize, count: usize) -> Option<usize> {
+        let buf = self.physical;
+        let mut pos = start;
+        for _ in 0..count {
+            let (_, n) = crate::leb::uleb128(buf.get(pos..)?).ok()?;
+            pos += n;
+            pos += buf.get(pos..)?.iter().position(|&b| b == 0)? + 1;
+        }
+        Some(pos)
+    }
+}
+
+/// Result of [`DexView::data_end`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataEnd {
+    /// Declared content ends at this physical offset.
+    Known(usize),
+    /// Not computable; the reason is a short static description.
+    Unknown(&'static str),
 }

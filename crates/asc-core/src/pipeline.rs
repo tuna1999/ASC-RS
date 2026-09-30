@@ -207,6 +207,7 @@ pub struct GetClassResult {
 /// run `find_refs` per view, and aggregate into a [`SearchReport`].
 pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchReport, CoreError> {
     let apk = Apk::open(&job.apk)?;
+    check_raw_dex(&apk)?;
     let entries = apk.dex_entries();
     let deobs = match &job.query {
         Query::String { pattern } if opts.paranoid => {
@@ -579,6 +580,7 @@ pub fn run_getclass(
 ) -> Result<GetClassResult, CoreError> {
     let target = job.target.clone();
     let apk = Arc::new(Apk::open(&job.apk)?);
+    check_raw_dex(&apk)?;
     let entries = apk.dex_entries();
     let n = entries.len();
 
@@ -666,7 +668,7 @@ struct ClassHit {
 
 /// Display name of logical DEX `i` of `count` in entry `name`
 /// (oracle: `iter_logical_dex_buffers`).
-fn logical_dex_name(name: &str, count: usize, i: usize) -> String {
+pub fn logical_dex_name(name: &str, count: usize, i: usize) -> String {
     if count <= 1 {
         name.to_string()
     } else {
@@ -823,6 +825,29 @@ pub struct ListClassesResult {
     pub per_dex_counts: Vec<(String, usize)>,
 }
 
+/// A bare `.dex` input has no APK-level fallback: unlike a `classes*.dex`
+/// entry (which the oracle skips silently), an unparseable raw file must
+/// fail loudly instead of yielding an empty successful result.
+fn check_raw_dex(apk: &Apk) -> Result<(), CoreError> {
+    if !apk.is_raw_dex() {
+        return Ok(());
+    }
+    const BAD: CoreError = CoreError::Apk(ApkError::Truncated("raw DEX failed to parse"));
+    for entry in apk.dex_entries() {
+        let bytes = apk.read_entry(&entry)?;
+        let bytes = bytes.as_slice();
+        if bytes.starts_with(b"dex\n041\0") {
+            let offsets = DexView::logical_header_offsets(bytes).map_err(|_| BAD)?;
+            for off in offsets.iter() {
+                DexView::parse_at(bytes, *off).map_err(|_| BAD)?;
+            }
+        } else {
+            DexView::parse(bytes).map_err(|_| BAD)?;
+        }
+    }
+    Ok(())
+}
+
 /// List every class defined in any DEX of the APK, optionally filtered
 /// by `prefix`.
 pub fn run_listclasses(
@@ -839,6 +864,7 @@ pub fn run_listclasses(
         ));
     }
     let apk = Apk::open(&job.apk)?;
+    check_raw_dex(&apk)?;
     let prefix_bytes: Option<&[u8]> = job.prefix.as_deref().map(str::as_bytes);
     let mut names: Vec<String> = Vec::new();
     let mut per_dex_counts: Vec<(String, usize)> = Vec::with_capacity(apk.dex_entries().len());
@@ -867,7 +893,7 @@ pub fn run_listclasses(
 /// `ValueError("bad class_def->type_idx")` exit-1 path); per-DEX
 /// parse failures are silently skipped (matches the oracle's `_inflate_dex`
 /// try/except).
-fn collect_classes_from_bytes(
+pub(crate) fn collect_classes_from_bytes(
     bytes: &[u8],
     prefix: Option<&[u8]>,
     out: &mut Vec<String>,

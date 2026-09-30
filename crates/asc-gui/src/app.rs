@@ -199,7 +199,7 @@ impl AscApp {
             .collect();
         app.manifest = asc_manifest::parse_from_apk(session.path()).ok();
         app.apply_artifact(LoadedArtifact {
-            dex_counts: count_per_dex(&classes, dex_counts),
+            dex_counts: crate::task::per_dex_counts(&classes, dex_counts),
             session,
             manifest: app.manifest.clone(),
             classes,
@@ -576,7 +576,8 @@ impl AscApp {
             Command::OpenArtifact => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Android package", &["apk"])
-                    .set_title("Open APK")
+                    .add_filter("DEX", &["dex"])
+                    .set_title("Open APK or DEX")
                     .pick_file()
                 {
                     self.open_path(&path, ctx);
@@ -969,21 +970,6 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
         TaskOutcome::Search(_) => "search",
         TaskOutcome::Failed(_) => "failed",
     }
-}
-
-/// Count classes per DEX (preserving order). Test-helper support
-/// (mirrors `task::per_dex_counts`, which runs on the worker).
-#[cfg(test)]
-fn count_per_dex(
-    classes: &[crate::session::ClassEntry],
-    mut order: Vec<(String, usize)>,
-) -> Vec<(String, usize)> {
-    for c in classes {
-        if let Some((_, n)) = order.iter_mut().find(|(name, _)| *name == c.dex_name) {
-            *n += 1;
-        }
-    }
-    order
 }
 
 #[cfg(test)]

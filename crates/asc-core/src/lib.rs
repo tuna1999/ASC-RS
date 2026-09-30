@@ -39,6 +39,7 @@
 
 pub mod class_name;
 pub mod format;
+pub mod inspect;
 mod paranoid;
 pub mod pipeline;
 pub mod report;
@@ -46,13 +47,14 @@ pub mod worker;
 
 pub use crate::class_name::normalize_class_name;
 pub use crate::format::{
-    JsonReport, format_getclass_text, format_listclasses_text, format_search_report_json,
-    format_search_report_text,
+    JsonReport, format_getclass_json, format_getclass_text, format_listclasses_json,
+    format_listclasses_text, format_search_report_json, format_search_report_text,
 };
+pub use crate::inspect::{InspectReport, format_inspect_text, run_inspect};
 pub use crate::pipeline::{
     CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult,
-    ListClassesJob, ListClassesOptions, ListClassesResult, run_findrefs, run_getclass,
-    run_listclasses,
+    ListClassesJob, ListClassesOptions, ListClassesResult, logical_dex_name, run_findrefs,
+    run_getclass, run_listclasses,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::worker::{WorkerOutcome, WorkerPool};

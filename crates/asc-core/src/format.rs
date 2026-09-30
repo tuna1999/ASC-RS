@@ -28,7 +28,7 @@
 
 use serde::Serialize;
 
-use crate::pipeline::ListClassesResult;
+use crate::pipeline::{GetClassResult, ListClassesResult};
 use crate::report::{DexResults, SearchReport};
 
 /// Format a [`SearchReport`] into the oracle's per-DEX text format.
@@ -189,4 +189,98 @@ pub fn format_listclasses_text(result: &ListClassesResult) -> String {
         out.pop();
     }
     out
+}
+
+/// `listclass --format json` payload.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonListClasses {
+    /// Number of descriptors in `classes`.
+    pub total: usize,
+    /// Per-DEX class counts, in DEX order.
+    pub per_dex: Vec<JsonDexCount>,
+    /// Descriptors, DEX-definition order.
+    pub classes: Vec<String>,
+}
+
+/// One row of [`JsonListClasses::per_dex`].
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonDexCount {
+    /// DEX name.
+    pub dex_name: String,
+    /// Matching classes in that DEX.
+    pub count: usize,
+}
+
+/// Build the `listclass` JSON payload.
+pub fn format_listclasses_json(result: &ListClassesResult) -> JsonListClasses {
+    JsonListClasses {
+        total: result.names.len(),
+        per_dex: result
+            .per_dex_counts
+            .iter()
+            .map(|(dex_name, count)| JsonDexCount {
+                dex_name: dex_name.clone(),
+                count: *count,
+            })
+            .collect(),
+        classes: result.names.clone(),
+    }
+}
+
+/// `getclass --format json` payload.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonGetClass<'a> {
+    /// Winning DEX name.
+    pub dex_name: &'a str,
+    /// `class_def` offset used for the rebuild.
+    pub class_def_off: u32,
+    /// Decompiled source, unmodified.
+    pub source: &'a str,
+}
+
+/// Build the `getclass` JSON payload.
+pub fn format_getclass_json(result: &GetClassResult) -> JsonGetClass<'_> {
+    JsonGetClass {
+        dex_name: &result.dex_name,
+        class_def_off: result.class_def_off,
+        source: &result.source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listclasses_json_shape_is_stable() {
+        let r = ListClassesResult {
+            names: vec!["LA;".into(), "LB;".into(), "LC;".into()],
+            per_dex_counts: vec![("classes.dex".into(), 2), ("classes2.dex".into(), 1)],
+        };
+        let v = serde_json::to_value(format_listclasses_json(&r)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "total": 3,
+                "per_dex": [
+                    {"dex_name": "classes.dex", "count": 2},
+                    {"dex_name": "classes2.dex", "count": 1}
+                ],
+                "classes": ["LA;", "LB;", "LC;"]
+            })
+        );
+    }
+
+    #[test]
+    fn getclass_json_keeps_source_verbatim() {
+        let r = GetClassResult {
+            dex_name: "classes.dex".into(),
+            class_def_off: 112,
+            source: "class A {\n\t\"q\"\n}".into(),
+        };
+        let s = serde_json::to_string(&format_getclass_json(&r)).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(back["source"], r.source.as_str());
+        assert_eq!(back["class_def_off"], 112);
+    }
 }
