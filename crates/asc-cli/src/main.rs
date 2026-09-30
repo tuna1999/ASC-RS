@@ -260,6 +260,14 @@ fn run_getclass_cmd(
         OutputFormat::Text => format_getclass_text(&result.source),
         OutputFormat::Json => to_json(&format_getclass_json(&result)),
     };
+    let unbound = asc_core::unbound_locals(&result.source);
+    if !unbound.is_empty() {
+        eprintln!(
+            "warning: decompiled Java may be incorrect: {} local(s) read but never assigned: {}",
+            unbound.len(),
+            unbound.join(", ")
+        );
+    }
     if debug {
         eprintln!(
             "[DEBUG] Hit DEX: {} (class_def_off=0x{:x})",

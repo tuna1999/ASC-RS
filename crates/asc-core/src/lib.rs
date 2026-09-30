@@ -62,3 +62,4 @@ pub use crate::pipeline::{
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::worker::{WorkerOutcome, WorkerPool};
+pub use asc_decompile::diagnose::unbound_locals;
