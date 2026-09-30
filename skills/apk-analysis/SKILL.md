@@ -15,6 +15,7 @@ asc-rs findrefs <apk> type   <substr>            # callers referencing a type de
 asc-rs findrefs <apk> method [name] [--class C [--fuzzy-class]]
 asc-rs findrefs <apk> field  [name] [--class C [--fuzzy-class]]
 asc-rs getclass <apk> <Lpkg/Cls; | pkg.Cls>      # decompile ONE class
+asc-rs disasm <apk> <Lpkg/Cls; | pkg.Cls> [--method NAME]   # Smali-syntax listing of ONE class (bytecode, not Java)
 asc-rs listclass <apk> [-o FILE]                 # all class descriptors, DEX order
 asc-rs manifest <apk> [-o FILE]                  # package, version, SDKs, permissions, components
 asc-rs inspect <apk|dex> [-o FILE]               # entry inventory, DEX coverage/checksums, packer signals, manifest-vs-DEX check
@@ -41,6 +42,7 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 | Who signed this APK / do two samples share a signer? | `cert` |
 | Resource names/values, lure text in `resources.arsc`, ID lookup | `resources` |
 | Read a class's shape | `getclass` |
+| Decompiled Java looks wrong (`getclass` warning) or you need exact bytecode/operands | `disasm` |
 
 ## Output
 
@@ -49,6 +51,7 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 - `--class` accepts `Lpkg/C;` or dotted. Exact by default; `--fuzzy-class` = substring.
 - `getclass` prints decompiled Java (droidsaw backend): `// Source: X.java`, package, fields, and method bodies. Decompiled bodies can be imperfect; cross-check critical logic with `findrefs`.
 - `getclass` stderr `warning: decompiled Java may be incorrect: N local(s) read but never assigned: v2_3, …` = the droidsaw structurer dropped a phi (name heuristic, stdout/JSON unchanged, exit code unchanged). It does NOT detect the twin defect of a loop body emitted twice, so no warning is not proof the Java is right.
+- `disasm` prints Smali-syntax (first line is a `#` note): `.class/.super/.implements`, `.field`, `.method … .end method` with `.registers`, instructions, `:addr_<hex>` labels, `.catch/.catchall`, and `.packed-switch/.sparse-switch/.array-data` blocks at the method end (switch case targets are relative to the switch instruction, as the DEX spec says). Not emitted: annotations, static initial values, debug info (`.line/.local/.param`). Registers are always `vN` (no `pN`), labels are `:addr_<hex>` — dialect differences from baksmali, not byte-identical. It does NOT go through the Java structurer, so it lacks the missing-assignment/duplicated-loop defects. `--method NAME` = exact name, every overload, fields omitted. It refuses instead of guessing: a method with an unknown opcode, bad payload, out-of-range pool reference or branch into the middle of an instruction fails the whole command with `Lcls;->name: code_item at 0x… pc N: reason` (exit 2). Exit `1` = class or method not found. Evidence: a 2,014-class sample of five corpus DEX (663k instructions) has 0 mnemonic and 0 try/catch mismatches vs androguard and 4 formatting-only operand reports; `tests/differential/run_disasm_diff.py` still exits 1 on ~15 methods it attributes to oracle/runner payload-tail handling (2 spot-checked as fine, the rest not individually reviewed). `invoke-custom`, `invoke-polymorphic`, `const-method-handle/type` are covered only by synthetic DEX (none in the corpus); no baksmali was available for byte comparison.
 - Exit codes: `0` ok, `1` class not found (`getclass`), `2` engine error. `findrefs` with zero hits prints nothing and exits `0`; check for empty output, not exit code.
 - `--format json` for the other commands: `listclass` → `{total, per_dex:[{dex_name,count}], classes:[...]}`; `getclass` → `{dex_name, class_def_off, source}`; `manifest` → the full structured manifest (`package`, `permissions`, `activities`, `services`, `receivers`, `providers`; absent values are `null`). Errors stay on stderr with the usual exit code (no JSON error body).
 - `manifest` text: `package:`, `version:`, `sdk:`, then `permissions`, `activities`, `services`, `receivers`, `providers` sections; components carry `[exported]` and `action …` lines. It tolerates the manifest tampering Android itself ignores (zeroed root chunk type, garbage string-pool slots, garbage chunks after `</manifest>`), so it works on samples that break strict parsers. Exit `2` = the manifest really is unparseable (or absent).

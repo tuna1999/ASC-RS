@@ -6,7 +6,8 @@ search across all DEX entries), `getclass` (locate a class, extract a
 minimal standalone DEX, decompile), `listclass` (enumerate every class
 descriptor across all DEX entries, with optional ASCII prefix filter), and
 `manifest` (dump package, permissions, components; tolerates the AXML
-tampering Android itself ignores).
+tampering Android itself ignores), and `disasm` (Smali-syntax listing of one
+class, no decompiler structuring).
 No Python, no JVM, no Node at runtime.
 
 ## Philosophy
@@ -48,6 +49,7 @@ asc-rs findrefs <apk> method onLayout --class Lcom/foo/Bar;   # precise class
 asc-rs findrefs <apk> field  textColor --fuzzy-class --class Foo
 asc-rs getclass   <apk> Lcom/foo/Bar;              # decompiled Java source on stdout
 asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
+asc-rs disasm     <apk> Lcom/foo/Bar; [--method m]    # Smali-syntax listing (annotations/debug info not emitted)
 asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
 asc-rs manifest   <apk>                             # package, permissions, components
 asc-rs inspect    <apk|dex>                         # inventory, DEX coverage/checksums, packer signals

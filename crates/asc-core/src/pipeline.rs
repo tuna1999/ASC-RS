@@ -37,6 +37,15 @@
 //!    [`asc_decompile::ClassDecompiler::decompile`] → source string.
 //! 5. Return a [`GetClassResult`] with `dex_name` and `source`.
 //!
+//! ## disasm
+//!
+//! Same class-defining-DEX scan as `getclass` (WorkerPool, winner
+//! cell, same `CoreError::ClassNotFound` on a miss), but the winning
+//! DEX is handed whole to
+//! [`asc_decompile::ClassDecompiler::disassemble`] — no
+//! `asc-rebuild` closure and no minimal-DEX rewrite — which keeps
+//! cross-class references and method bodies verbatim.
+//!
 //! ## Cancellation
 //!
 //! The `getclass` worker pool checks `found` between entries (not
@@ -46,6 +55,7 @@
 //! naturally. Total cost is bounded by the next-to-finish in-flight
 //! entry's processing time.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 #[cfg(test)]
@@ -75,6 +85,8 @@ pub enum CoreError {
     Decompile(DecompileError),
     /// The class was not defined in any of the APK's DEX entries.
     ClassNotFound(String),
+    /// The `disasm --method` filter matched no method of the class.
+    MethodNotFound(String),
     /// The binary's CLI received bad input (e.g. neither `--class` nor
     /// `<name>` for `findrefs method`).
     Usage(String),
@@ -89,6 +101,9 @@ impl fmt::Display for CoreError {
             CoreError::Decompile(e) => write!(f, "{e}"),
             CoreError::ClassNotFound(c) => {
                 write!(f, "Class {c} not found in APK.")
+            }
+            CoreError::MethodNotFound(m) => {
+                write!(f, "Method {m} not found in class.")
             }
             CoreError::Usage(m) => write!(f, "{m}"),
         }
@@ -198,6 +213,59 @@ pub struct GetClassResult {
     pub class_def_off: u32,
     /// The decompiled Java-like source.
     pub source: String,
+}
+
+/// One disasm run.
+#[derive(Debug, Clone)]
+pub struct DisasmJob {
+    /// Path to the APK or raw `.dex`.
+    pub apk: std::path::PathBuf,
+    /// Class descriptor (already normalized — accept `L…;` or `dotted`).
+    pub target: String,
+    /// Optional exact method-name filter (every overload is emitted).
+    pub method: Option<String>,
+}
+
+impl DisasmJob {
+    /// Convenience constructor.
+    pub fn new(
+        apk: impl Into<std::path::PathBuf>,
+        target: impl Into<String>,
+        method: Option<&str>,
+    ) -> Self {
+        Self {
+            apk: apk.into(),
+            target: target.into(),
+            method: method.map(str::to_owned),
+        }
+    }
+}
+
+/// Options for [`run_disasm`].
+#[derive(Debug, Clone)]
+pub struct DisasmOptions {
+    /// Worker count used to locate the class-defining DEX.
+    pub threads: usize,
+    /// Emit the winning DEX name + timings to stderr.
+    pub debug: bool,
+}
+
+impl Default for DisasmOptions {
+    fn default() -> Self {
+        Self {
+            threads: 8,
+            debug: false,
+        }
+    }
+}
+
+/// Output of a successful [`run_disasm`].
+#[derive(Debug, Clone)]
+pub struct DisasmResult {
+    /// Display name of the winning DEX (`classes.dex`, `classes2.dex`, …).
+    pub dex_name: String,
+    /// The smali-syntax listing.
+    pub listing: String,
 }
 
 // --------------------- findrefs pipeline ---------------------
@@ -662,6 +730,9 @@ pub fn run_getclass(
 #[derive(Clone)]
 struct ClassHit {
     name: String,
+    /// The resolved class descriptor, so the disassembler can be handed
+    /// the same spelling `class_defines` matched on.
+    class: String,
     bytes: Vec<u8>,
     header_off: usize,
 }
@@ -699,6 +770,7 @@ fn scan_one_for_class(
         if class_defines(&view, target) {
             return Ok(Some(ClassHit {
                 name: logical_dex_name(entry_name, offsets.len(), i),
+                class: target.to_owned(),
                 bytes: bytes.to_vec(),
                 header_off,
             }));
@@ -750,6 +822,135 @@ fn decompile_winner(
         class_def_off: rebuilt.class_def_off,
         source,
     })
+}
+
+// --------------------- disasm pipeline ---------------------
+
+/// Locate the DEX that defines `target` (same bounded scan as
+/// [`run_getclass`]) and return its smali-syntax listing.
+///
+/// Unlike `getclass` the winning DEX is handed to
+/// [`ClassDecompiler::disassemble`] **whole** — no `asc-rebuild` closure
+/// and no minimal-DEX rewrite — so cross-class references and method
+/// bodies survive verbatim. `ClassHit::header_off` locates the class
+/// inside a DEX-041 container; for a single-DEX entry the whole entry
+/// is the DEX.
+pub fn run_disasm(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult, CoreError> {
+    let target = job.target.clone();
+    let started = std::time::Instant::now();
+    let apk = Arc::new(Apk::open(&job.apk)?);
+    check_raw_dex(&apk)?;
+    let entries = apk.dex_entries();
+    if entries.is_empty() {
+        return Err(CoreError::ClassNotFound(target));
+    }
+
+    // Single-dex fast path: skip the worker pool entirely.
+    if entries.len() == 1 {
+        let entry = &entries[0];
+        let bytes = apk.read_entry(entry)?.as_slice().to_vec();
+        if let Some(hit) = scan_one_for_class(&entry.name, &bytes, &target)? {
+            return disasm_winner(hit, &job.method, opts, started);
+        }
+        return Err(CoreError::ClassNotFound(target));
+    }
+
+    let pool = WorkerPool::new(opts.threads.max(1));
+    let found = Arc::new(AtomicBool::new(false));
+    let cell: Arc<OnceLock<ClassHit>> = Arc::new(OnceLock::new());
+    let first_err: Arc<OnceLock<CoreError>> = Arc::new(OnceLock::new());
+    let target_arc = Arc::new(target.clone());
+    let apk_clone = Arc::clone(&apk);
+    let cell_clone = Arc::clone(&cell);
+    let err_clone = Arc::clone(&first_err);
+
+    let scan_for_class = move |_: usize, entry: &DexEntry| -> Option<()> {
+        if found.load(Ordering::Acquire) {
+            return None;
+        }
+        let bytes = match apk_clone.read_entry(entry) {
+            Ok(b) => b.as_slice().to_vec(),
+            Err(e) => {
+                let _ = err_clone.set(e.into());
+                return None;
+            }
+        };
+        match scan_one_for_class(&entry.name, &bytes, &target_arc) {
+            Ok(Some(hit)) => {
+                let _ = cell_clone.set(hit);
+                found.store(true, Ordering::Release);
+                Some(())
+            }
+            Ok(None) => None,
+            Err(e) => {
+                let _ = err_clone.set(e);
+                None
+            }
+        }
+    };
+
+    let _outcome = pool.run(&entries, scan_for_class);
+    let winner = match cell.get() {
+        Some(w) => w.clone(),
+        None => {
+            return Err(
+                match Arc::try_unwrap(first_err)
+                    .ok()
+                    .and_then(OnceLock::into_inner)
+                {
+                    Some(e) => e,
+                    None => CoreError::ClassNotFound(target),
+                },
+            );
+        }
+    };
+    disasm_winner(winner, &job.method, opts, started)
+}
+
+/// Feed the winning DEX to the backend and render the listing.
+fn disasm_winner(
+    hit: ClassHit,
+    method: &Option<String>,
+    opts: &DisasmOptions,
+    started: std::time::Instant,
+) -> Result<DisasmResult, CoreError> {
+    // A DEX-041 container packs several logical DEXes into one entry;
+    // droidsaw-dex parses a single file from offset 0, so hand it just
+    // the member that defines the class. Single-DEX entries (`header_off
+    // == 0`) are passed through with no copy.
+    let dex_bytes: Cow<'_, [u8]> = if hit.header_off == 0 {
+        Cow::Borrowed(&hit.bytes)
+    } else {
+        let member = &hit.bytes[hit.header_off..];
+        let size = DexView::parse_at(member, 0)?.header().file_size as usize;
+        Cow::Owned(member[..size].to_vec())
+    };
+    let backend = asc_decompile::droidsaw::DroidsawBackend::new();
+    let listing = backend
+        .disassemble(&dex_bytes, &hit.class, method.as_deref())
+        .map_err(map_disasm_error)?;
+    if opts.debug {
+        eprintln!("[DEBUG] Hit DEX: {}", hit.name);
+        eprintln!(
+            "[DEBUG] Total Execution Time: {} us",
+            started.elapsed().as_micros()
+        );
+    }
+    Ok(DisasmResult {
+        dex_name: hit.name,
+        listing,
+    })
+}
+
+/// Class absent / method filter matched nothing are "not found" (exit
+/// 1, same class of user error `getclass` reports); everything the
+/// renderer could not resolve is an engine error (exit 2).
+fn map_disasm_error(e: DecompileError) -> CoreError {
+    match e {
+        DecompileError::ClassNotFound(c) => CoreError::ClassNotFound(c),
+        DecompileError::MethodNotFound(m) => CoreError::MethodNotFound(m),
+        other => CoreError::Decompile(other),
+    }
 }
 
 // --------------------- listclass pipeline ---------------------

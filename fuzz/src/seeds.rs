@@ -21,6 +21,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "dummy" => emit_dummy(&dir)?,
             "fuzz_dex_header" | "fuzz_dex041" | "fuzz_class_data" | "fuzz_code_item"
             | "fuzz_encoded_value" | "fuzz_annotations" => emit_dex(&dir)?,
+            "fuzz_disasm" => emit_disasm(&dir, root)?,
             "fuzz_uleb128" => emit_uleb(&dir)?,
             "fuzz_mutf8" => emit_mutf8(&dir)?,
             "fuzz_ref_walker" => emit_bytecode(&dir)?,
@@ -206,6 +207,25 @@ fn emit_zip(dir: &Path) -> io::Result<usize> {
         dir.join("zip_random_256.bin"),
         &random_deterministic(256, 0x1234_5678),
     )?;
+    Ok(n)
+}
+
+/// Seed corpus for the renderer-backed target: one DEX that PARSES
+/// (so mutations land inside the pools and instruction stream instead
+/// of dying at the magic/checksum gate) plus the shared `dex` seeds so
+/// the cheap gates stay fuzzed too. `fuzz_disasm` re-seals the
+/// signature for 7 of every 8 inputs; these raw copies are the
+/// un-sealed case it deliberately leaves alone.
+fn emit_disasm(dir: &Path, root: &Path) -> io::Result<usize> {
+    let mut n = write_bytes(
+        dir.join("dex_switch_try_array.bin"),
+        &crate::dex_builder::dex_with_switch_try_array(),
+    )?;
+    // Reuse the shared dex seeds so the cheap gates stay fuzzed too.
+    let src = root.join("dex_minimal");
+    if dir != src && src.is_dir() {
+        n += copy_dir(&src, dir)?;
+    }
     Ok(n)
 }
 

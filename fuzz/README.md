@@ -18,11 +18,12 @@ Targets are written against the **contract APIs** of sibling crates
 (`asc_dex::DexView`, `asc_bytecode::RefWalker`, `asc_apk::ZipView`,
 `asc_rebuild::rebuild`). Every target is registered unconditionally
 but its crate-coupling body is gated behind a per-crate Cargo
-feature — `dex`, `bytecode`, `apk`, `rebuild` — so `cargo build`
-in `fuzz/` stays green while sibling agents finish landing the real
-APIs. With features OFF, each contract target reports
-`FuzzOutcome::SkippedDisabled` and the registry remains fully
-populated (16 entries). At integration, flip the matching feature on:
+feature — `dex`, `bytecode`, `apk`, `rebuild`, `decompile` — so
+`cargo build` in `fuzz/` stays green while sibling agents finish
+landing the real APIs. With features OFF, each contract target
+reports `FuzzOutcome::SkippedDisabled` and the registry remains
+fully populated (17 entries). At integration, flip the matching
+feature on:
 
 ```bash
 cargo build --release --features dex        # turn on DEX targets
@@ -44,6 +45,8 @@ fuzz/
   run.ps1             # PowerShell restart loop
   src/
     lib.rs            # registry, FuzzOutcome, panic hook, helpers
+    seeds.rs          # seed-corpus emitter
+    dex_builder.rs    # byte-level DEX assembler for the seed corpus
     bin/
       fuzz-runner.rs  # the mutation driver
       gen-seeds.rs    # seeded-corpus emitter
@@ -66,6 +69,7 @@ fuzz/
     fuzz_apk_open.rs
     fuzz_inspect.rs
     fuzz_rebuild.rs
+    fuzz_disasm.rs
   seeds/              # committed seed corpus (one subdir per target)
 ```
 
@@ -222,6 +226,7 @@ when the matching crate lands.
 | `fuzz_apk_open`      | `asc-apk`     | `Apk::open(path)`, `entries()`, `read_entry_prefix`, `dex_entries()`, `signing_scan()` |
 | `fuzz_inspect`       | `asc-core`    | `run_inspect`, `run_native`, `run_cert`, `run_resources(path, query)` |
 | `fuzz_rebuild`        | `asc-rebuild` | `rebuild(view, type_idx) -> Result<Vec<u8>, Error>`                 |
+| `fuzz_disasm`         | `asc-decompile` | `DroidsawBackend::disassemble(bytes, descriptor, method) -> Result<String, DecompileError>` |
 
 `dummy` is always compiled and never touches a sibling crate —
 it exists for self-test only.
@@ -237,7 +242,18 @@ it exists for self-test only.
 - `cargo run --release --bin fuzz-runner -- --target dummy
   --regress crashes` exits nonzero when replaying the saved
   crash.
-- All 16 seed subdirectories are populated by `gen-seeds`.
+- All 17 seed subdirectories are populated by `gen-seeds`.
+- `fuzz_disasm` ran 20 s (`--features decompile`, seed
+  0xA5A5C0DEBEEF, 6 seeds) with no panic: 4243 executions,
+  ok=67 / boundary=4176. `ok` counts inputs that got past the DEX
+  gate into the smali renderer. The target re-seals the header
+  (SHA-1 + adler32, and `file_size` / `header_size` / `endian_tag`)
+  for 7 of every 8 inputs so mutations reach the renderer instead of
+  the checksum, and fails the run when `disassemble` returns a
+  `BackendError` carrying the backend's caught-panic marker. The
+  1-in-8 un-sealed case and the 5 cheap `dex_minimal` seeds keep the
+  gate path fuzzed. `--regress` over
+  `corpus/dex/aurora_classes2.dex` reports `ok`.
 - `fuzz_apk_open` and `fuzz_inspect` each ran 20 s
   (`--seeds seeds/apk_file --verbose 1`) with no panic; both stage
   every input into `%TEMP%` as a uniquely named file that is deleted

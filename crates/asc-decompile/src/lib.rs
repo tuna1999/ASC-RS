@@ -22,21 +22,25 @@
 //!
 //! - [`DecompileError::ClassNotFound`] — descriptor resolved to a `type_id`
 //!   but no `class_def` recognised it. Returned as `Err`, never `Ok("")`.
+//! - [`DecompileError::MethodNotFound`] — the `disassemble` method filter
+//!   matched nothing.
 //! - [`DecompileError::MalformedDex`] — header missing or zero-bytes input.
 //! - [`DecompileError::UnsupportedVersion`] — DEX magic not in 035..=041.
 //! - [`DecompileError::BackendError`] — anything the upstream crate surfaces
 //!   (panic-safe wrapper). Wrapped as `String`; never panics on untrusted
 //!   input.
 //!
-//! ## Wave-2 scaffold
+//! ## Adapter
 //!
-//! Adapter over `droidsaw-dex = "1.0.0"` (pinned exact). See
-//! [`crate::droidsaw::DroidsawBackend`] for the implementation.
+//! Adapter over `droidsaw-dex` (caret `2.0.0`, exact pin in `Cargo.lock`).
+//! See [`crate::droidsaw::DroidsawBackend`] for the implementation and
+//! [`crate::disasm`] for the smali-syntax renderer.
 
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
 pub mod diagnose;
+pub mod disasm;
 pub mod droidsaw;
 
 use thiserror::Error;
@@ -48,6 +52,13 @@ pub enum DecompileError {
     /// defined in the DEX.
     #[error("class not found: {0}")]
     ClassNotFound(String),
+
+    /// The `disassemble` method-name filter matched no method of the
+    /// resolved class. `Ok` is never returned for a filter that hits
+    /// nothing — an empty listing would read as "the class has no
+    /// methods".
+    #[error("method not found: {0}")]
+    MethodNotFound(String),
 
     /// The supplied bytes are not a recognisable DEX (missing magic, too
     /// short, header bytes that fail the format invariants).
@@ -113,4 +124,22 @@ pub trait ClassDecompiler: Send + Sync {
     /// `target` accepts both Dalvik descriptor (`Lcom/foo/Bar;`) and Java
     /// dotted (`com.foo.Bar`) form.
     fn decompile(&self, dex_bytes: &[u8], target: &str) -> Result<String, DecompileError>;
+
+    /// Disassemble `target` from `dex_bytes` to a smali-syntax listing.
+    ///
+    /// `target` uses the same normalisation as [`Self::decompile`].
+    /// `method` filters by exact method name — every overload of that name
+    /// is emitted. A name that matches nothing is
+    /// [`DecompileError::MethodNotFound`], never an empty listing.
+    ///
+    /// Implementations MUST refuse rather than approximate: an operand,
+    /// payload, branch target or catch handler that cannot be resolved from
+    /// the DEX is an error, not a placeholder. See
+    /// [`crate::disasm`] for the listing grammar.
+    fn disassemble(
+        &self,
+        dex_bytes: &[u8],
+        target: &str,
+        method: Option<&str>,
+    ) -> Result<String, DecompileError>;
 }

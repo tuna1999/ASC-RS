@@ -36,6 +36,7 @@ use droidsaw_dex::{
     classes::decompile_class_with_census, parser::DexFile, r8_inversion::build_trampoline_census,
 };
 
+use crate::disasm::render_class;
 use crate::{ClassDecompiler, DecompileError, normalize_class_name};
 
 /// DEX magic prefix `dex\n` plus the 3-byte version (`035`..=`041`).
@@ -72,27 +73,7 @@ impl DroidsawBackend {
 
 impl ClassDecompiler for DroidsawBackend {
     fn decompile(&self, dex_bytes: &[u8], target: &str) -> Result<String, DecompileError> {
-        // 1. Input shape gates — cheap checks before invoking the parser.
-        if dex_bytes.is_empty() {
-            return Err(DecompileError::MalformedDex("empty input".into()));
-        }
-        if dex_bytes.len() < 8 || &dex_bytes[..4] != DEX_MAGIC_PREFIX {
-            return Err(DecompileError::MalformedDex("missing dex\\n magic".into()));
-        }
-        // Version gate — droidsaw-dex claims 035..=041 support (CHANGELOG
-        // §1.0.0). Reject anything outside so callers get a typed error.
-        let ver = &dex_bytes[4..7];
-        let version_ok = matches!(
-            ver,
-            b"035" | b"036" | b"037" | b"038" | b"039" | b"040" | b"041"
-        );
-        if !version_ok {
-            return Err(DecompileError::UnsupportedVersion(format!(
-                "magic version {:?} not in 035..=041",
-                std::str::from_utf8(ver).unwrap_or("<non-utf8>"),
-            )));
-        }
-
+        gate_input(dex_bytes)?;
         // 2. Normalise the class name. Empty → ClassNotFound.
         let descriptor = normalize_class_name(target)?;
 
@@ -108,6 +89,49 @@ impl ClassDecompiler for DroidsawBackend {
             ))
         })
     }
+
+    fn disassemble(
+        &self,
+        dex_bytes: &[u8],
+        target: &str,
+        method: Option<&str>,
+    ) -> Result<String, DecompileError> {
+        gate_input(dex_bytes)?;
+        let descriptor = normalize_class_name(target)?;
+
+        catch_unwind(AssertUnwindSafe(|| {
+            self.disassemble_inner(dex_bytes, &descriptor, method)
+        }))
+        .unwrap_or_else(|_| {
+            Err(DecompileError::BackendError(
+                "droidsaw-dex panicked during disassemble".into(),
+            ))
+        })
+    }
+}
+
+/// Cheap shape gates shared by `decompile` and `disassemble`, so both reject
+/// the same bytes the same way before the parser is invoked.
+fn gate_input(dex_bytes: &[u8]) -> Result<(), DecompileError> {
+    if dex_bytes.is_empty() {
+        return Err(DecompileError::MalformedDex("empty input".into()));
+    }
+    if dex_bytes.len() < 8 || &dex_bytes[..4] != DEX_MAGIC_PREFIX {
+        return Err(DecompileError::MalformedDex("missing dex\\n magic".into()));
+    }
+    // Version gate — droidsaw-dex claims 035..=041 support (CHANGELOG
+    // §1.0.0). Reject anything outside so callers get a typed error.
+    let ver = &dex_bytes[4..7];
+    if !matches!(
+        ver,
+        b"035" | b"036" | b"037" | b"038" | b"039" | b"040" | b"041"
+    ) {
+        return Err(DecompileError::UnsupportedVersion(format!(
+            "magic version {:?} not in 035..=041",
+            std::str::from_utf8(ver).unwrap_or("<non-utf8>"),
+        )));
+    }
+    Ok(())
 }
 
 impl DroidsawBackend {
@@ -155,6 +179,29 @@ impl DroidsawBackend {
             ));
         }
         Ok(java)
+    }
+
+    fn disassemble_inner(
+        &self,
+        dex_bytes: &[u8],
+        descriptor: &str,
+        method: Option<&str>,
+    ) -> Result<String, DecompileError> {
+        let dex = self.parsed(dex_bytes)?;
+        let Some((_idx, class_def)) = dex.find_class(descriptor) else {
+            return Err(DecompileError::ClassNotFound(descriptor.to_owned()));
+        };
+        let listing = render_class(&dex, dex_bytes, descriptor, class_def, method)?;
+        // A name filter that matched nothing must not read as "this class
+        // has no methods".
+        if let Some(name) = method
+            && !listing.contains("\n.method ")
+        {
+            return Err(DecompileError::MethodNotFound(format!(
+                "{descriptor}->{name}"
+            )));
+        }
+        Ok(listing)
     }
 }
 

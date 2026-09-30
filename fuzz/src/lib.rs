@@ -160,6 +160,11 @@ pub fn registry() -> Vec<TargetInfo> {
             func: fuzz_targets::fuzz_inspect::run,
             default_seed: "apk_file",
         },
+        TargetInfo {
+            name: "fuzz_disasm",
+            func: fuzz_targets::fuzz_disasm::run,
+            default_seed: "disasm_dex",
+        },
     ]
 }
 
@@ -321,6 +326,7 @@ pub const ULEB_MAX_BYTES: usize = 16;
 // `gen-seeds` binary AND the integration tests can both call it
 // without duplicating the byte-construction code.
 
+pub mod dex_builder;
 pub mod seeds;
 
 /// Builds a buffer that starts with a minimal VALID DEX 035 header

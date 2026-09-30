@@ -18,6 +18,10 @@
 //! - [`pipeline::run_listclasses`] — enumerate every class descriptor
 //!   across all DEX entries (DEX-041-aware, optional ASCII prefix
 //!   filter). Mirrors the oracle's `droidasc listclass` subcommand.
+//! - [`pipeline::run_disasm`] — same class-defining-DEX scan as
+//!   [`pipeline::run_getclass`], but the winning DEX goes to
+//!   [`asc_decompile::ClassDecompiler::disassemble`] whole: no
+//!   `asc-rebuild` closure, no minimal-DEX rewrite.
 //! - [`report`] — the [`report::SearchReport`] / [`report::DexResults`]
 //!   / [`report::SearchError`] public types and their serde shape.
 //! - [`format`] — `text` and `json` emitters used by the CLI.
@@ -57,9 +61,9 @@ pub use crate::format::{
 pub use crate::inspect::{InspectReport, format_inspect_text, run_inspect};
 pub use crate::native::{NativeReport, format_native_text, run_native};
 pub use crate::pipeline::{
-    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult,
-    ListClassesJob, ListClassesOptions, ListClassesResult, logical_dex_name, run_findrefs,
-    run_getclass, run_listclasses,
+    CoreError, DisasmJob, DisasmOptions, DisasmResult, FindRefsJob, FindRefsOptions, GetClassJob,
+    GetClassOptions, GetClassResult, ListClassesJob, ListClassesOptions, ListClassesResult,
+    logical_dex_name, run_disasm, run_findrefs, run_getclass, run_listclasses,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::resources::{ResourcesQuery, ResourcesReport, format_resources_text, run_resources};

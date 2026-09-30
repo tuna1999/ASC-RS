@@ -74,6 +74,7 @@ fn contract_targets_are_disabled_with_default_features() {
         "fuzz_rebuild",
         "fuzz_apk_open",
         "fuzz_inspect",
+        "fuzz_disasm",
     ];
     let reg = registry();
     for name in contract_targets {

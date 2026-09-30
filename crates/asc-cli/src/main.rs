@@ -1,6 +1,7 @@
 //! # asc-cli
 //!
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
+//! `asc-rs disasm <apk|dex> <class> [--method NAME]`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
 //! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`,
 //! `asc-rs inspect <apk|dex>`, `asc-rs native <apk|dex>`, `asc-rs cert <apk>`, and
@@ -11,7 +12,8 @@
 //! arg-parsing / output-routing wrapper. Exit codes:
 //!
 //! - 0 — success (findrefs with zero hits is still success).
-//! - 1 — class-not-found (getclass), or input validation error
+//! - 1 — class-not-found (`getclass`, `disasm`), method-not-found
+//!   (`disasm --method`), or input validation error
 //!   (`findrefs method` with neither name nor `--class`, empty
 //!   `listclass --prefix`, etc.).
 //! - 2 — internal / unexpected error (APK parse, rebuild, decompile).
@@ -24,12 +26,12 @@ use std::time::Instant;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use asc_core::{
-    CoreError, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob,
-    ListClassesOptions, ResourcesQuery, format_cert_text, format_getclass_json,
-    format_getclass_text, format_inspect_text, format_listclasses_json, format_listclasses_text,
-    format_native_text, format_resources_text, format_search_report_json,
-    format_search_report_text, run_cert, run_findrefs, run_getclass, run_inspect, run_listclasses,
-    run_native, run_resources,
+    CoreError, DisasmJob, DisasmOptions, FindRefsJob, FindRefsOptions, GetClassJob,
+    GetClassOptions, ListClassesJob, ListClassesOptions, ResourcesQuery, format_cert_text,
+    format_getclass_json, format_getclass_text, format_inspect_text, format_listclasses_json,
+    format_listclasses_text, format_native_text, format_resources_text, format_search_report_json,
+    format_search_report_text, run_cert, run_disasm, run_findrefs, run_getclass, run_inspect,
+    run_listclasses, run_native, run_resources,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -69,9 +71,10 @@ fn main() -> ExitCode {
             // (ClassNotFound, Usage) print a clean message and exit 1;
             // everything else is exit 2.
             let code = match &e {
-                CoreError::ClassNotFound(_) | CoreError::Usage(_) | CoreError::Class(_) => {
-                    EXIT_USER_ERROR
-                }
+                CoreError::ClassNotFound(_)
+                | CoreError::MethodNotFound(_)
+                | CoreError::Usage(_)
+                | CoreError::Class(_) => EXIT_USER_ERROR,
                 _ => EXIT_INTERNAL,
             };
             // Match the oracle's `Error: …` stderr shape (see BEHAVIOR.md §7).
@@ -137,6 +140,21 @@ enum Cmd {
         apk: PathBuf,
         /// Class descriptor (`Lcom/poc/Main;` or `com.poc.Main`).
         class: String,
+    },
+    /// Disassemble a single class to a smali-syntax listing.
+    ///
+    /// Unlike `getclass` this does NOT rebuild a minimal DEX: the
+    /// whole class-defining DEX is handed to the backend, so
+    /// cross-class references and method bodies stay verbatim.
+    /// Annotations, static values and debug info are not emitted.
+    Disasm {
+        /// Path to the APK or raw DEX.
+        apk: PathBuf,
+        /// Class descriptor (`Lcom/poc/Main;` or `com.poc.Main`).
+        class: String,
+        /// Emit only methods with this exact name (all overloads).
+        #[arg(long = "method", value_name = "NAME")]
+        method: Option<String>,
     },
     /// Find every caller of a matching reference in the APK.
     Findrefs {
@@ -247,6 +265,14 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.paranoid,
             shared.format,
         ),
+        Cmd::Disasm { apk, class, method } => run_disasm_cmd(
+            apk,
+            class,
+            method.as_deref(),
+            shared.output.as_deref(),
+            shared.threads,
+            shared.debug,
+        ),
         Cmd::Findrefs { apk, kind } => run_findrefs_cmd(
             apk,
             kind,
@@ -318,6 +344,31 @@ fn run_getclass_cmd(
             .map_err(|e| CoreError::Usage(format!("write {out_path:?}: {e}")))?;
     }
     print!("{source}");
+    std::io::stdout().flush().ok();
+    Ok(())
+}
+
+/// `asc-rs disasm <apk|dex> <class>`: smali-syntax listing. `-o` is
+/// additive (same contract as `getclass`): the listing goes to stdout
+/// and, when set, also to the file.
+fn run_disasm_cmd(
+    apk: &std::path::Path,
+    class: &str,
+    method: Option<&str>,
+    output: Option<&std::path::Path>,
+    threads: usize,
+    debug: bool,
+) -> Result<(), CoreError> {
+    let target = asc_core::normalize_class_name(class).map_err(CoreError::Class)?;
+    let opts = DisasmOptions { threads, debug };
+    let job = DisasmJob::new(apk.to_path_buf(), target, method);
+    let result = run_disasm(&job, &opts)?;
+    let listing = result.listing;
+    if let Some(out_path) = output {
+        std::fs::write(out_path, listing.as_bytes())
+            .map_err(|e| CoreError::Usage(format!("write {out_path:?}: {e}")))?;
+    }
+    print!("{listing}");
     std::io::stdout().flush().ok();
     Ok(())
 }

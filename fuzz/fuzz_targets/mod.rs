@@ -15,6 +15,7 @@ pub mod fuzz_class_data;
 pub mod fuzz_code_item;
 pub mod fuzz_dex041;
 pub mod fuzz_dex_header;
+pub mod fuzz_disasm;
 pub mod fuzz_elf;
 pub mod fuzz_encoded_value;
 pub mod fuzz_inspect;
