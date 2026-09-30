@@ -358,6 +358,7 @@ pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
                 }
             }
         }
+        m.matched_libs.sort();
     }
     let matched = methods
         .iter()
