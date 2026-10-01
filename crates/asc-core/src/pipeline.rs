@@ -953,6 +953,66 @@ fn map_disasm_error(e: DecompileError) -> CoreError {
     }
 }
 
+// --------------------- callees pipeline ---------------------
+
+/// One one-hop callee run: which methods does `target::method` invoke.
+#[derive(Debug, Clone)]
+pub struct CalleesJob {
+    /// Path to the APK or raw `.dex`.
+    pub apk: std::path::PathBuf,
+    /// Class descriptor (`Lcom/foo/Bar;`).
+    pub target: String,
+    /// Method name (every overload is scanned).
+    pub method: String,
+}
+
+impl CalleesJob {
+    pub fn new(
+        apk: impl Into<std::path::PathBuf>,
+        target: impl Into<String>,
+        method: impl Into<String>,
+    ) -> Self {
+        Self {
+            apk: apk.into(),
+            target: target.into(),
+            method: method.into(),
+        }
+    }
+}
+
+/// Output of a successful [`run_callees`].
+#[derive(Debug, Clone)]
+pub struct CalleesResult {
+    /// Display name of the DEX that defines the class.
+    pub dex_name: String,
+    /// Distinct invoked methods, first-encounter order.
+    pub callees: Vec<asc_query::Callee>,
+}
+
+/// Locate the class-defining DEX (same scan as [`run_disasm`], run
+/// sequentially — one-shot lookup, no pool) and collect every method
+/// its `method` overloads invoke.
+pub fn run_callees(job: &CalleesJob) -> Result<CalleesResult, CoreError> {
+    let apk = Apk::open(&job.apk)?;
+    check_raw_dex(&apk)?;
+    for entry in apk.dex_entries() {
+        let bytes = apk.read_entry(&entry)?.as_slice().to_vec();
+        let Some(hit) = scan_one_for_class(&entry.name, &bytes, &job.target)? else {
+            continue;
+        };
+        // DEX-041 containers: `header_off` points at the logical
+        // member that defines the class (same as `decompile_winner`).
+        let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
+        let callees = asc_query::callees_of(&view, &hit.class, &job.method)
+            .map_err(|e| CoreError::Usage(format!("callees: {e}")))?;
+        return Ok(CalleesResult {
+            dex_name: hit.name,
+            callees,
+        });
+    }
+    Err(CoreError::ClassNotFound(job.target.clone()))
+}
+
 // --------------------- listclass pipeline ---------------------
 
 /// One listclass run.

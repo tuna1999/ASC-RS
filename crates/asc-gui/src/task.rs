@@ -74,6 +74,8 @@ pub enum TaskKind {
     FindRefsClass,
     /// `run_disasm` for one class descriptor (Smali listing).
     Disasm,
+    /// `run_callees` for one method (one-hop call fan-out).
+    Callees,
 }
 
 impl TaskKind {
@@ -85,6 +87,7 @@ impl TaskKind {
             TaskKind::FindRefs => "findrefs",
             TaskKind::FindRefsClass => "references",
             TaskKind::Disasm => "disasm",
+            TaskKind::Callees => "callees",
         }
     }
 }
@@ -112,6 +115,8 @@ pub enum TaskOutcome {
     Disassembled { dex_name: String, listing: String },
     /// Successful `run_findrefs`.
     Search(asc_core::SearchReport),
+    /// Successful `run_callees`: one-hop call fan-out of a method.
+    Callees(asc_core::CalleesResult),
     /// Engine error or worker panic, as a display string.
     Failed(String),
 }
@@ -344,12 +349,18 @@ impl TaskManager {
         )
     }
 
-    /// Spawn a `run_disasm` task for `descriptor`. The task label is
-    /// the smali document key (`{descriptor}#smali`) so `apply_task`
-    /// can file the listing under the right tab. Deduplicated like
-    /// decompiles.
-    pub fn spawn_disasm(&mut self, apk: &Path, descriptor: &str, ctx: &egui::Context) -> TaskId {
-        let key = Self::smali_key(descriptor);
+    /// Spawn a `run_disasm` task. `method = Some(name)` filters the
+    /// listing to that method's overloads (ASC-RS-GUI-004). The task
+    /// label is the smali document key so `apply_task` can file the
+    /// listing under the right tab. Deduplicated like decompiles.
+    pub fn spawn_disasm(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        method: Option<&str>,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let key = Self::smali_key(descriptor, method);
         if let Some(existing) = self
             .in_flight
             .iter()
@@ -360,17 +371,47 @@ impl TaskManager {
         }
         let apk: PathBuf = apk.to_path_buf();
         let target = descriptor.to_string();
+        let method = method.map(str::to_owned);
         self.submit(
             TaskKind::Disasm,
             key,
-            move || run_disasm_job(&apk, &target),
+            move || run_disasm_job(&apk, &target, method.as_deref()),
             ctx,
         )
     }
 
-    /// Document key for the smali listing of `descriptor`.
-    pub fn smali_key(descriptor: &str) -> String {
-        format!("{descriptor}#smali")
+    /// Document key for the smali listing of `descriptor` (optionally
+    /// filtered to one method).
+    pub fn smali_key(descriptor: &str, method: Option<&str>) -> String {
+        match method {
+            Some(m) => format!("{descriptor}#smali#{m}"),
+            None => format!("{descriptor}#smali"),
+        }
+    }
+
+    /// Spawn a one-hop callee scan for `descriptor::method`
+    /// (ASC-RS-GUI-001). Supersedes previous `Callees` tasks.
+    pub fn spawn_callees(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        method: &str,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        for t in &mut self.in_flight {
+            if t.kind == TaskKind::Callees {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        let method = method.to_string();
+        self.submit(
+            TaskKind::Callees,
+            format!("{target}->{method}"),
+            move || run_callees_job(&apk, &target, &method),
+            ctx,
+        )
     }
 
     /// Is a class-references query running?
@@ -559,16 +600,23 @@ fn run_findrefs_job(apk: &Path, query: &Query, paranoid: bool) -> TaskOutcome {
     }
 }
 
-/// Run one disasm engine job (worker-thread body): whole-DEX smali
-/// listing of one class, no method filter (the GUI editor's
-/// find-in-document covers narrowing).
-fn run_disasm_job(apk: &Path, descriptor: &str) -> TaskOutcome {
-    let job = asc_core::DisasmJob::new(apk, descriptor, None);
+/// Run one disasm engine job (worker-thread body): smali listing of
+/// one class, optionally narrowed to one method's overloads.
+fn run_disasm_job(apk: &Path, descriptor: &str, method: Option<&str>) -> TaskOutcome {
+    let job = asc_core::DisasmJob::new(apk, descriptor, method);
     match asc_core::run_disasm(&job, &asc_core::DisasmOptions::default()) {
         Ok(r) => TaskOutcome::Disassembled {
             dex_name: r.dex_name,
             listing: r.listing,
         },
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one one-hop callee scan (worker-thread body).
+fn run_callees_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
+    match asc_core::run_callees(&asc_core::CalleesJob::new(apk, descriptor, method)) {
+        Ok(r) => TaskOutcome::Callees(r),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
 }
@@ -826,11 +874,14 @@ mod tests {
         let mut mgr = TaskManager::new();
         let ctx = ctx();
         let apk = Path::new("x.apk");
-        let a = mgr.spawn_disasm(apk, "La;", &ctx);
-        let b = mgr.spawn_disasm(apk, "La;", &ctx);
+        let a = mgr.spawn_disasm(apk, "La;", None, &ctx);
+        let b = mgr.spawn_disasm(apk, "La;", None, &ctx);
         assert_eq!(a, b, "same descriptor dedups to the in-flight task");
-        assert_eq!(mgr.in_flight_count(), 1);
-        assert_eq!(TaskManager::smali_key("La;"), "La;#smali");
+        let m = mgr.spawn_disasm(apk, "La;", Some("run"), &ctx);
+        assert_ne!(a, m, "method-scoped listing is a distinct task");
+        assert_eq!(mgr.in_flight_count(), 2);
+        assert_eq!(TaskManager::smali_key("La;", None), "La;#smali");
+        assert_eq!(TaskManager::smali_key("La;", Some("run")), "La;#smali#run");
     }
 
     /// A panicking job degrades to a failed task, not a dead UI.

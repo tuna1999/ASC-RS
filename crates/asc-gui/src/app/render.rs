@@ -146,6 +146,23 @@ impl eframe::App for AscApp {
                     }
                     let sel_ok = self.symbol_sel.is_some();
                     if ui
+                        .add_enabled(sel_ok, egui::Button::new("Show Smali of clicked method"))
+                        .on_disabled_hover_text("click a method identifier first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowSmaliMethod);
+                    }
+                    if ui
+                        .add_enabled(sel_ok, egui::Button::new("Show callees of clicked method"))
+                        .on_disabled_hover_text("click a method identifier first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowCallees);
+                    }
+                    let sel_ok = self.symbol_sel.is_some();
+                    if ui
                         .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))
                         .on_disabled_hover_text("click an identifier in the editor first")
                         .clicked()

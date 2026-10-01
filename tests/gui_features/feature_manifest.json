@@ -805,9 +805,9 @@
       "feature": "Show callgraph (one-hop)",
       "priority": "P2",
       "weight": 3,
-      "status": "BLOCKED",
+      "status": "COMPLETE",
       "applicable": false,
-      "acceptance": "asc-gui::task::tests::callgraph_one_hop_*",
+      "acceptance": "asc-gui::app::tests::method_smali_and_callees_e2e",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
       "reference": "derived from find_refs"
@@ -843,9 +843,9 @@
       "feature": "Inspector SMALI view for selected method",
       "priority": "P2",
       "weight": 3,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": false,
-      "acceptance": "asc-gui::ui::inspector::tests::smali_view_*",
+      "acceptance": "asc-gui::app::tests::method_smali_and_callees_e2e",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
       "reference": "jadx-style"

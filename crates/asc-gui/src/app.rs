@@ -537,6 +537,43 @@ impl AscApp {
                 }
                 self.set_status(format!("disasm ready: {key}"), true);
             }
+            (TaskKind::Callees, TaskOutcome::Callees(result)) => {
+                // One-hop call fan-out, rendered as rows in the
+                // REFERENCES tab (callee class · member · site count).
+                let label = format!("callees of {}", task.label);
+                let rows = result
+                    .callees
+                    .iter()
+                    .map(|c| {
+                        let (class, member) = match c.target.split_once("->") {
+                            Some((a, b)) => (a.to_string(), b.to_string()),
+                            None => (c.target.clone(), String::new()),
+                        };
+                        crate::state::SearchRow {
+                            dex_name: result.dex_name.clone(),
+                            caller_class: class,
+                            caller_member: member,
+                            matched: vec![format!("×{}", c.sites)],
+                            code_off: None,
+                        }
+                    })
+                    .collect();
+                self.references = Some(crate::state::SearchResults {
+                    label,
+                    rows,
+                    complete: true,
+                    errors: Vec::new(),
+                });
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::References;
+                self.set_status("callees ready", true);
+            }
+            (TaskKind::Callees, TaskOutcome::Failed(e)) => {
+                self.last_error = Some(format!("callees: {e}"));
+                self.set_status(format!("callees failed: {e}"), false);
+                self.references = Some(SearchResults::from_error(task.label, e));
+                self.bottom_tab = BottomTab::References;
+            }
             (TaskKind::Disasm, TaskOutcome::Failed(e)) => {
                 self.tabs.set_failed(&task.label, e.clone());
                 self.last_error = Some(format!("disasm: {e}"));
@@ -677,7 +714,7 @@ impl AscApp {
                     self.set_status("open a class first", false);
                     return;
                 };
-                let key = crate::task::TaskManager::smali_key(&descriptor);
+                let key = crate::task::TaskManager::smali_key(&descriptor, None);
                 if self.documents.contains(&key) {
                     self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
                     return;
@@ -687,9 +724,55 @@ impl AscApp {
                     self.tabs.open_preview(&key);
                     self.tabs.activate(&key);
                     self.active_doc = None;
-                    self.tasks.spawn_disasm(&apk, &descriptor, ctx);
+                    self.tasks.spawn_disasm(&apk, &descriptor, None, ctx);
                     self.set_status(format!("disasm: {descriptor}"), true);
                 }
+            }
+            Command::ShowSmaliMethod | Command::ShowCallees => {
+                // Both act on the clicked identifier: the class is the
+                // active tab (not a smali view), the method name is
+                // the selected symbol's token.
+                let descriptor = self
+                    .tabs
+                    .active_descriptor()
+                    .or(self.selected_class.as_deref())
+                    .filter(|d| !d.ends_with("#smali"))
+                    .map(str::to_string);
+                let method = self.symbol_sel.as_ref().map(|s| s.token.clone());
+                let (Some(descriptor), Some(method)) = (descriptor, method) else {
+                    let msg = if self
+                        .tabs
+                        .active_descriptor()
+                        .or(self.selected_class.as_deref())
+                        .is_some()
+                    {
+                        "click a method identifier first"
+                    } else {
+                        "open a class first"
+                    };
+                    self.set_status(msg, false);
+                    return;
+                };
+                let Some(session) = &self.session else { return };
+                let apk = session.path().to_path_buf();
+                if matches!(cmd, Command::ShowCallees) {
+                    self.tasks.spawn_callees(&apk, &descriptor, &method, ctx);
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::References;
+                    self.set_status(format!("callees: {descriptor}->{method}"), true);
+                    return;
+                }
+                let key = crate::task::TaskManager::smali_key(&descriptor, Some(&method));
+                if self.documents.contains(&key) {
+                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+                    return;
+                }
+                self.tabs.open_preview(&key);
+                self.tabs.activate(&key);
+                self.active_doc = None;
+                self.tasks
+                    .spawn_disasm(&apk, &descriptor, Some(&method), ctx);
+                self.set_status(format!("disasm: {descriptor}->{method}"), true);
             }
             Command::ToggleBookmark => {
                 // Bookmark the active tab at the clicked line (or
@@ -1083,6 +1166,7 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
         TaskOutcome::Decompiled(_) => "decompiled",
         TaskOutcome::Loaded(_) => "loaded",
         TaskOutcome::Disassembled { .. } => "disassembled",
+        TaskOutcome::Callees(_) => "callees",
         TaskOutcome::Search(_) => "search",
         TaskOutcome::Failed(_) => "failed",
     }

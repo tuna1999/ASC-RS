@@ -37,12 +37,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 // No `unsafe` in this crate.
 
+mod callees;
 mod error;
 mod locator;
 mod owner;
 mod query;
 mod scan;
-
+pub use crate::callees::{Callee, callees_of};
 pub use crate::error::SearchError;
 pub use crate::locator::{class_defines, resolve_target_ids};
 pub use crate::owner::{CodeOwner, CodeOwners};

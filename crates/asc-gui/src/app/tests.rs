@@ -1260,7 +1260,7 @@ fn show_smali_opens_listing_tab() {
     }
     assert!(app.session.is_some(), "artifact loaded");
     let descriptor = "Lcom/google/android/material/timepicker/ClockFaceView;";
-    let key = crate::task::TaskManager::smali_key(descriptor);
+    let key = crate::task::TaskManager::smali_key(descriptor, None);
     crate::app::AscApp::run_ui(&ctx, |ui| {
         let ctx = ui.ctx();
         app.navigate_to(descriptor, false, None, NavOrigin::Tree, ctx);
@@ -1337,4 +1337,73 @@ fn overlay_windows_render() {
     h.run_steps(2);
     h.state_mut().apply_goto_line(3);
     assert_eq!(h.state().pending_scroll, Some(2));
+}
+
+/// ASC-RS-GUI-004 + ASC-RS-GUI-001: method-scoped Smali opens a
+/// `#smali#method` tab; one-hop callees land in the REFERENCES tab.
+/// Corpus-gated.
+#[test]
+fn method_smali_and_callees_e2e() {
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut app = AscApp::new(Some(apk));
+    for _ in 0..600 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(app.session.is_some(), "artifact loaded");
+    let descriptor = "Lcom/google/android/material/timepicker/ClockFaceView;";
+    // Simulate the click that selects a method identifier.
+    app.symbol_sel = Some(crate::app::SymbolSelection {
+        descriptor: descriptor.into(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: vec![],
+    });
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.navigate_to(descriptor, false, None, NavOrigin::Tree, ctx);
+        app.dispatch(Command::ShowCallees, ctx);
+    });
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app
+            .references
+            .as_ref()
+            .is_some_and(|r| r.label.starts_with("callees of"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let refs = app.references.as_ref().expect("callees landed");
+    assert!(refs.label.starts_with("callees of"));
+    assert!(!refs.rows.is_empty(), "a constructor must invoke something");
+    assert!(refs.rows.iter().all(|r| r.caller_class.starts_with('L')));
+
+    // Method-scoped smali tab (and only that one).
+    let key = crate::task::TaskManager::smali_key(descriptor, Some("<init>"));
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.dispatch(Command::ShowSmaliMethod, ui.ctx());
+    });
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.documents.contains(&key) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let doc = app.documents.get(&key).expect("method smali landed");
+    assert!(doc.source.contains(".method"), "method smali shape");
+    let full = crate::task::TaskManager::smali_key(descriptor, None);
+    assert!(
+        !app.documents.contains(&full),
+        "class listing must not have been requested"
+    );
 }

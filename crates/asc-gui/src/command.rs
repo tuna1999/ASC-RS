@@ -60,6 +60,12 @@ pub enum Command {
     /// Open the Smali (disasm) listing of the active class in a tab
     /// (JADX-GUI-018, unblocked by the `asc-rs disasm` renderer).
     ShowSmali,
+    /// Show the Smali listing of the clicked method only
+    /// (`disasm --method`, ASC-RS-GUI-004).
+    ShowSmaliMethod,
+    /// One-hop callees of the clicked method (`run_callees`,
+    /// ASC-RS-GUI-001) — rendered in the REFERENCES tab.
+    ShowCallees,
     /// Toggle a bookmark on the active tab at the clicked line
     /// (JADX-GUI-010).
     ToggleBookmark,

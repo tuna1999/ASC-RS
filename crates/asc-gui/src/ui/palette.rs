@@ -244,6 +244,11 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
         ("Quick open class (Ctrl+P)", Command::QuickOpen),
         ("Find references to selected class", Command::FindReferences),
         ("Show Smali of selected class", Command::ShowSmali),
+        ("Show Smali of clicked method", Command::ShowSmaliMethod),
+        (
+            "Show callees of clicked method (one-hop)",
+            Command::ShowCallees,
+        ),
         ("Toggle bookmark (Ctrl+B)", Command::ToggleBookmark),
         ("Go to bookmark (Ctrl+Shift+B)", Command::GoToBookmark),
         ("Open tabs picker (Ctrl+Shift+H)", Command::ShowOpenTabs),
