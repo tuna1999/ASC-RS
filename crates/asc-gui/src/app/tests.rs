@@ -1406,4 +1406,124 @@ fn method_smali_and_callees_e2e() {
         !app.documents.contains(&full),
         "class listing must not have been requested"
     );
+    // Regression: callees while a `#smali#method` tab is ACTIVE must
+    // still resolve the real class (from the symbol selection, not
+    // the tab key) — the shot suite caught this.
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.references = None;
+        app.dispatch(Command::ShowCallees, ui.ctx());
+    });
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app
+            .references
+            .as_ref()
+            .is_some_and(|r| r.label.starts_with("callees of"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        app.references
+            .as_ref()
+            .is_some_and(|r| r.label.starts_with("callees of") && !r.rows.is_empty()),
+        "callees resolves the class even with a smali tab active"
+    );
+}
+
+/// v0.9.0 feature shots: method Smali tab, callees rows, open-tabs
+/// picker. Same opt-in as `visual_shots`.
+#[test]
+fn visual_shots_v090_features() {
+    if std::env::var("ASC_GUI_SHOTS").is_err() {
+        eprintln!("ASC_GUI_SHOTS not set; skipping");
+        return;
+    }
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&shots).unwrap();
+    let save = |h: &mut egui_kittest::Harness<'_, AscApp>, name: &str| {
+        let img = h.render().expect("render");
+        let path = shots.join(format!("{name}.png"));
+        img.save(&path).unwrap();
+        eprintln!("shot: {}", path.display());
+    };
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    let ctx0 = h.ctx.clone();
+    h.state_mut().open_path(&apk, &ctx0);
+    for _ in 0..300 {
+        h.step();
+        if h.state().session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.state().session.is_some(), "artifact loaded");
+    let descriptor = "Lcom/google/android/material/timepicker/ClockFaceView;";
+    // Select a method identifier, then open the method Smali tab.
+    h.state_mut().queue(Command::OpenClass {
+        descriptor: descriptor.into(),
+        pin: false,
+        line: None,
+        origin: NavOrigin::Tree,
+    });
+    for _ in 0..300 {
+        h.step();
+        if h.state().active_doc.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.state_mut().symbol_sel = Some(crate::app::SymbolSelection {
+        descriptor: descriptor.into(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: vec![],
+    });
+    let key = crate::task::TaskManager::smali_key(descriptor, Some("<init>"));
+    h.state_mut().queue(Command::ShowSmaliMethod);
+    for _ in 0..300 {
+        h.step();
+        if h.state().documents.contains(&key) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    for _ in 0..2 {
+        h.step();
+    }
+    assert!(h.state().documents.contains(&key), "method smali landed");
+    save(&mut h, "09_method_smali");
+
+    // Callees of the same method → REFERENCES rows.
+    h.state_mut().queue(Command::ShowCallees);
+    for _ in 0..300 {
+        h.step();
+        if h.state()
+            .references
+            .as_ref()
+            .is_some_and(|r| r.label.starts_with("callees of"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    for _ in 0..2 {
+        h.step();
+    }
+    save(&mut h, "10_callees");
+
+    // Open-tabs picker strip.
+    h.state_mut().queue(Command::ShowOpenTabs);
+    for _ in 0..2 {
+        h.step();
+    }
+    save(&mut h, "11_open_tabs");
 }

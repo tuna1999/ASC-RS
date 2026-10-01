@@ -708,7 +708,7 @@ impl AscApp {
                     .tabs
                     .active_descriptor()
                     .or(self.selected_class.as_deref())
-                    .filter(|d| !d.ends_with("#smali"))
+                    .filter(|d| !d.contains("#smali"))
                     .map(str::to_string);
                 let Some(descriptor) = descriptor else {
                     self.set_status("open a class first", false);
@@ -729,26 +729,28 @@ impl AscApp {
                 }
             }
             Command::ShowSmaliMethod | Command::ShowCallees => {
-                // Both act on the clicked identifier: the class is the
-                // active tab (not a smali view), the method name is
-                // the selected symbol's token.
+                // Both act on the clicked identifier. The class is the
+                // symbol's own descriptor (its enclosing class), with
+                // the active tab as fallback — but never a `#smali`
+                // view key (`{class}#smali[#{method}]`).
                 let descriptor = self
-                    .tabs
-                    .active_descriptor()
-                    .or(self.selected_class.as_deref())
-                    .filter(|d| !d.ends_with("#smali"))
-                    .map(str::to_string);
+                    .symbol_sel
+                    .as_ref()
+                    .map(|s| s.descriptor.clone())
+                    .filter(|d| !d.is_empty())
+                    .or_else(|| {
+                        self.tabs
+                            .active_descriptor()
+                            .or(self.selected_class.as_deref())
+                            .filter(|d| !d.contains("#smali"))
+                            .map(str::to_string)
+                    });
                 let method = self.symbol_sel.as_ref().map(|s| s.token.clone());
                 let (Some(descriptor), Some(method)) = (descriptor, method) else {
-                    let msg = if self
-                        .tabs
-                        .active_descriptor()
-                        .or(self.selected_class.as_deref())
-                        .is_some()
-                    {
-                        "click a method identifier first"
-                    } else {
+                    let msg = if self.symbol_sel.is_some() {
                         "open a class first"
+                    } else {
+                        "click a method identifier first"
                     };
                     self.set_status(msg, false);
                     return;
