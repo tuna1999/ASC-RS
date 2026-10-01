@@ -26,21 +26,24 @@
 //! ## getclass (§17)
 //!
 //! 1. Open the APK once.
-//! 2. Bounded parallel scan: spawn N worker threads sharing one
-//!    `AtomicUsize` work cursor and one `AtomicBool` "found" flag.
+//! 2. Bounded parallel scan ([`find_defining_dex`]): N worker threads
+//!    share an `AtomicUsize` work cursor and an `AtomicBool` "found"
+//!    flag.
 //! 3. Each worker dequeues the next dex entry, inflates it, runs a
 //!    type-idx / class-def lookup via [`asc_query::class_defines`].
-//!    On a hit, the worker stores the entry name + bytes in an
-//!    `OnceLock` and sets the flag; other workers stop pulling new
-//!    entries.
+//!    On a hit, the worker records it in a best-hit cell that keeps
+//!    the LOWEST entry index (duplicate classes across DEXes resolve
+//!    like Android's classloader order: `classes.dex` shadows
+//!    `classes2.dex`) and sets the flag; other workers stop pulling
+//!    new entries. The result is scheduling-independent.
 //! 4. Winner's bytes → [`asc_rebuild::rebuild`] →
 //!    [`asc_decompile::ClassDecompiler::decompile`] → source string.
 //! 5. Return a [`GetClassResult`] with `dex_name` and `source`.
 //!
 //! ## disasm
 //!
-//! Same class-defining-DEX scan as `getclass` (WorkerPool, winner
-//! cell, same `CoreError::ClassNotFound` on a miss), but the winning
+//! Same class-defining-DEX scan as `getclass` ([`find_defining_dex`],
+//! same `CoreError::ClassNotFound` on a miss), but the winning
 //! DEX is handed whole to
 //! [`asc_decompile::ClassDecompiler::disassemble`] — no
 //! `asc-rebuild` closure and no minimal-DEX rewrite — which keeps
@@ -48,12 +51,14 @@
 //!
 //! ## Cancellation
 //!
-//! The `getclass` worker pool checks `found` between entries (not
-//! inside an entry's processing). When the winner is recorded, other
-//! workers stop pulling new work; their in-flight processing (a single
-//! `apk.read_entry + dex parse + class_defines check`) completes
-//! naturally. Total cost is bounded by the next-to-finish in-flight
-//! entry's processing time.
+//! The worker pool checks `found` between entries (not inside an
+//! entry's processing — a pulled entry always runs to completion so
+//! the lowest-index winner cannot be skipped). When the winner is
+//! recorded, other workers stop pulling new work; their in-flight
+//! processing (a single `apk.read_entry + dex parse + class_defines`
+//! check) completes naturally. Total cost is bounded by the
+//! next-to-finish in-flight entry's processing time.
+//!
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -682,36 +687,62 @@ pub fn run_getclass(
         return Err(CoreError::ClassNotFound(target));
     }
 
+    let hit = find_defining_dex(&apk, &entries, opts.threads.max(1), &target)?;
+    decompile_winner(hit, &target, opts, &apk)
+}
+
+/// Scan `entries` (already in `classes*.dex` numeric order) for the DEX
+/// that defines `target` and return the hit from the **lowest entry
+/// index** that defines it.
+///
+/// ## Determinism
+///
+/// The pool's work cursor hands out entries in index order and every
+/// pulled entry is processed to completion before the pool joins, so
+/// "lowest pulled index that hit" is also the lowest index overall —
+/// the winner cannot depend on worker scheduling. This matches
+/// Android's multidex classloader order (`classes.dex` shadows
+/// `classes2.dex` for a duplicate class) and the oracle's sequential
+/// submission order. Within one DEX-041 container the first logical
+/// header wins (see [`scan_one_for_class`]).
+///
+/// ## Error handling
+///
+/// Read/parse failures are recorded and only surface when no DEX
+/// defines the class (the oracle lets them escape `get_class_dex`
+/// only in that situation too).
+fn find_defining_dex(
+    apk: &Arc<Apk>,
+    entries: &[DexEntry],
+    threads: usize,
+    target: &str,
+) -> Result<ClassHit, CoreError> {
     // Single-dex fast path: skip the worker pool entirely.
-    if n == 1 {
+    if entries.len() == 1 {
         let entry = &entries[0];
         let bytes = apk.read_entry(entry)?.as_slice().to_vec();
-        if let Some(hit) = scan_one_for_class(&entry.name, &bytes, &target)? {
-            return decompile_winner(hit, &target, opts, &apk);
-        }
-        return Err(CoreError::ClassNotFound(target));
+        return scan_one_for_class(&entry.name, &bytes, target)?
+            .ok_or_else(|| CoreError::ClassNotFound(target.to_string()));
     }
 
-    // Bounded worker pool: each worker pulls the next entry index,
-    // reads + parses it, and runs class_defines. On a hit, the worker
-    // publishes to the OnceLock winner cell and sets `found`.
-    let pool = WorkerPool::new(opts.threads.max(1));
+    let pool = WorkerPool::new(threads.max(1));
     let found = Arc::new(AtomicBool::new(false));
-    let cell: Arc<OnceLock<ClassHit>> = Arc::new(OnceLock::new());
-    // First read/parse failure. The oracle lets these exceptions escape
-    // `get_class_dex`; here they only matter when no other DEX defines the class.
+    // Best hit so far, by entry index. First writer does not win: a
+    // lower-index hit must replace a higher one recorded earlier.
+    let best: Arc<std::sync::Mutex<Option<(usize, ClassHit)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    // First read/parse failure; only matters when nothing was found.
     let first_err: Arc<OnceLock<CoreError>> = Arc::new(OnceLock::new());
-    let target_arc = Arc::new(target.clone());
-    let apk_clone = Arc::clone(&apk);
-    let cell_clone = Arc::clone(&cell);
+    let target_arc = Arc::new(target.to_owned());
+    let apk_clone = Arc::clone(apk);
+    let best_clone = Arc::clone(&best);
     let err_clone = Arc::clone(&first_err);
 
-    let scan_for_class = move |_: usize, entry: &DexEntry| -> Option<()> {
-        if found.load(Ordering::Acquire) {
-            return None;
-        }
-        // Read the entry (clones the inflated bytes for independent
-        // ownership — bounded by the per-entry cap).
+    let scan_for_class = move |i: usize, entry: &DexEntry| -> Option<()> {
+        // Deliberately NO `found` check here: an entry that was already
+        // pulled must run to completion, or a lower-index winner could
+        // be skipped because a higher-index worker finished first.
+        // The pool itself stops pulling new entries once `found` is set.
         let bytes = match apk_clone.read_entry(entry) {
             Ok(b) => b.as_slice().to_vec(),
             Err(e) => {
@@ -721,7 +752,14 @@ pub fn run_getclass(
         };
         match scan_one_for_class(&entry.name, &bytes, &target_arc) {
             Ok(Some(hit)) => {
-                let _ = cell_clone.set(hit);
+                {
+                    let mut g = best_clone
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if g.as_ref().is_none_or(|(bi, _)| i < *bi) {
+                        *g = Some((i, hit));
+                    }
+                }
                 found.store(true, Ordering::Release);
                 Some(())
             }
@@ -733,22 +771,24 @@ pub fn run_getclass(
         }
     };
 
-    let _outcome = pool.run(&entries, scan_for_class);
-    let winner = match cell.get() {
-        Some(w) => w.clone(),
-        None => {
-            return Err(
-                match Arc::try_unwrap(first_err)
-                    .ok()
-                    .and_then(OnceLock::into_inner)
-                {
-                    Some(e) => e,
-                    None => CoreError::ClassNotFound(target),
-                },
-            );
-        }
-    };
-    decompile_winner(winner, &target, opts, &apk)
+    let _outcome = pool.run(entries, scan_for_class);
+    let winner = best
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .map(|(_, hit)| hit);
+    match winner {
+        Some(w) => Ok(w),
+        None => Err(
+            match Arc::try_unwrap(first_err)
+                .ok()
+                .and_then(OnceLock::into_inner)
+            {
+                Some(e) => e,
+                None => CoreError::ClassNotFound(target.to_string()),
+            },
+        ),
+    }
 }
 
 /// A class-defining DEX found by `getclass`: the display name, the entry
@@ -878,66 +918,8 @@ pub fn run_disasm(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult,
         return Err(CoreError::ClassNotFound(target));
     }
 
-    // Single-dex fast path: skip the worker pool entirely.
-    if entries.len() == 1 {
-        let entry = &entries[0];
-        let bytes = apk.read_entry(entry)?.as_slice().to_vec();
-        if let Some(hit) = scan_one_for_class(&entry.name, &bytes, &target)? {
-            return disasm_winner(hit, &job.method, opts, started);
-        }
-        return Err(CoreError::ClassNotFound(target));
-    }
-
-    let pool = WorkerPool::new(opts.threads.max(1));
-    let found = Arc::new(AtomicBool::new(false));
-    let cell: Arc<OnceLock<ClassHit>> = Arc::new(OnceLock::new());
-    let first_err: Arc<OnceLock<CoreError>> = Arc::new(OnceLock::new());
-    let target_arc = Arc::new(target.clone());
-    let apk_clone = Arc::clone(&apk);
-    let cell_clone = Arc::clone(&cell);
-    let err_clone = Arc::clone(&first_err);
-
-    let scan_for_class = move |_: usize, entry: &DexEntry| -> Option<()> {
-        if found.load(Ordering::Acquire) {
-            return None;
-        }
-        let bytes = match apk_clone.read_entry(entry) {
-            Ok(b) => b.as_slice().to_vec(),
-            Err(e) => {
-                let _ = err_clone.set(e.into());
-                return None;
-            }
-        };
-        match scan_one_for_class(&entry.name, &bytes, &target_arc) {
-            Ok(Some(hit)) => {
-                let _ = cell_clone.set(hit);
-                found.store(true, Ordering::Release);
-                Some(())
-            }
-            Ok(None) => None,
-            Err(e) => {
-                let _ = err_clone.set(e);
-                None
-            }
-        }
-    };
-
-    let _outcome = pool.run(&entries, scan_for_class);
-    let winner = match cell.get() {
-        Some(w) => w.clone(),
-        None => {
-            return Err(
-                match Arc::try_unwrap(first_err)
-                    .ok()
-                    .and_then(OnceLock::into_inner)
-                {
-                    Some(e) => e,
-                    None => CoreError::ClassNotFound(target),
-                },
-            );
-        }
-    };
-    disasm_winner(winner, &job.method, opts, started)
+    let hit = find_defining_dex(&apk, &entries, opts.threads.max(1), &target)?;
+    disasm_winner(hit, &job.method, opts, started)
 }
 
 /// Feed the winning DEX to the backend and render the listing.
