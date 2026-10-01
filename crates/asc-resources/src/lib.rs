@@ -202,8 +202,10 @@ impl Ctx<'_> {
             ));
         }
         let name_units: Vec<u16> = b[off + 12..off + 268]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .take_while(|&u| u != 0)
             .collect();
         let mut p = Package {

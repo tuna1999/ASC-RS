@@ -144,8 +144,10 @@ fn utf16_at(b: &[u8], mut pos: usize) -> Option<String> {
         return None;
     }
     let units = b[pos..end]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c));
     Some(
         char::decode_utf16(units)
             .map(|r| r.unwrap_or('\u{FFFD}'))

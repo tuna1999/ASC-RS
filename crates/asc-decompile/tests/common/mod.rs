@@ -96,7 +96,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut w = [0u32; 80];
-    for block in msg.chunks_exact(64) {
+    for block in msg.as_chunks::<64>().0 {
         for (i, word) in w.iter_mut().take(16).enumerate() {
             let o = i * 4;
             *word = u32::from_be_bytes([block[o], block[o + 1], block[o + 2], block[o + 3]]);
