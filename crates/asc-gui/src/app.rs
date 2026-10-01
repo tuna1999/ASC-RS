@@ -512,6 +512,25 @@ impl AscApp {
                 self.last_error = Some(format!("getclass: {e}"));
                 self.set_status(format!("getclass failed: {e}"), false);
             }
+            (TaskKind::Disasm, TaskOutcome::Disassembled { dex_name, listing }) => {
+                // Smali listing lands as a `#smali`-keyed document in
+                // the normal cache + tab flow (JADX-GUI-018).
+                let key = task.label;
+                let document = Document::new(key.clone(), dex_name.clone(), listing);
+                self.documents.put(Arc::new(document));
+                let keep = self.active_doc.as_ref().map(|d| d.descriptor.clone());
+                self.documents.enforce_budget(keep.as_deref());
+                self.tabs.set_ready(&key, Some(dex_name));
+                if self.tabs.active_descriptor() == Some(key.as_str()) {
+                    self.active_doc = self.documents.get(&key);
+                }
+                self.set_status(format!("disasm ready: {key}"), true);
+            }
+            (TaskKind::Disasm, TaskOutcome::Failed(e)) => {
+                self.tabs.set_failed(&task.label, e.clone());
+                self.last_error = Some(format!("disasm: {e}"));
+                self.set_status(format!("disasm failed: {e}"), false);
+            }
             (TaskKind::FindRefs, TaskOutcome::Search(report)) => {
                 let results = SearchResults::from_report(task.label, &report);
                 let summary_ok = results.complete && results.errors.is_empty();
@@ -631,6 +650,34 @@ impl AscApp {
                     self.set_status(format!("references: {descriptor}"), true);
                 } else {
                     self.set_status("open a class first", false);
+                }
+            }
+            Command::ShowSmali => {
+                // Smali listing of the active class, opened as a
+                // `#smali`-keyed document/tab. Cached listings reuse
+                // the normal navigation path.
+                let descriptor = self
+                    .tabs
+                    .active_descriptor()
+                    .or(self.selected_class.as_deref())
+                    .filter(|d| !d.ends_with("#smali"))
+                    .map(str::to_string);
+                let Some(descriptor) = descriptor else {
+                    self.set_status("open a class first", false);
+                    return;
+                };
+                let key = crate::task::TaskManager::smali_key(&descriptor);
+                if self.documents.contains(&key) {
+                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+                    return;
+                }
+                if let Some(session) = &self.session {
+                    let apk = session.path().to_path_buf();
+                    self.tabs.open_preview(&key);
+                    self.tabs.activate(&key);
+                    self.active_doc = None;
+                    self.tasks.spawn_disasm(&apk, &descriptor, ctx);
+                    self.set_status(format!("disasm: {descriptor}"), true);
                 }
             }
             Command::UsedByClass => {
@@ -967,6 +1014,7 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
     match outcome {
         TaskOutcome::Decompiled(_) => "decompiled",
         TaskOutcome::Loaded(_) => "loaded",
+        TaskOutcome::Disassembled { .. } => "disassembled",
         TaskOutcome::Search(_) => "search",
         TaskOutcome::Failed(_) => "failed",
     }

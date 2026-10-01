@@ -168,8 +168,16 @@ impl SearchController {
         if pattern.is_empty() {
             return None;
         }
-        let class = (!self.class_filter.trim().is_empty())
-            .then(|| ClassConstraint::new(self.class_filter.trim()));
+        let class = (!self.class_filter.trim().is_empty()).then(|| {
+            let pattern = self.class_filter.trim();
+            // `fuzzy_class` mirrors the CLI: default is exact
+            // descriptor equality (`--fuzzy-class` opts into substring).
+            if self.fuzzy_class {
+                ClassConstraint::new(pattern)
+            } else {
+                ClassConstraint::new_exact(pattern)
+            }
+        });
         Some(match self.kind {
             SearchKind::String => Query::string(pattern),
             SearchKind::Type => Query::type_(pattern),
@@ -218,6 +226,18 @@ impl SearchController {
         self.selected = None;
     }
 
+    /// Case-insensitive substring test against `caller_class`,
+    /// `caller_member`, and `matched` — the predicate behind
+    /// [`Self::filtered_results`] (also used by the bottom panel).
+    pub fn row_matches(row: &SearchRow, needle: &str) -> bool {
+        row.caller_class.to_ascii_lowercase().contains(needle)
+            || row.caller_member.to_ascii_lowercase().contains(needle)
+            || row
+                .matched
+                .iter()
+                .any(|m| m.to_ascii_lowercase().contains(needle))
+    }
+
     /// Filter the retained `SearchResults` rows by `self.results_filter`.
     /// Substring match against `caller_class`, `caller_member`, and
     /// each entry of `matched` (case-insensitive). Empty filter is a
@@ -233,14 +253,7 @@ impl SearchController {
             results
                 .rows
                 .iter()
-                .filter(|row| {
-                    row.caller_class.to_ascii_lowercase().contains(&needle)
-                        || row.caller_member.to_ascii_lowercase().contains(&needle)
-                        || row
-                            .matched
-                            .iter()
-                            .any(|m| m.to_ascii_lowercase().contains(&needle))
-                })
+                .filter(|row| Self::row_matches(row, &needle))
                 .collect(),
         )
     }
@@ -325,8 +338,16 @@ impl SearchController {
             .collect()
     }
 
-    /// Pull a history entry into the input fields (does not start
-    /// a search). Idempotent.
+    /// Pull a history entry into the input fields (does not start a
+    /// search). By-value twin of [`Self::select_history`] so UI code
+    /// can own a clone while mutating the controller.
+    pub fn apply_history(&mut self, entry: SearchHistoryEntry) {
+        self.kind = entry.kind;
+        self.input = entry.input;
+        self.class_filter = entry.class_filter;
+    }
+
+    /// Pull the entry at `idx` into the input fields. Idempotent.
     pub fn select_history(&mut self, idx: usize) {
         if let Some(entry) = self.history.get(idx).cloned() {
             self.kind = entry.kind;
@@ -495,18 +516,31 @@ mod tests {
             input: "doThing".into(),
             ..Default::default()
         };
-        assert!(s.kind.is_member_scoped());
-        // Class filter applies (even with `fuzzy_class` off the
-        // substring match still works as a literal).
         s.class_filter = "Lcom/foo/Bar;".into();
-        let q = s.query().expect("query");
-        assert!(matches!(q, Query::Method { class: Some(_), .. }));
-        // fuzzy_class flips a marker — engine accepts both exact and
-        // fuzzy descriptor patterns, but the GUI uses this to
-        // decide whether to also try substring matching on the
-        // caller side.
+        // Default (`fuzzy_class` off) mirrors the CLI: exact
+        // descriptor equality.
+        let Query::Method { class, .. } = s.query().expect("query") else {
+            unreachable!();
+        };
+        assert_eq!(
+            class,
+            Some(ClassConstraint {
+                pattern: "Lcom/foo/Bar;".into(),
+                exact: true,
+            })
+        );
+        // Fuzzy on → substring constraint over descriptors.
         s.fuzzy_class = true;
-        assert!(s.fuzzy_class);
+        let Query::Method { class, .. } = s.query().expect("query") else {
+            unreachable!();
+        };
+        assert_eq!(
+            class,
+            Some(ClassConstraint {
+                pattern: "Lcom/foo/Bar;".into(),
+                exact: false,
+            })
+        );
     }
 
     /// `filtered_results` narrows retained rows by substring against

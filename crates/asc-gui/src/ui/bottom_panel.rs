@@ -106,14 +106,56 @@ impl AscApp {
                     .desired_width(240.0)
                     .font(egui::TextStyle::Monospace),
             );
-            if matches!(self.search.kind, SearchKind::Method | SearchKind::Field) {
+            let uses_class = matches!(
+                self.search.kind,
+                SearchKind::Method
+                    | SearchKind::Field
+                    | SearchKind::MemberMethod
+                    | SearchKind::MemberField
+            );
+            if uses_class {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search.class_filter)
                         .hint_text("class filter (optional)")
                         .desired_width(180.0)
                         .font(egui::TextStyle::Monospace),
                 );
+                ui.checkbox(
+                    &mut self.search.fuzzy_class,
+                    egui::RichText::new("fuzzy class").small(),
+                )
+                .on_hover_text("substring match on the class descriptor (off = exact)");
             }
+            // Search history dropdown (ASC-GUI-036 / JADX-GUI-013):
+            // entries filter on the current input as you type. Owned
+            // clones — the popup closure mutates the controller.
+            let history: Vec<_> = self
+                .search
+                .history_filtered(&self.search.input)
+                .into_iter()
+                .cloned()
+                .collect();
+            let history_button = egui::RichText::new(format!("hist ({})", history.len())).small();
+            ui.menu_button(history_button, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for e in &history {
+                            let text = if e.class_filter.is_empty() {
+                                format!("{}  {}", e.kind.label(), e.input)
+                            } else {
+                                format!("{}  {}  in {}", e.kind.label(), e.input, e.class_filter)
+                            };
+                            if ui
+                                .selectable_label(false, egui::RichText::new(text).small())
+                                .clicked()
+                            {
+                                self.search.apply_history(e.clone());
+                                ui.close();
+                            }
+                        }
+                    });
+            });
             if self.tasks.findrefs_running() {
                 ui.spinner();
                 if ui.button("cancel").clicked() {
@@ -152,6 +194,23 @@ impl AscApp {
     /// Virtualized search-result rows: DEX · caller · matched
     /// entities. Selection navigates (preview) and keeps the list.
     fn draw_search_results(&mut self, ui: &mut egui::Ui) {
+        // Post-search filter (ASC-GUI-013): narrows visible rows only;
+        // the retained results are untouched.
+        let has_rows = self.search.results().is_some_and(|r| !r.rows.is_empty());
+        if has_rows {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search.results_filter)
+                        .hint_text("filter results…")
+                        .desired_width(180.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if !self.search.results_filter.is_empty() && ui.small_button("clear").clicked() {
+                    self.search.results_filter.clear();
+                }
+            });
+        }
+        let needle = self.search.results_filter.trim().to_ascii_lowercase();
         let rows = self.search.results().map_or(&[][..], |r| &r.rows[..]);
         if rows.is_empty() {
             ui.weak(if self.tasks.findrefs_running() {
@@ -161,8 +220,24 @@ impl AscApp {
             });
             return;
         }
-        let activate = Self::result_rows_ui(ui, rows, self.search.selected());
-        self.activate_result_row(activate, true);
+        if needle.is_empty() {
+            let activate = Self::result_rows_ui(ui, rows, self.search.selected());
+            self.activate_result_row(activate, true);
+            return;
+        }
+        // Filtered view: rows are cloned per frame (ponytail: fine at
+        // UI frame rates; revisit if result sets reach 10⁵ rows).
+        // Selection tracking is off here — indices refer to the
+        // filtered list, not the retained rows.
+        let filtered: Vec<crate::state::SearchRow> = rows
+            .iter()
+            .filter(|row| crate::state::SearchController::row_matches(row, &needle))
+            .cloned()
+            .collect();
+        let shown = format!("{} / {} rows", filtered.len(), rows.len());
+        let activate = Self::result_rows_ui(ui, &filtered, None);
+        ui.weak(egui::RichText::new(shown).small());
+        self.activate_result_row(activate, false);
     }
 
     /// Shared virtualized result rows; only the visible range is

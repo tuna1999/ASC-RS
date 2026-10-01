@@ -72,6 +72,8 @@ pub enum TaskKind {
     /// `run_findrefs` for "references to the selected class" (Analysis
     /// menu). Routed to the REFERENCES bottom tab, not search results.
     FindRefsClass,
+    /// `run_disasm` for one class descriptor (Smali listing).
+    Disasm,
 }
 
 impl TaskKind {
@@ -82,6 +84,7 @@ impl TaskKind {
             TaskKind::DecompileClass => "decompile",
             TaskKind::FindRefs => "findrefs",
             TaskKind::FindRefsClass => "references",
+            TaskKind::Disasm => "disasm",
         }
     }
 }
@@ -105,6 +108,8 @@ pub enum TaskOutcome {
     Decompiled(std::sync::Arc<crate::state::documents::Document>),
     /// Successful APK open.
     Loaded(Box<LoadedArtifact>),
+    /// Successful `run_disasm`: the Smali listing + winning DEX name.
+    Disassembled { dex_name: String, listing: String },
     /// Successful `run_findrefs`.
     Search(asc_core::SearchReport),
     /// Engine error or worker panic, as a display string.
@@ -339,6 +344,35 @@ impl TaskManager {
         )
     }
 
+    /// Spawn a `run_disasm` task for `descriptor`. The task label is
+    /// the smali document key (`{descriptor}#smali`) so `apply_task`
+    /// can file the listing under the right tab. Deduplicated like
+    /// decompiles.
+    pub fn spawn_disasm(&mut self, apk: &Path, descriptor: &str, ctx: &egui::Context) -> TaskId {
+        let key = Self::smali_key(descriptor);
+        if let Some(existing) = self
+            .in_flight
+            .iter()
+            .find(|t| t.kind == TaskKind::Disasm && t.label == key)
+            .map(|t| t.id)
+        {
+            return existing;
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        self.submit(
+            TaskKind::Disasm,
+            key,
+            move || run_disasm_job(&apk, &target),
+            ctx,
+        )
+    }
+
+    /// Document key for the smali listing of `descriptor`.
+    pub fn smali_key(descriptor: &str) -> String {
+        format!("{descriptor}#smali")
+    }
+
     /// Is a class-references query running?
     pub fn findrefs_class_running(&self) -> bool {
         self.in_flight
@@ -521,6 +555,20 @@ fn run_findrefs_job(apk: &Path, query: &Query, paranoid: bool) -> TaskOutcome {
     };
     match asc_core::run_findrefs(&FindRefsJob::new(apk, query.clone()), &opts) {
         Ok(report) => TaskOutcome::Search(report),
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one disasm engine job (worker-thread body): whole-DEX smali
+/// listing of one class, no method filter (the GUI editor's
+/// find-in-document covers narrowing).
+fn run_disasm_job(apk: &Path, descriptor: &str) -> TaskOutcome {
+    let job = asc_core::DisasmJob::new(apk, descriptor, None);
+    match asc_core::run_disasm(&job, &asc_core::DisasmOptions::default()) {
+        Ok(r) => TaskOutcome::Disassembled {
+            dex_name: r.dex_name,
+            listing: r.listing,
+        },
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
 }
@@ -769,6 +817,20 @@ mod tests {
         let c = mgr.spawn_decompile(apk, "Lb;", false, &ctx);
         assert_ne!(a, c);
         assert_eq!(mgr.in_flight_count(), 2);
+    }
+
+    /// Duplicate disasm of the same descriptor dedups to one task,
+    /// and the task label is the `#smali` document key.
+    #[test]
+    fn duplicate_disasm_dedups() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("x.apk");
+        let a = mgr.spawn_disasm(apk, "La;", &ctx);
+        let b = mgr.spawn_disasm(apk, "La;", &ctx);
+        assert_eq!(a, b, "same descriptor dedups to the in-flight task");
+        assert_eq!(mgr.in_flight_count(), 1);
+        assert_eq!(TaskManager::smali_key("La;"), "La;#smali");
     }
 
     /// A panicking job degrades to a failed task, not a dead UI.

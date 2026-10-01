@@ -110,7 +110,17 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::FindReferences);
                     }
-                    ui.separator();
+                    if ui
+                        .add_enabled(
+                            has_target,
+                            egui::Button::new(format!("Show Smali of {target}")),
+                        )
+                        .on_disabled_hover_text("open a class first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowSmali);
+                    }
                     let sel_ok = self.symbol_sel.is_some();
                     if ui
                         .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))

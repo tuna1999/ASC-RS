@@ -57,6 +57,9 @@ pub enum Command {
         text: String,
     },
     QuickOpen,
+    /// Open the Smali (disasm) listing of the active class in a tab
+    /// (JADX-GUI-018, unblocked by the `asc-rs disasm` renderer).
+    ShowSmali,
 
     // --- tabs ---
     CloseTab,

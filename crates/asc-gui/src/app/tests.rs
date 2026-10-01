@@ -1186,3 +1186,94 @@ fn persistence_round_trip_panel_sizes() {
     let parsed: PanelSizes = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, original);
 }
+
+/// ASC-GUI-008/009 + ASC-GUI-013/036 UI surface: member-scoped kinds
+/// expose the class filter + fuzzy-class toggle; retained results
+/// expose the post-search filter box; the history button reflects
+/// committed queries. Headless (kittest, no corpus needed).
+#[test]
+fn member_scoped_search_bar_widgets() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    // Member-scoped kind → class filter + fuzzy toggle render.
+    h.state_mut().search.kind = crate::state::SearchKind::MemberMethod;
+    h.state_mut().search.class_filter = "com.poc.Main".into();
+    h.run_steps(3);
+    h.get_by_label("fuzzy class");
+    // Toggling flips the controller (exact ⇄ substring constraint).
+    h.get_by_label("fuzzy class").click();
+    h.run_steps(2);
+    assert!(h.state().search.fuzzy_class, "toggle wired to state");
+    // Retained results → results filter box + history button.
+    h.state_mut()
+        .search
+        .set_results(crate::state::SearchResults {
+            label: "method \"x\"".into(),
+            rows: vec![crate::state::SearchRow {
+                dex_name: "classes.dex".into(),
+                caller_class: "Lcom/foo/Bar;".into(),
+                caller_member: "onCreate".into(),
+                matched: vec!["x".into()],
+                code_off: None,
+            }],
+            complete: true,
+            errors: vec![],
+        });
+    h.run_steps(3);
+    // Filtering narrows the visible rows ("nope" matches nothing); the
+    // `clear` affordance only renders when the filter is non-empty
+    // and results are retained untouched (view-only filter).
+    h.state_mut().search.results_filter = "nope".into();
+    h.run_steps(2);
+    h.get_by_label("clear");
+    assert_eq!(
+        h.state().search.results().unwrap().rows.len(),
+        1,
+        "filter is view-only"
+    );
+    // History: commit a query → button count updates.
+    h.state_mut().search.input = "onCreate".into();
+    h.state_mut().search.commit_to_history();
+    h.run_steps(2);
+    h.get_by_label("hist (1)");
+}
+
+/// JADX-GUI-018: ShowSmali spawns `run_disasm` and files the listing
+/// as a `#smali`-keyed document + tab. Corpus-gated (skips silently
+/// when `corpus/apk/workload.apk` is absent).
+#[test]
+fn show_smali_opens_listing_tab() {
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut app = AscApp::new(Some(apk));
+    for _ in 0..600 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(app.session.is_some(), "artifact loaded");
+    let descriptor = "Lcom/google/android/material/timepicker/ClockFaceView;";
+    let key = crate::task::TaskManager::smali_key(descriptor);
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.navigate_to(descriptor, false, None, NavOrigin::Tree, ctx);
+        app.dispatch(Command::ShowSmali, ctx);
+    });
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.documents.contains(&key) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let doc = app.documents.get(&key).expect("smali document landed");
+    assert!(doc.source.contains(".method"), "listing looks like smali");
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+}

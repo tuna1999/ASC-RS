@@ -243,6 +243,7 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
         ("Find in document (Ctrl+F)", Command::FindInDocument),
         ("Quick open class (Ctrl+P)", Command::QuickOpen),
         ("Find references to selected class", Command::FindReferences),
+        ("Show Smali of selected class", Command::ShowSmali),
         ("Close tab (Ctrl+W)", Command::CloseTab),
         ("Pin tab", Command::PinTab),
         ("Next tab (Ctrl+Tab)", Command::NextTab),
