@@ -120,6 +120,11 @@ struct SharedFlags {
     /// Ignored by other subcommands.
     #[arg(long = "paranoid", default_value_t = false, global = true)]
     paranoid: bool,
+    /// Decode XOR-obfuscated strings (const-array + literal-key decoder
+    /// built in bytecode): `getclass` shows literals, `findrefs string`
+    /// also matches decoded values. Ignored by other subcommands.
+    #[arg(long = "decode-xor", default_value_t = false, global = true)]
+    decode_xor: bool,
 }
 
 /// Per-subcommand shared args.
@@ -263,6 +268,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.threads,
             shared.debug,
             shared.paranoid,
+            shared.decode_xor,
             shared.format,
         ),
         Cmd::Disasm { apk, class, method } => run_disasm_cmd(
@@ -274,6 +280,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.debug,
         ),
         Cmd::Findrefs { apk, kind } => run_findrefs_cmd(
+            shared.decode_xor,
             apk,
             kind,
             shared.output.as_deref(),
@@ -298,6 +305,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // flat CLI plumbing, mirrors the other cmds
 fn run_getclass_cmd(
     apk: &std::path::Path,
     class: &str,
@@ -305,6 +313,7 @@ fn run_getclass_cmd(
     threads: usize,
     debug: bool,
     paranoid: bool,
+    decode_xor: bool,
     format: OutputFormat,
 ) -> Result<(), CoreError> {
     let started = Instant::now();
@@ -313,6 +322,7 @@ fn run_getclass_cmd(
         threads,
         debug,
         paranoid,
+        decode_xor,
     };
     let job = GetClassJob::new(apk.to_path_buf(), target.clone());
     let result = run_getclass(&job, &opts)?;
@@ -373,7 +383,9 @@ fn run_disasm_cmd(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // flat CLI plumbing, mirrors the other cmds
 fn run_findrefs_cmd(
+    decode_xor: bool,
     apk: &std::path::Path,
     kind: &FindRefsKind,
     output: Option<&std::path::Path>,
@@ -388,6 +400,7 @@ fn run_findrefs_cmd(
         threads,
         debug,
         paranoid,
+        decode_xor,
     };
     let job = FindRefsJob::new(apk.to_path_buf(), query);
     let report = run_findrefs(&job, &opts)?;

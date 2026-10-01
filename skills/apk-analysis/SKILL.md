@@ -24,7 +24,7 @@ asc-rs cert    <apk> [-o FILE]                   # signing certs: JAR v1 + APK S
 asc-rs resources <apk> [--id 0x7f020000 | --strings PAT] [--limit N] [-o FILE]   # resources.arsc inventory / lookup / search
 ```
 Input: an APK/ZIP **or a bare `.dex`** (DEX 035..041; e.g. a runtime-dumped DEX). A bare DEX is one virtual entry named after the file; `manifest`, `cert` and `resources` on it exit `2` ("requires an APK"); an unparseable or CDEX/ODEX/VDEX file exits `2` with a clear error instead of empty output.
-Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (timings to stderr), `--format text|json` (all commands), `--paranoid` (decode Paranoid/LSParanoid strings; off by default).
+Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (timings to stderr), `--format text|json` (all commands), `--paranoid` (decode Paranoid/LSParanoid strings; off by default), `--decode-xor` (decode const-array XOR strings; off by default).
 
 ## Choosing the command
 
@@ -56,6 +56,8 @@ Shared flags (any position): `-o FILE`, `--threads N` (default 8), `--debug` (ti
 - `--format json` for the other commands: `listclass` → `{total, per_dex:[{dex_name,count}], classes:[...]}`; `getclass` → `{dex_name, class_def_off, source}`; `manifest` → the full structured manifest (`package`, `permissions`, `activities`, `services`, `receivers`, `providers`; absent values are `null`). Errors stay on stderr with the usual exit code (no JSON error body).
 - `manifest` text: `package:`, `version:`, `sdk:`, then `permissions`, `activities`, `services`, `receivers`, `providers` sections; components carry `[exported]` and `action …` lines. It tolerates the manifest tampering Android itself ignores (zeroed root chunk type, garbage string-pool slots, garbage chunks after `</manifest>`), so it works on samples that break strict parsers. Exit `2` = the manifest really is unparseable (or absent).
 - `--paranoid`: use when `getclass` shows `long v = -123…L; X.y(v)` pairs (a static `(J)String` call) or `findrefs string` misses text you know exists. `getclass` then shows the decoded literals; `findrefs string` also matches decoded values. Only ids that are a `const-wide` in the same basic block get decoded; other calls stay as-is. The output is rewritten bytecode, not the original. Say so when you quote it.
+
+- `--decode-xor`: use when strings in the sample are hidden as `byte[] a = {8, 7, …}; X.i(a)` (a static `([B)String` decoder that XORs every element with a literal key) — common in packer stubs (verified on a Virbox sample). `findrefs string` also matches decoded values; `getclass` replaces provable calls with the decoded literal (the array-building code stays as dead code). Only sites proven on **every** path are patched: the key must be a literal, all elements constant (`const`+`aput-byte` chains or `fill-array-data`), the bytes valid UTF-8, and no alias of the array read after the call (the decoder mutates in place). Unprovable sites stay as-is — absence of a decode is not evidence of a hidden string. Like `--paranoid`, the output is rewritten bytecode, not the original.
 
 ## Workflow
 

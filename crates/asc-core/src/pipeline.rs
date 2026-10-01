@@ -160,6 +160,9 @@ pub struct FindRefsOptions {
     /// decoded value is reported in `matched`). Off by default: the
     /// oracle has no such mode.
     pub paranoid: bool,
+    /// `string` queries also match XOR-obfuscated literals (const-array
+    /// + literal-key decoder, decoded from bytecode). Off by default.
+    pub decode_xor: bool,
 }
 
 /// One getclass run.
@@ -191,6 +194,9 @@ pub struct GetClassOptions {
     /// Replace resolvable Paranoid `getString(id)` calls in the target
     /// class with the decoded literal before decompiling.
     pub paranoid: bool,
+    /// Replace provable XOR-decoder calls (const-array + literal key,
+    /// no aliasing) in the target class with the decoded literal.
+    pub decode_xor: bool,
 }
 
 impl Default for GetClassOptions {
@@ -199,6 +205,7 @@ impl Default for GetClassOptions {
             threads: 8,
             debug: false,
             paranoid: false,
+            decode_xor: false,
         }
     }
 }
@@ -284,6 +291,11 @@ pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchR
         _ => None,
     };
     let paranoid = deobs.as_ref().map(|(d, p)| (d.as_slice(), *p));
+    let xor_decoders = match &job.query {
+        Query::String { .. } if opts.decode_xor => Some(crate::paranoid::collect_xor(&apk)),
+        _ => None,
+    };
+    let xor = xor_decoders.as_deref();
     let mut report = SearchReport::empty();
     for entry in entries {
         // `into_owned` is implicit: we always copy to a `Vec<u8>` so
@@ -299,7 +311,7 @@ pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchR
                 continue;
             }
         };
-        scan_entry_bytes(&entry.name, &bytes, &job.query, paranoid, &mut report);
+        scan_entry_bytes(&entry.name, &bytes, &job.query, paranoid, xor, &mut report);
     }
     Ok(report)
 }
@@ -314,6 +326,7 @@ fn scan_entry_bytes(
     bytes: &[u8],
     query: &Query,
     paranoid: Paranoid<'_>,
+    xor: Option<&[asc_paranoid::XorDecoder]>,
     report: &mut SearchReport,
 ) {
     if bytes.len() < 8 {
@@ -351,7 +364,7 @@ fn scan_entry_bytes(
                     continue;
                 }
             };
-            run_engine_for_view(&name, &view, query, paranoid, report);
+            run_engine_for_view(&name, &view, query, paranoid, xor, report);
         }
     } else if magic.starts_with(b"dex\n") {
         // Single DEX entry.
@@ -367,7 +380,7 @@ fn scan_entry_bytes(
                 return;
             }
         };
-        run_engine_for_view(entry_name, &view, query, paranoid, report);
+        run_engine_for_view(entry_name, &view, query, paranoid, xor, report);
     } else {
         // Not a DEX; skip silently (the oracle's `_inflate_and_hit`
         // also rejects non-`dex\n0..\0` magic). We do not record this
@@ -383,6 +396,7 @@ fn run_engine_for_view(
     view: &DexView<'_>,
     query: &Query,
     paranoid: Paranoid<'_>,
+    xor: Option<&[asc_paranoid::XorDecoder]>,
     report: &mut SearchReport,
 ) {
     let engine_report = engine_find_refs(view, query);
@@ -392,6 +406,18 @@ fn run_engine_for_view(
     let decoded = paranoid
         .map(|(deobs, pattern)| crate::paranoid::decoded_hits(view, deobs, pattern))
         .unwrap_or_default();
+    let pattern = match query {
+        Query::String { pattern } => pattern.as_str(),
+        _ => "",
+    };
+    let decoded = if let Some(decoders) = xor {
+        decoded
+            .into_iter()
+            .chain(crate::paranoid::xor_decoded_hits(view, decoders, pattern))
+            .collect()
+    } else {
+        decoded
+    };
     let rendered = render_hits(view, &engine_report.hits, &decoded);
     let engine_errors: Vec<SearchError> = engine_report
         .errors
@@ -798,11 +824,18 @@ fn decompile_winner(
     let started = std::time::Instant::now();
     let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
     let parse_us = started.elapsed().as_micros();
-    let patches = if opts.paranoid {
+    let mut patches = if opts.paranoid {
         crate::paranoid::class_patches(&view, target, &crate::paranoid::collect(apk))
     } else {
         Vec::new()
     };
+    if opts.decode_xor {
+        patches.extend(crate::paranoid::xor_class_patches(
+            &view,
+            target,
+            &crate::paranoid::collect_xor(apk),
+        ));
+    }
     let rebuilt =
         asc_rebuild::rebuild_patched(&view, target, &patches).map_err(CoreError::Rebuild)?;
     let rebuild_us = started.elapsed().as_micros() - parse_us;

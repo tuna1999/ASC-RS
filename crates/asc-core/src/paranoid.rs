@@ -105,3 +105,91 @@ pub(crate) fn class_patches(
     }
     out
 }
+
+// ---------------- XOR const-array deobfuscation (--decode-xor) ----------
+
+use asc_paranoid::XorDecoder;
+
+/// Every XOR decoder defined anywhere in `apk` (see
+/// `asc_paranoid::xor` for the recognized shape).
+pub(crate) fn collect_xor(apk: &Apk) -> Vec<XorDecoder> {
+    let mut out = Vec::new();
+    for entry in apk.dex_entries() {
+        if let Ok(bytes) = apk.read_entry(&entry) {
+            for_each_view(bytes.as_slice(), |view| {
+                out.extend(asc_paranoid::find_xor_decoders(view))
+            });
+        }
+    }
+    out
+}
+
+/// `(caller method idx, code-unit offset, decoded string)` for every
+/// provable XOR call in `view` whose value contains `pattern`.
+pub(crate) fn xor_decoded_hits(
+    view: &DexView<'_>,
+    decoders: &[XorDecoder],
+    pattern: &str,
+) -> Vec<(u32, u32, String)> {
+    let resolver = asc_paranoid::XorResolver::new(view, decoders);
+    let mut out = Vec::new();
+    if resolver.is_empty() {
+        return out;
+    }
+    for owner in CodeOwners::build(view).owners() {
+        let Ok(Some(code)) = view.code_item(owner.code_off) else {
+            continue;
+        };
+        for call in resolver.calls(view, &code) {
+            let value = String::from_utf16_lossy(&call.value);
+            if value.contains(pattern) {
+                out.extend(
+                    owner
+                        .methods
+                        .iter()
+                        .map(|m| (m.0, call.offset, value.clone())),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Rebuild patches turning every provable, alias-free XOR decoder call in
+/// class `target` into a string constant.
+pub(crate) fn xor_class_patches(
+    view: &DexView<'_>,
+    target: &str,
+    decoders: &[XorDecoder],
+) -> Vec<StringPatch> {
+    let resolver = asc_paranoid::XorResolver::new(view, decoders);
+    let mut out = Vec::new();
+    if resolver.is_empty() {
+        return out;
+    }
+    let data = (0..view.class_def_count()).find_map(|i| {
+        let def = view.class_def(i).ok()?;
+        let desc = view.string(view.type_(def.class).ok()?).ok()?;
+        (desc.raw_mutf8() == target.as_bytes())
+            .then(|| view.class_data(def.class_data_off).ok().flatten())?
+    });
+    let Some(data) = data else { return out };
+    for m in data.direct_methods.iter().chain(&data.virtual_methods) {
+        let Ok(Some(code)) = view.code_item(m.code_off) else {
+            continue;
+        };
+        for call in resolver.calls(view, &code) {
+            if call.patchable
+                && let Some(result) = call.result
+            {
+                out.push(StringPatch {
+                    code_off: m.code_off,
+                    offset: call.offset,
+                    result,
+                    value: call.value,
+                });
+            }
+        }
+    }
+    out
+}

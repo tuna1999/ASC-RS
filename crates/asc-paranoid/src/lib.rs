@@ -18,8 +18,10 @@
 //! [`asc_dex::DexView`].
 
 mod dex;
+pub mod xor;
 
 pub use crate::dex::{Call, Deobfuscator, Resolver, find_deobfuscators};
+pub use crate::xor::{XorCall, XorDecoder, XorResolver, find_xor_decoders};
 
 /// Chunk length Paranoid splits its string table into.
 pub const MAX_CHUNK_LENGTH: usize = 0x1FFF;

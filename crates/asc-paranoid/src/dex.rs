@@ -43,20 +43,20 @@ pub struct Call {
     pub value: Vec<u16>,
 }
 
-fn str_bytes<'a>(view: &DexView<'a>, idx: StringIdx) -> Option<&'a [u8]> {
+pub(crate) fn str_bytes<'a>(view: &DexView<'a>, idx: StringIdx) -> Option<&'a [u8]> {
     view.string(idx).ok().map(|s| s.raw_mutf8())
 }
 
-fn type_bytes<'a>(view: &DexView<'a>, idx: TypeIdx) -> Option<&'a [u8]> {
+pub(crate) fn type_bytes<'a>(view: &DexView<'a>, idx: TypeIdx) -> Option<&'a [u8]> {
     str_bytes(view, view.type_(idx).ok()?)
 }
 
-fn lossy(bytes: &[u8]) -> String {
+pub(crate) fn lossy(bytes: &[u8]) -> String {
     asc_dex::decode_mutf8_lossy(bytes, 0).into_owned()
 }
 
 /// Proto ids of the form `(<param>)Ljava/lang/String;` in `view`.
-fn string_protos(view: &DexView<'_>, params: &[&[u8]]) -> HashSet<u32> {
+pub(crate) fn string_protos(view: &DexView<'_>, params: &[&[u8]]) -> HashSet<u32> {
     (0..view.proto_count())
         .filter(|&p| {
             let Ok(proto) = view.proto(ProtoIdx(p)) else {
@@ -141,7 +141,7 @@ pub fn find_deobfuscators(view: &DexView<'_>) -> Vec<Deobfuscator> {
 }
 
 /// Instruction start offsets and widths of a code body (payloads included).
-fn decode_insns(insns: &[u8], units: u32) -> Option<Vec<(u32, u32)>> {
+pub(crate) fn decode_insns(insns: &[u8], units: u32) -> Option<Vec<(u32, u32)>> {
     let mut out = Vec::new();
     let mut off = 0;
     while off < units {
@@ -153,17 +153,17 @@ fn decode_insns(insns: &[u8], units: u32) -> Option<Vec<(u32, u32)>> {
 }
 
 #[inline]
-fn unit(insns: &[u8], off: u32, k: u32) -> u16 {
+pub(crate) fn unit(insns: &[u8], off: u32, k: u32) -> u16 {
     let b = (off + k) as usize * 2;
     u16::from_le_bytes([insns[b], insns[b + 1]])
 }
 
 #[inline]
-fn unit32(insns: &[u8], off: u32, k: u32) -> u32 {
+pub(crate) fn unit32(insns: &[u8], off: u32, k: u32) -> u32 {
     unit(insns, off, k) as u32 | (unit(insns, off, k + 1) as u32) << 16
 }
 
-fn is_payload(insns: &[u8], off: u32) -> bool {
+pub(crate) fn is_payload(insns: &[u8], off: u32) -> bool {
     matches!(unit(insns, off, 0), 0x0100 | 0x0200 | 0x0300)
 }
 
@@ -182,12 +182,12 @@ fn const_wide(insns: &[u8], off: u32) -> Option<(u16, i64)> {
 }
 
 /// Register operands of an instruction: explicit list or `/range`.
-enum Regs {
+pub(crate) enum Regs {
     List([u16; 5], usize),
     Range(u16, u16),
 }
 
-fn regs(insns: &[u8], off: u32) -> Regs {
+pub(crate) fn regs(insns: &[u8], off: u32) -> Regs {
     let first = unit(insns, off, 0);
     let b1 = first >> 8;
     let (a4, b4) = (b1 & 0xF, b1 >> 4);
@@ -236,7 +236,7 @@ fn touches_pair(insns: &[u8], off: u32, c: u16) -> bool {
 
 /// Offsets that can be entered other than by falling through from the
 /// previous instruction: branch/switch targets and catch handlers.
-fn leaders(
+pub(crate) fn leaders(
     view: &DexView<'_>,
     code: &CodeItem<'_>,
     insns: &[u8],
