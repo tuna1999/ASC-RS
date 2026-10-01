@@ -11,12 +11,17 @@
 //! All engine logic lives in `asc-core`; this binary is a thin
 //! arg-parsing / output-routing wrapper. Exit codes:
 //!
-//! - 0 — success (findrefs with zero hits is still success).
+//! - 0 — success (findrefs with zero hits is still success, as long as
+//!   every DEX entry was scanned).
 //! - 1 — class-not-found (`getclass`, `disasm`), method-not-found
 //!   (`disasm --method`), or input validation error
 //!   (`findrefs method` with neither name nor `--class`, empty
-//!   `listclass --prefix`, etc.).
-//! - 2 — internal / unexpected error (APK parse, rebuild, decompile).
+//!   `listclass --prefix`, `--threads 0`, etc.).
+//! - 2 — internal / unexpected error (APK parse, rebuild, decompile),
+//!   or a findrefs run in which at least one DEX entry failed to scan.
+//!   Partial findrefs results are still printed in full (stdout) with
+//!   per-DEX failure warnings on stderr; the JSON body keeps
+//!   `complete: false` and the `errors` list.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -47,6 +52,18 @@ fn main() -> ExitCode {
     }
     if let Cmd::Cert { apk } = &cli.cmd {
         return run_cert_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
+    }
+    if let Cmd::Findrefs { apk, kind } = &cli.cmd {
+        return run_findrefs_cmd(
+            cli.shared.decode_xor,
+            apk,
+            kind,
+            cli.shared.output.as_deref(),
+            cli.shared.threads,
+            cli.shared.debug,
+            cli.shared.paranoid,
+            cli.shared.format,
+        );
     }
     if let Cmd::Resources {
         apk,
@@ -279,16 +296,8 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.threads,
             shared.debug,
         ),
-        Cmd::Findrefs { apk, kind } => run_findrefs_cmd(
-            shared.decode_xor,
-            apk,
-            kind,
-            shared.output.as_deref(),
-            shared.threads,
-            shared.debug,
-            shared.paranoid,
-            shared.format,
-        ),
+        // Handled in `main` (needs partial-result output + exit-code control).
+        Cmd::Findrefs { .. } => unreachable!("handled in main"),
         Cmd::Listclass { apk, prefix } => run_listclass_cmd(
             apk,
             prefix.as_deref(),
@@ -393,9 +402,21 @@ fn run_findrefs_cmd(
     debug: bool,
     paranoid: bool,
     format: OutputFormat,
-) -> Result<(), CoreError> {
+) -> ExitCode {
     let started = Instant::now();
-    let query = build_query(kind)?;
+    if threads == 0 {
+        // Same oracle-parity check `dispatch` enforces for the other
+        // subcommands (ThreadPoolExecutor(max_workers=0) rejects 0).
+        eprintln!("Error: Worker count must be greater than zero");
+        return ExitCode::from(EXIT_USER_ERROR);
+    }
+    let query = match build_query(kind) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(EXIT_USER_ERROR);
+        }
+    };
     let opts = FindRefsOptions {
         threads,
         debug,
@@ -403,7 +424,13 @@ fn run_findrefs_cmd(
         decode_xor,
     };
     let job = FindRefsJob::new(apk.to_path_buf(), query);
-    let report = run_findrefs(&job, &opts)?;
+    let report = match run_findrefs(&job, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
 
     if debug {
         eprintln!(
@@ -433,19 +460,32 @@ fn run_findrefs_cmd(
     };
 
     if let Some(out_path) = output {
-        std::fs::write(out_path, rendered.as_bytes())
-            .map_err(|e| CoreError::Usage(format!("write {out_path:?}: {e}")))?;
+        match std::fs::write(out_path, rendered.as_bytes()) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error: write {out_path:?}: {e}");
+                return ExitCode::from(EXIT_INTERNAL);
+            }
+        }
     }
     print!("{rendered}");
     std::io::stdout().flush().ok();
 
-    if !report.complete && debug {
-        // Print errors to stderr in debug mode.
+    // A scan that failed on one or more DEX entries still prints every
+    // hit it found, but must not report success: warn on stderr (both
+    // output modes — the JSON body carries `complete`/`errors`, text
+    // does not) and exit 2 like `cert`/`resources` do for the same
+    // "printed in full, incomplete" situation.
+    if !report.complete {
         for e in &report.errors {
-            eprintln!("[DEBUG] {e}");
+            eprintln!("warning: scan incomplete: {e}");
         }
     }
-    Ok(())
+    ExitCode::from(if report.complete {
+        EXIT_OK
+    } else {
+        EXIT_INTERNAL
+    })
 }
 
 fn run_listclass_cmd(

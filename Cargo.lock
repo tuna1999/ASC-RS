@@ -329,12 +329,14 @@ name = "asc-cli"
 version = "0.9.1"
 dependencies = [
  "asc-core",
+ "asc-dex",
  "asc-manifest",
  "asc-query",
  "clap",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "zip",
 ]
 
 [[package]]

@@ -77,7 +77,7 @@ cargo bench -p asc-decompile --bench decompile_bench
 python scripts/build_release.py v0.2.0 --output dist
 ```
 
-CLI flags are `#[arg(global = true)]` (`SharedFlags`), valid before or after the APK. Exit codes: `0` ok, `1` not-found, `2` engine error (`crates/asc-cli/src/main.rs:32-55`).
+CLI flags are `#[arg(global = true)]` (`SharedFlags`), valid before or after the APK. Exit codes: `0` ok, `1` not-found / invalid input, `2` engine error; `findrefs` with any per-DEX scan failure prints all found hits + stderr warnings and exits `2` (`crates/asc-cli/src/main.rs`).
 
 Fuzz (from `fuzz/`): `cargo run --release --bin fuzz-runner -- --list`; `./run.sh <target> [sec]` (or `.\run.ps1 -Target <t>`). Features `dex|bytecode|apk|rebuild|all` are OFF by default → targets report `SkippedDisabled`; `run.sh` does not pass `--features`.
 
