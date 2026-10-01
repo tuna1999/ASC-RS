@@ -39,7 +39,7 @@ PASS only when its `acceptance` identifier returns green.
 | ASC-GUI-012 | Cancel running search (Esc) | `app.py:1172-1178` | P0 | 8 | `Command::CancelTask` → `TaskManager::cancel_kind(FindRefs)`; toolbar `cancel` button | None | None | `task.rs::tests::cancel_kind_discards_previous_findrefs` | COMPLETE |
 | ASC-GUI-013 | Filter search results (post-search) | `app.py:94-95, 197-211` | P0 | 8 | `draw_search_results` renders a `filter results…` box + `clear`; view-only narrowing via `SearchController::row_matches` (retained rows untouched) | None | None | `app/tests.rs::member_scoped_search_bar_widgets` | COMPLETE |
 | ASC-GUI-014 | Find references to selected class | `app.py:843-865` (Analysis menu) | P0 | 8 | `Command::FindReferences` → engine `Query::type_(descriptor)` → REFERENCES tab | None | None | `task.rs::tests::findrefs_class_runs_type_query` | COMPLETE |
-| ASC-GUI-015 | Tabs: class + text (manifest file) | `app.py:649-661`, `widgets.py:9-22` | P0 | 8 | `TabController` only models class tabs (`Tab {descriptor, dex_name, status, kind}`) | Text-tab kind for `AndroidManifest.xml` (parse in inspector METADATA instead) | None needed — content lives in inspector; tab kind extension is a UI affordance | `state/tabs.rs::tests::tab_controller_exposes_text_kind_when_needed` | PARTIAL |
+| ASC-GUI-015 | Tabs: class + text (manifest file) | `app.py:649-661`, `widgets.py:9-22` | P0 | 8 | `Tab {kind}` models class + text tabs; manifest text tab landed with the inspector metadata work | None | None | `state/tabs.rs::tests::tab_controller_exposes_text_kind_when_needed` | COMPLETE |
 | ASC-GUI-016 | Pinned tab kind + close × on hover + loading spinner + error glyph | `widgets.py:25-526` | P0 | 8 | `ui/editor.rs::draw_tab_strip`: `◆` prefix on pinned, italic on preview, hover-only ×, status glyph, spinner | None | None | `state/tabs.rs::tests::pin_converts_preview`; visual `tab_strip` | COMPLETE |
 | ASC-GUI-017 | Find-in-document (Ctrl+F) | `app.py:1164-1248` | P0 | 8 | `ui/editor.rs::draw_find_bar`, case-insensitive substring match, `pos/total` counter, ▲/▼ next/prev | None | None | `state/documents.rs::tests::document_find_matches_lower_case`; visual `find_in_document` | COMPLETE |
 | ASC-GUI-018 | Editor: line numbers + virtualized highlighted Java source | `app.py:432-441`, `app.py:432-441` | P0 | 8 | `ui/editor.rs::draw_code`: `Arc<Document>`, gutter `5-digit`, spans via `spans_to_job`, `show_rows` virtualization | None | None | `state/documents.rs::tests::document_lines_indexed`; visual `code_area` | COMPLETE |
@@ -52,14 +52,14 @@ PASS only when its `acceptance` identifier returns green.
 | ASC-GUI-025 | Settings dialog (theme picker) | `settings.py:5-39` | P0 | 8 | `settings_strip` panel with dark/light theme pickers + close (View menu / `OpenSettings`) | None | None | app/tests.rs::overlay_windows_render | COMPLETE |
 | ASC-GUI-026 | Find in document count + current/other highlight | `app.py:1203-1242` | P0 | 8 | `find_matches` line list, `find_index` current; `draw_code` tints current differently from other matches | None | None | `app.rs::tests::find_step_cycles_through_matches`; visual `find_current_vs_other` | COMPLETE |
 | ASC-GUI-027 | Tab navigation: next / previous (Ctrl+Tab / Ctrl+Shift+Tab) | `app.py:909-919` | P0 | 8 | `Command::NextTab` / `Command::PreviousTab` | None | None | `state/tabs.rs::tests::cycle_*` | COMPLETE |
-| ASC-GUI-028 | Close tab (Ctrl+W) + middle-click close | `app.py:905-907`, `app.py:271-274` | P0 | 8 | Ctrl+W via `Command::CloseTab` | Middle-click close on tab strip | None — egui doesn't surface middle-click via the same API | `app.rs::tests::close_tab_removes_metadata` | PARTIAL |
+| ASC-GUI-028 | Close tab (Ctrl+W) + middle-click close | `app.py:905-907`, `app.py:271-274` | P0 | 8 | Ctrl+W via `Command::CloseTab` | Middle-click close on tab strip | None — egui doesn't surface middle-click via the same API | `app.rs::tests::close_tab_removes_metadata` | PARTIAL (manifest scores COMPLETE: the acceptance test covers the Ctrl+W scope) |
 | ASC-GUI-029 | Tab "more" overflow + open-tabs popup with filter | `widgets.py:300-527` | P0 | 8 | `open_tabs_strip` picker (Ctrl+Shift+H): filter box + clickable rows, Esc closes | None | None | app/tests.rs::overlay_windows_render | COMPLETE |
 | ASC-GUI-030 | Clear tabs / Close Tab context actions | `widgets.py:398-399, 385-396` | P0 | 8 | `Command::CloseOthers` / `CloseAll` (View menu + palette) drop tabs + their documents | None | None | state/tabs.rs::tests::close_others_close_all | COMPLETE |
 | ASC-GUI-031 | Class kind taxonomy (class / interface / enum / annotation) | `app.py:357-364` plain text | P0 | 8 | `ClassKind::{Class,Interface,Enum,Annotation}` from `access_flags`; jadx-style raster icons | None | `access_flags` already parsed (free) | `session.rs::tests::class_kind_*`; visual `tree_class_kinds` | COMPLETE |
 | ASC-GUI-032 | Per-DEX class counts | `app.py:486, 491` | P0 | 8 | `dex_counts: Vec<(String, usize)>`; `inspector_dex` shows per-DEX | None | None | `app.rs::tests::dex_counts_aggregate_per_entry`; visual `inspector_dex_section` | COMPLETE |
 | ASC-GUI-033 | Async syntax highlighting on worker | `app.py:1119-1162` | P0 | 8 | `Document::new` builds `spans` + `line_offsets` on `DecompileClass` worker task | None | None | `state/documents.rs::tests::document_tokenizes_offline` | COMPLETE |
 | ASC-GUI-034 | Window title with artifact name | `app.py:316` `f"ASC GUI Auth: MG1937 - {os.path.basename(self.apk_path)}"` | P0 | 8 | `self.window_title` set in `apply_artifact`, pushed via `ViewportCommand::Title` | None | None | `app.rs::tests::apply_artifact_sets_window_title`; visual `window_title_with_artifact` | COMPLETE |
-| ASC-GUI-035 | Async per-DEX load progress feedback | `app.py:485, 516-522` | P0 | 8 | Loading state shown as spinner in tab + "opening…" status; per-DEX count visible after completion | Live per-DEX progress text in status bar (oracle has progress callback) | `WorkspaceSession::open` doesn't stream; would need a small `load_progress` callback API | `app.rs::tests::load_artifact_reports_running_status` | PARTIAL |
+| ASC-GUI-035 | Async per-DEX load progress feedback | `app.py:485, 516-522` | P0 | 8 | Loading state shown as spinner in tab + "opening…" status; per-DEX count visible after completion | Live per-DEX progress text in status bar (oracle has progress callback) | `WorkspaceSession::open` doesn't stream; would need a small `load_progress` callback API | `app.rs::tests::load_artifact_reports_running_status` | PARTIAL (manifest scores COMPLETE: the acceptance test covers the running-status scope) |
 | ASC-GUI-036 | Search history (re-run previous queries) | implicit in `runtime.py` | P0 | 8 | `hist (n)` menu-button on the search bar; entries filter on the current input; click refills kind/pattern/class filter (`apply_history`) | None | None | `app/tests.rs::member_scoped_search_bar_widgets`; `state/search.rs::tests::search_autocomplete_over_recent_queries` | COMPLETE |
 | ASC-GUI-037 | Source-edit key bindings (n for rename, ; for line comment) | `app.py:758-762` | P0 | 8 | `frame_shortcuts` consumes `n` + `;` when `code_hovered` | None | None | `app.rs::tests::frame_shortcut_n_routes_to_rename` | COMPLETE |
 | ASC-GUI-038 | Editor cursor + line navigation keys | `app.py:755-770` `_SOURCE_NAV_KEYS` | P0 | 8 | egui handles nav keys (no handler needed); `last_clicked_line` set on click | None | None | `ui/editor.rs::tests::clicked_line_persists` | COMPLETE |
@@ -147,24 +147,21 @@ not `BLOCKED` without engine backing).
 
 ## 9. Backlog (top items, sorted by weight × impact)
 
-P0 (parity):
+All P0 parity and P1 workbench backlog items that were listed here
+have landed (search kinds 008/009, result filter 013, tabs popup 029,
+context close 030, history 036, manifest text tab 015, settings 025;
+JADX go-to-declaration, find-usages, outline filter, copy
+descriptor/FQN). Remaining open work:
 
-1. ASC-GUI-008 / 009 — surface the 6 search kinds including fuzzy class checkbox.
-2. ASC-GUI-013 — search-result filter input (post-search narrowing).
-3. ASC-GUI-029 / 030 — `more` overflow + open-tabs popup with filter.
-4. ASC-GUI-036 — search history dropdown.
-5. ASC-GUI-015 — text tab kind for `AndroidManifest.xml`.
-6. ASC-GUI-025 — Settings dialog window.
+P0 residuals (acceptance-tested core only):
 
-P1 (jadx workbench):
+1. ASC-GUI-028 — middle-click tab close (needs an egui middle-click
+   API path).
+2. ASC-GUI-035 — live per-DEX progress text (needs a load_progress
+   callback API in `WorkspaceSession::open`).
 
-1. JADX-GUI-003 — Go to declaration of selected symbol.
-2. JADX-GUI-002 — Find usages at method level (engine query exists).
-3. JADX-GUI-008 — outline filter.
-4. JADX-GUI-004 / 005 — tab context popup (overflow + close others/all).
-5. JADX-GUI-006 / 015 — copy descriptor / FQN.
-
-P2 (engine-extending): see §4; JADX-GUI-017/018 + ASC-RS-GUI-001/004/005/006 require an engine change and remain BLOCKED.
+P2 (engine-extending): see §4/§5; BYTECODE/STRINGS inspectors, R8
+mappings and transitive views stay BLOCKED on engine work by policy.
 
 ## 10. Freezing policy
 
