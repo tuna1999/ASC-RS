@@ -1,7 +1,11 @@
 <#
 Restart loop for fuzz-runner on PowerShell (Windows). Mirrors run.sh.
 
-Usage:  .\run.ps1 -Target <name> [-BudgetSec 30]
+Usage:  .\run.ps1 -Target <name> [-BudgetSec 30] [-Features dex,apk]
+
+`-Features` is a comma list of fuzz-workspace cargo features
+(dex|bytecode|apk|rebuild|resources|core|decompile|all); without it
+every contract target reports SkippedDisabled.
 
 Exit codes:
    0 = green (no panics within budget)
@@ -11,7 +15,8 @@ Exit codes:
 
 param(
     [Parameter(Mandatory = $true)][string]$Target,
-    [int]$BudgetSec = 30
+    [int]$BudgetSec = 30,
+    [string]$Features = $env:FEATURES
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,8 +29,21 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $CorpusOutDir | Out-Null
 
 # Build first.
-cargo build --release --bin fuzz-runner | Out-Null
+if ($Features) {
+    cargo build --release --bin fuzz-runner --features $Features | Out-Null
+} else {
+    cargo build --release --bin fuzz-runner | Out-Null
+}
 if ($LASTEXITCODE -ne 0) { exit 2 }
+
+$ErrorActionPreference = 'Stop'
+
+$LogDir       = "crashes"
+$CorpusOutDir = "corpus-out/$Target"
+$SeedsDir     = "seeds/$Target"
+
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $CorpusOutDir | Out-Null
 
 $Bin = ".\target\release\fuzz-runner.exe"
 if (-not (Test-Path $Bin)) {
@@ -39,8 +57,6 @@ $Panics = 0
 $Seed   = [uint64]0xA5A5C0DEBEEF
 
 Write-Host "=== fuzz-runner restart loop ==="
-Write-Host "target=$Target budget=${BudgetSec}s seeds=$SeedsDir crash_dir=$LogDir"
-
 while ((Get-Date) -lt $End) {
     $Remaining = ($End - (Get-Date)).TotalSeconds
     if ($Remaining -le 0) { break }

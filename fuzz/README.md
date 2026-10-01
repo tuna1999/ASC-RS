@@ -94,8 +94,14 @@ cargo run --release --bin fuzz-runner -- --list
 
 ```bash
 # Inside the outer restart loop (recommended):
-./run.sh dummy 5           # bash
-.\run.ps1 -Target dummy -BudgetSec 5  # PowerShell
+./run.sh dummy 5                          # bash, default features
+./run.sh fuzz_dex_header 30 all           # bash, engines enabled
+.\run.ps1 -Target dummy -BudgetSec 5      # PowerShell, default features
+.\run.ps1 -Target fuzz_dex_header -Features all   # engines enabled
+
+Feature-less runs build fast but every contract target reports
+`SkippedDisabled`; pass a feature list (or `all`) to actually exercise
+the parsers — this is what CI does.
 
 # Directly, with the panic hook + abort behaviour:
 cargo run --release --bin fuzz-runner -- \

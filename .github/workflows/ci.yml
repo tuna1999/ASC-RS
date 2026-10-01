@@ -149,3 +149,56 @@ jobs:
             target/release/asc-rs${{ runner.os == 'Windows' && '.exe' || '' }}
             target/release/asc-gui${{ runner.os == 'Windows' && '.exe' || '' }}
           if-no-files-found: error
+
+  fuzz:
+    name: fuzz (parsers engaged, smoke + regression)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+          cache-on-failure: true
+
+      - name: Registry tests with every engine feature on
+        # The registry tests assert each contract target is NOT
+        # SkippedDisabled when its feature is enabled and actually
+        # invokes the parser, so a green build proves coverage.
+        run: cargo test --manifest-path fuzz/Cargo.toml --features all
+
+      - name: Smoke every target (short budget, all features)
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          cargo build --release --bin fuzz-runner --features all
+          TARGETS=$(./target/release/fuzz-runner --list | awk 'NR>1 {print $1}' | grep -v '^dummy$')
+          echo "targets: $TARGETS"
+          for t in $TARGETS; do
+            echo "=== fuzz smoke: $t ==="
+            ./run.sh "$t" 10 all
+          done
+
+      - name: Replay committed crash regressions (if any)
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(crashes/*.bin)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no committed crash regressions"
+            exit 0
+          fi
+          for c in "${files[@]}"; do
+            t=$(basename "$c" | cut -d- -f1)
+            echo "=== fuzz regress: $t ($c) ==="
+            ./target/release/fuzz-runner --target "$t" --regress crashes
+          done

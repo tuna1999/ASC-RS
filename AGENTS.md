@@ -79,7 +79,7 @@ python scripts/build_release.py v0.2.0 --output dist
 
 CLI flags are `#[arg(global = true)]` (`SharedFlags`), valid before or after the APK. Exit codes: `0` ok, `1` not-found / invalid input, `2` engine error; `findrefs` with any per-DEX scan failure prints all found hits + stderr warnings and exits `2` (`crates/asc-cli/src/main.rs`).
 
-Fuzz (from `fuzz/`): `cargo run --release --bin fuzz-runner -- --list`; `./run.sh <target> [sec]` (or `.\run.ps1 -Target <t>`). Features `dex|bytecode|apk|rebuild|all` are OFF by default → targets report `SkippedDisabled`; `run.sh` does not pass `--features`.
+Fuzz (from `fuzz/`): `cargo run --release --bin fuzz-runner -- --list`; `./run.sh <target> [sec] [features]` (or `.\run.ps1 -Target <t> [-Features all]`); `--regress crashes` replays saved inputs. Features `dex|bytecode|apk|rebuild|resources|core|decompile|all` are OFF by default → targets report `SkippedDisabled`; CI's `fuzz` job runs `cargo test --features all` (registry tests prove parsers engaged) plus a 10 s-per-target smoke loop and crash-regression replay.
 
 ## Code Conventions & Common Patterns
 

@@ -822,8 +822,11 @@ pub fn dex_with_switch_try_array() -> Vec<u8> {
     let class_idx = d.ty("Lfoo/Bar;");
     let _t_throwable = d.ty("Ljava/lang/Throwable;");
     let t_int = d.ty("I");
+    // Appended after Throwable so the Throwable stays at index 1
+    // (the try handler catches `(1, 1)` below).
+    let t_void = d.ty("V");
     let p1 = d.proto("I", t_int, &[t_int]);
-    let p0 = d.proto("V", 0, &[]);
+    let p0 = d.proto("V", t_void, &[]);
 
     // Call site 0 = [bootstrap handle, name string, method type, one
     // extra int argument].
@@ -862,73 +865,120 @@ pub fn dex_with_switch_try_array() -> Vec<u8> {
         handlers: Vec::new(),
     };
 
+    // `b()V` — every 31t immediately followed by its own payload,
+    // assembled with TRACKED pcs: the payload offsets written below
+    // point at the real payload positions (an earlier hand-counted
+    // layout ignored payload sizes and left the 31t offsets pointing
+    // into the middle of other payloads — the disasm renderer rejects
+    // that as UnalignedTableDexPc). Payloads are padded to even code
+    // units (4-byte alignment), another renderer invariant.
+    fn emit_31t(
+        units: &mut Vec<u16>,
+        rel: &mut Vec<(usize, i32)>,
+        op: u8,
+        reg: u16,
+        payload: Vec<u16>,
+    ) {
+        let insn_pc = units.len();
+        units.extend(insn_31t(op, reg, 0));
+        if units.len() % 2 == 1 {
+            units.push(0x0000); // nop pad: payload must be 4-byte aligned
+        }
+        let payload_pc = units.len();
+        units.extend(payload);
+        rel.push((insn_pc, (payload_pc - insn_pc) as i32));
+    }
+
+    let mut units: Vec<u16> = Vec::new();
+    let mut rel: Vec<(usize, i32)> = Vec::new();
+    units.extend(insn_11n(0x12, 1, 1)); // const/4 v1, #1
+    let try1_start = units.len() as u32; // packed-switch
+    emit_31t(
+        &mut units,
+        &mut rel,
+        0x2b,
+        0,
+        packed_switch_payload(-2, &[0, 0]),
+    );
+    emit_31t(
+        &mut units,
+        &mut rel,
+        0x26,
+        1,
+        array_payload(4, &1u32.to_le_bytes().repeat(2)),
+    );
+    emit_31t(
+        &mut units,
+        &mut rel,
+        0x26,
+        2,
+        array_payload(1, &[0x01, 0x7f, 0x80]),
+    );
+    let try2_start = units.len() as u32; // sparse-switch
+    emit_31t(
+        &mut units,
+        &mut rel,
+        0x2c,
+        0,
+        sparse_switch_payload(&[-1, 0x7fff_ffff], &[0, 0]),
+    );
+    emit_31t(
+        &mut units,
+        &mut rel,
+        0x26,
+        3,
+        array_payload(2, &0x7fffu16.to_le_bytes().repeat(3)),
+    );
+    emit_31t(
+        &mut units,
+        &mut rel,
+        0x26,
+        4,
+        array_payload(8, &0x1000_0000_8000_0000u64.to_le_bytes().repeat(2)),
+    );
+    let return_pc = units.len() as u32;
+    units.push(0x000e); // return-void
+    for (pc, r) in &rel {
+        let w = (*r as u32).to_le_bytes();
+        units[pc + 1] = u16::from_le_bytes([w[0], w[1]]);
+        units[pc + 2] = u16::from_le_bytes([w[2], w[3]]);
+    }
+
     let mut code_b = Code {
         registers: 6,
         ins: 0,
         outs: 0,
-        units: [
-            insn_11n(0x12, 1, 1), // 0  const/4 v1, #1
-            // Each block is exactly 5 units (10 bytes = 4-byte
-            // aligned), so every 31t below starts on an even code-unit
-            // address and its payload — the unit right after it — is
-            // even too. Both are invariants the parser enforces, and a
-            // 4-byte stride guarantees the next 31t as well.
-            insn_31t(0x2b, 0, 0),                            // 1  packed-switch
-            packed_switch_payload(-2, &[0, 0]),              // 4  first_key -2
-            insn_31t(0x26, 1, 0),                            // 6  fill-array-data v1
-            array_payload(4, &1u32.to_le_bytes().repeat(2)), // 9  width 4
-            insn_31t(0x26, 2, 0),                            // 11 fill-array-data v2
-            array_payload(1, &[0x01, 0x7f, 0x80]),           // 14 width 1
-            insn_31t(0x2c, 0, 0),                            // 16 sparse-switch
-            sparse_switch_payload(&[-1, 0x7fff_ffff], &[0, 0]), // 19 keys
-            insn_31t(0x26, 3, 0),                            // 21 fill-array-data v3
-            array_payload(2, &0x7fffu16.to_le_bytes().repeat(3)), // 24 width 2
-            // This block is 4 units, not 5: a 16-byte array payload
-            // already ends on a 4-byte boundary, and the next 31t
-            // must too.
-            insn_31t(0x26, 4, 0), // 25 fill-array-data v4
-            array_payload(8, &0x1000_0000_8000_0000u64.to_le_bytes().repeat(2)), // 28 width 8
-            vec![0x000e, 0x0000], // 30 return-void
-        ]
-        .concat(),
+        units,
         // Two tries, each pointing at one handler: the first is
-        // typed (handler on the packed-switch), the second is a bare
-        // catch-all covering the rest of the body. Both start and end
-        // addresses are instruction starts — a try end that is not one
-        // is rejected. Handler offsets are relative to the
+        // typed (on the packed-switch), the second is a bare
+        // catch-all covering the rest of the body. Both start and
+        // end addresses are instruction starts — a try end that is
+        // not one is rejected. Handler offsets are relative to the
         // `encoded_catch_handler_list` start, so the second includes
         // the `handlers_size` ULEB and handler 0's bytes.
         tries: vec![TrySpec {
-            start_addr: 1,
-            insn_count: 15,
+            start_addr: try1_start,
+            insn_count: (try2_start - try1_start) as u16,
             handler_off: 1, // right after the handlers_size ULEB
         }],
         handlers: vec![
             HandlerSpec {
-                catches: vec![(0, 1)],
+                catches: vec![(1, 1)],
                 catch_all: None,
             },
             HandlerSpec {
                 catches: Vec::new(),
-                catch_all: Some(16),
+                catch_all: Some(return_pc),
             },
         ],
     };
     // One try cannot name two handlers, so the catch-all gets its own
     // non-overlapping entry.
     code_b.tries.push(TrySpec {
-        start_addr: 16,
-        insn_count: 15,
+        start_addr: try2_start,
+        insn_count: (return_pc - try2_start) as u16,
         handler_off: 4,
     });
-    // Every 31t above branches to the unit right after it, i.e. 3
-    // code units past itself.
-    set_rel32(&mut code_b.units[1..], 3);
-    set_rel32(&mut code_b.units[6..], 3);
-    set_rel32(&mut code_b.units[11..], 3);
-    set_rel32(&mut code_b.units[16..], 3);
-    set_rel32(&mut code_b.units[21..], 3);
-    set_rel32(&mut code_b.units[25..], 3);
 
     d.classes.push(ClassSpec {
         flags: 0x0001, // public

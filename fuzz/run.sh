@@ -3,7 +3,13 @@
 # the wall-time budget elapses without a panic (= GREEN) or the user
 # stops it.
 #
-# Usage:  ./run.sh <target> [budget_seconds]
+# Usage:  ./run.sh <target> [budget_seconds] [features]
+#         FEATURES=dex,apk ./run.sh <target>     (env form)
+#
+# `features` (or $FEATURES) is a comma list of fuzz-workspace cargo
+# features (dex|bytecode|apk|rebuild|resources|core|decompile|all).
+# Without it the runner builds with default features and every
+# contract target reports SkippedDisabled.
 #
 # Exit codes:
 #   0  = green (no panics within budget)
@@ -13,12 +19,13 @@
 set -u
 
 if [ "$#" -lt 1 ]; then
-    echo "usage: $0 <target> [budget_seconds]" >&2
+    echo "usage: $0 <target> [budget_seconds] [features]" >&2
     exit 2
 fi
 
 TARGET="$1"
 BUDGET_SEC="${2:-30}"
+FEATURES="${3:-${FEATURES:-}}"
 SEEDS_DIR="seeds/${TARGET}"
 LOGDIR="crashes"
 
@@ -26,18 +33,28 @@ mkdir -p "$LOGDIR" "corpus-out/${TARGET}"
 
 # Build first so a panic doesn't waste time compiling during the
 # mutation loop.
-cargo build --release --bin fuzz-runner >/dev/null
-
+if [ -n "$FEATURES" ]; then
+    cargo build --release --bin fuzz-runner --features "$FEATURES" >/dev/null
+else
+    cargo build --release --bin fuzz-runner >/dev/null
+fi
+BUILD_EXIT=$?
+if [ "$BUILD_EXIT" -ne 0 ]; then
+    echo "build failed (features=${FEATURES:-none})" >&2
+    exit 2
+fi
 BIN="./target/release/fuzz-runner.exe"
 [ -x "$BIN" ] || BIN="./target/release/fuzz-runner"
 
 START=$(date +%s)
 END=$((START + BUDGET_SEC))
 PANICS=0
-LAST_SEED="0xa5a5_c0de_beef"
+# Decimal: clap parses --seed as a plain u64 (no 0x/underscores), and
+# bash arithmetic accepts the 0x form here exactly once.
+LAST_SEED=$((0xA5A5C0DEBEEF))
 
 echo "=== fuzz-runner restart loop ==="
-echo "target=$TARGET budget=${BUDGET_SEC}s seeds=$SEEDS_DIR crash_dir=$LOGDIR"
+echo "target=$TARGET budget=${BUDGET_SEC}s features=${FEATURES:-none} seeds=$SEEDS_DIR crash_dir=$LOGDIR"
 
 while [ "$(date +%s)" -lt "$END" ]; do
     REMAINING=$((END - $(date +%s)))

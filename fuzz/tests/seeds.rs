@@ -71,8 +71,8 @@ fn dex_minimal_header_is_well_formed() {
 #[cfg(feature = "decompile")]
 #[test]
 fn disasm_seed_parses_and_renders_every_payload_form() {
-    use asc_decompile::ClassDecompiler;
     use asc_decompile::droidsaw::DroidsawBackend;
+    use asc_decompile::ClassDecompiler;
 
     let bytes = asc_fuzz::dex_builder::dex_with_switch_try_array();
     assert_eq!(&bytes[..4], b"dex\n", "seed must carry the DEX magic");
@@ -93,8 +93,8 @@ fn disasm_seed_parses_and_renders_every_payload_form() {
         "sparse-switch v0",
         "fill-array-data v1",
         "fill-array-data v4",
-        "invoke-custom {v0}, call_site_0(\"apply\", (I)I, 0x7)",
-        "invoke-polymorphic {v0}, Lfoo/Bar;->poly()V, ()V",
+        "invoke-custom {v1}, call_site_0(\"apply\", (I)I, 0x7)",
+        "invoke-polymorphic {v1}, Lfoo/Bar;->poly()V, ()V",
         "const-method-handle v0, invoke-static@Lfoo/Bar;-><clinit>()V",
         ".catch Ljava/lang/Throwable;",
         ".catchall",
