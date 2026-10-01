@@ -1277,3 +1277,64 @@ fn show_smali_opens_listing_tab() {
     assert!(doc.source.contains(".method"), "listing looks like smali");
     assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
 }
+
+/// JADX-GUI-010: Ctrl+B toggles a bookmark on the active tab (at the
+/// clicked line), the tab strip shows ★, Ctrl+Shift+B jumps back.
+/// JADX-GUI-007: loading an artifact records it under File ▸ Open
+/// recent. ASC-GUI-029: Ctrl+Shift+H opens the tabs picker.
+#[test]
+fn bookmark_toggle_jump_and_open_tabs_picker() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.tabs.open_preview("Lcom/foo/Bar;");
+    app.tabs.activate("Lcom/foo/Bar;");
+    app.last_clicked_line = Some(4); // 0-indexed → bookmark line 5
+    app.dispatch(Command::ToggleBookmark, &ctx);
+    assert_eq!(app.tabs.bookmark("Lcom/foo/Bar;"), Some(5));
+    // Jump sets pending_scroll to the 0-indexed line.
+    app.pending_scroll = None;
+    app.dispatch(Command::GoToBookmark, &ctx);
+    assert_eq!(app.pending_scroll, Some(4));
+    // Second toggle on the same line clears.
+    app.dispatch(Command::ToggleBookmark, &ctx);
+    assert_eq!(app.tabs.bookmark("Lcom/foo/Bar;"), None);
+    // Tabs picker opens with a cleared filter.
+    app.dispatch(Command::ShowOpenTabs, &ctx);
+    assert!(app.show_open_tabs);
+    // OpenRecent with a missing path degrades to a status message.
+    app.dispatch(
+        Command::OpenRecent {
+            path: std::path::PathBuf::from("Z:/definitely/missing.apk"),
+        },
+        &ctx,
+    );
+    assert!(app.session.is_none(), "no session opened for missing path");
+}
+
+/// ASC-GUI-029 / ASC-GUI-025 / JADX-GUI-020 UI surface: the open-tabs
+/// picker, settings dialog and goto-line bar render as windows.
+#[test]
+fn overlay_windows_render() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    h.state_mut().tabs.open_pinned("Lcom/foo/Bar;");
+    h.state_mut().tabs.open_preview("Lcom/foo/Baz;");
+    // Tabs picker: filter narrows the shown count.
+    h.state_mut().show_open_tabs = true;
+    h.state_mut().open_tabs_filter = "Baz".into();
+    h.run_steps(3);
+    assert!(h.get_all_by_label("Baz").count() >= 2); // tab strip + picker row
+    // Settings dialog with the theme row.
+    h.state_mut().show_open_tabs = false;
+    h.state_mut().show_settings = true;
+    h.run_steps(2);
+    assert!(h.get_all_by_label("dark").count() >= 1); // theme buttons
+    // Goto bar accepts a line and closes.
+    h.state_mut().show_settings = false;
+    h.state_mut().goto_line_input = Some("3".into());
+    h.run_steps(2);
+    h.state_mut().apply_goto_line(3);
+    assert_eq!(h.state().pending_scroll, Some(2));
+}

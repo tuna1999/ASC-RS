@@ -60,6 +60,19 @@ pub enum Command {
     /// Open the Smali (disasm) listing of the active class in a tab
     /// (JADX-GUI-018, unblocked by the `asc-rs disasm` renderer).
     ShowSmali,
+    /// Toggle a bookmark on the active tab at the clicked line
+    /// (JADX-GUI-010).
+    ToggleBookmark,
+    /// Jump to the active tab's bookmark line (JADX-GUI-010).
+    GoToBookmark,
+    /// Open a recently-used artifact (File ▸ Open recent,
+    /// JADX-GUI-007).
+    OpenRecent {
+        path: std::path::PathBuf,
+    },
+    /// Open the tab-overflow picker: filterable list of open tabs
+    /// (ASC-GUI-029 / JADX-GUI-004).
+    ShowOpenTabs,
 
     // --- tabs ---
     CloseTab,

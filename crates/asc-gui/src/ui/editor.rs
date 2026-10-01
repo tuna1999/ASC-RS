@@ -56,6 +56,13 @@ impl AscApp {
         let mut closed: Option<String> = None;
         let mut pinned: Option<String> = None;
         let active = self.tabs.active_descriptor().map(str::to_string);
+        let bookmarks: Vec<String> = self
+            .tabs
+            .tabs()
+            .iter()
+            .filter(|t| self.tabs.bookmark(&t.descriptor).is_some())
+            .map(|t| t.descriptor.clone())
+            .collect();
         let tabs: Vec<(String, TabKind, TabStatus)> = self
             .tabs
             .tabs()
@@ -85,7 +92,12 @@ impl AscApp {
                             TabKind::Preview => "",
                             TabKind::Text => "≡ ",
                         };
-                        let mut label = egui::RichText::new(format!("{prefix}{short}"))
+                        let star = if bookmarks.contains(descriptor) {
+                            "★ "
+                        } else {
+                            ""
+                        };
+                        let mut label = egui::RichText::new(format!("{prefix}{star}{short}"))
                             .monospace()
                             .size(12.0);
                         label = match kind {

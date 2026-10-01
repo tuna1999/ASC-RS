@@ -109,6 +109,10 @@ pub struct AscApp {
     pub(crate) goto_line_input: Option<String>,
     /// Settings dialog visibility (JADX-GUI-009).
     pub(crate) show_settings: bool,
+    /// Open-tabs picker visibility (ASC-GUI-029 / JADX-GUI-004).
+    pub(crate) show_open_tabs: bool,
+    /// Filter text for the open-tabs picker.
+    pub(crate) open_tabs_filter: String,
     /// Decode Paranoid strings (`GetClassOptions::paranoid` /
     /// `FindRefsOptions::paranoid`) for new decompiles and searches.
     pub(crate) paranoid: bool,
@@ -173,6 +177,8 @@ impl AscApp {
             last_clipboard: None,
             goto_line_input: None,
             show_settings: false,
+            show_open_tabs: false,
+            open_tabs_filter: String::new(),
             paranoid: false,
             status: None,
             last_error: None,
@@ -269,7 +275,12 @@ impl AscApp {
         } else {
             format!("asc-gui — {title}")
         };
-        self.set_status("artifact ready", true);
+        // Record the artifact for File ▸ Open recent (JADX-GUI-007).
+        // `tabs.clear()` above already reset tabs but keeps recents.
+        if let Some(session) = &self.session {
+            self.tabs.push_recent_artifact(session.path().to_path_buf());
+        }
+        self.show_open_tabs = false;
     }
 
     /// Replace the active document's source (rename / comment edit):
@@ -680,6 +691,51 @@ impl AscApp {
                     self.set_status(format!("disasm: {descriptor}"), true);
                 }
             }
+            Command::ToggleBookmark => {
+                // Bookmark the active tab at the clicked line (or
+                // line 1 when nothing is clicked). Second toggle on
+                // the same line clears it.
+                if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
+                    let line = self.last_clicked_line.map(|l| l + 1).unwrap_or(1);
+                    let on = self.tabs.toggle_bookmark(&d, Some(line));
+                    self.set_status(
+                        if on {
+                            format!("bookmark set: {d}:{line}")
+                        } else {
+                            format!("bookmark cleared: {d}")
+                        },
+                        true,
+                    );
+                } else {
+                    self.set_status("open a class first", false);
+                }
+            }
+            Command::GoToBookmark => {
+                if let Some(d) = self
+                    .tabs
+                    .active_descriptor()
+                    .and_then(|d| self.tabs.bookmark(d).map(|line| (d.to_string(), line)))
+                {
+                    let line = d.1;
+                    self.apply_goto_line(line);
+                } else {
+                    self.set_status("no bookmark on this tab", false);
+                }
+            }
+            Command::OpenRecent { path } => {
+                if path.exists() {
+                    self.open_path(&path, ctx);
+                } else {
+                    self.set_status(
+                        format!("recent artifact missing: {}", path.display()),
+                        false,
+                    );
+                }
+            }
+            Command::ShowOpenTabs => {
+                self.show_open_tabs = true;
+                self.open_tabs_filter.clear();
+            }
             Command::UsedByClass => {
                 // Same engine as FindReferences (type query on the
                 // descriptor) but the surface emphasis is the
@@ -900,7 +956,7 @@ impl AscApp {
     /// `pending_scroll` and offsets the scroll area accordingly.
     /// Public so the editor surface (or a future modal) can call
     /// it without duplicating the bounds check.
-    #[allow(dead_code)] // driven by tests today; UI binding lands next phase
+    #[allow(dead_code)] // test-driven; the goto bar + bookmark jump call it
     pub(crate) fn apply_goto_line(&mut self, line: usize) {
         if line == 0 {
             // Treat 0 as "no-op" (avoids underflowing the 1-indexed
@@ -931,11 +987,17 @@ impl AscApp {
             alt: true,
             ..Default::default()
         };
-        // Escape stack: palette → find → cancel task.
+        // Escape stack: palette → overlays → find → cancel task.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.palette.is_some() {
                 self.palette = None;
                 self.palette_input.clear();
+            } else if self.show_open_tabs {
+                self.show_open_tabs = false;
+            } else if self.show_settings {
+                self.show_settings = false;
+            } else if self.goto_line_input.is_some() {
+                self.goto_line_input = None;
             } else if self.show_rename {
                 self.show_rename = false;
             } else if self.comment_target.is_some() {
@@ -971,6 +1033,12 @@ impl AscApp {
             self.queue(Command::ToggleBottomPanel);
         } else if pressed(ctx, alt, egui::Key::ArrowLeft) {
             self.queue(Command::NavigateBack);
+        } else if pressed(ctx, m, egui::Key::B) {
+            self.queue(Command::ToggleBookmark);
+        } else if pressed(ctx, ms, egui::Key::B) {
+            self.queue(Command::GoToBookmark);
+        } else if pressed(ctx, ms, egui::Key::H) {
+            self.queue(Command::ShowOpenTabs);
         } else if pressed(ctx, alt, egui::Key::ArrowRight) {
             self.queue(Command::NavigateForward);
         }

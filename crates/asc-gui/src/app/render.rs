@@ -48,6 +48,29 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ReloadArtifact);
                     }
+                    // Recent artifacts (JADX-GUI-007): most recent
+                    // first; click re-opens (missing paths are
+                    // reported, not fatal).
+                    let recents: Vec<std::path::PathBuf> = self.tabs.recent_artifacts().to_vec();
+                    if recents.is_empty() {
+                        ui.weak(egui::RichText::new("no recent artifacts").small());
+                    } else {
+                        for p in &recents {
+                            let name = p
+                                .file_name()
+                                .map(|f| f.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            if ui
+                                .selectable_label(false, egui::RichText::new(name).small())
+                                .on_hover_text(p.display().to_string())
+                                .clicked()
+                            {
+                                ui.close();
+                                let path = p.clone();
+                                self.queue(Command::OpenRecent { path });
+                            }
+                        }
+                    }
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -352,6 +375,11 @@ impl eframe::App for AscApp {
                 });
         }
 
+        // 9a. Overlay strips (panels — before the central panel).
+        self.draw_open_tabs_strip(ui);
+        self.draw_settings_strip(ui);
+        self.draw_goto_bar(ui);
+
         // 9. Editor (center).
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(tokens.app_bg))
@@ -363,9 +391,146 @@ impl eframe::App for AscApp {
         self.draw_palette(ui.ctx());
 
         // 11. Dispatch everything queued this frame.
+
+        // 11. Dispatch everything queued this frame.
         let commands = std::mem::take(&mut self.commands);
         for cmd in commands {
             self.dispatch(cmd, ui.ctx());
+        }
+    }
+}
+
+impl AscApp {
+    /// Open-tabs picker (ASC-GUI-029 / JADX-GUI-004): filterable
+    /// list of open tabs, click activates. Ctrl+Shift+H.
+    fn draw_open_tabs_strip(&mut self, ui: &mut egui::Ui) {
+        if !self.show_open_tabs {
+            return;
+        }
+        #[allow(non_snake_case)]
+        let T = design::tokens();
+        let mut activate: Option<String> = None;
+        // Snapshot before the mutable closure.
+        let tabs: Vec<(String, bool)> = self
+            .tabs
+            .tabs()
+            .iter()
+            .map(|t| {
+                let active = self.tabs.active_descriptor() == Some(t.descriptor.as_str());
+                (t.descriptor.clone(), active)
+            })
+            .collect();
+        let needle = self.open_tabs_filter.trim().to_ascii_lowercase();
+        let shown: Vec<_> = tabs
+            .iter()
+            .filter(|(d, _)| d.to_ascii_lowercase().contains(&needle))
+            .collect();
+        egui::Panel::top("open_tabs_strip")
+            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.open_tabs_filter)
+                        .hint_text("filter open tabs…")
+                        .font(egui::TextStyle::Monospace),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (d, is_active) in &shown {
+                            let star = if self.tabs.bookmark(d).is_some() {
+                                "★ "
+                            } else {
+                                ""
+                            };
+                            let label = format!("{star}{}", crate::ui::short_name(d));
+                            let resp = ui
+                                .selectable_label(*is_active, egui::RichText::new(label).small())
+                                .on_hover_text(d);
+                            if resp.clicked() {
+                                activate = Some(d.clone());
+                            }
+                        }
+                    });
+                ui.weak(
+                    egui::RichText::new(format!(
+                        "{} / {} tabs · Esc close",
+                        shown.len(),
+                        tabs.len()
+                    ))
+                    .small(),
+                );
+            });
+        if let Some(d) = activate {
+            self.show_open_tabs = false;
+            self.tabs.activate(&d);
+            if self.documents.contains(&d) {
+                self.active_doc = self.documents.get(&d);
+            }
+        }
+    }
+
+    /// Settings dialog (ASC-GUI-025 / JADX-GUI-009): theme picker.
+    fn draw_settings_strip(&mut self, ui: &mut egui::Ui) {
+        if !self.show_settings {
+            return;
+        }
+        #[allow(non_snake_case)]
+        let T = design::tokens();
+        let mut close = false;
+        egui::Panel::top("settings_strip")
+            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("settings · theme:");
+                    if ui
+                        .selectable_label(matches!(design::theme(), design::Theme::Dark), "dark")
+                        .clicked()
+                    {
+                        self.queue(Command::ToggleTheme);
+                    }
+                    if ui
+                        .selectable_label(matches!(design::theme(), design::Theme::Light), "light")
+                        .clicked()
+                    {
+                        self.queue(Command::ToggleTheme);
+                    }
+                    if ui.small_button("close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.show_settings = false;
+        }
+    }
+
+    /// Goto-line bar (JADX-GUI-020): Ctrl+G, Enter applies.
+    fn draw_goto_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(input) = self.goto_line_input.as_mut() else {
+            return;
+        };
+        #[allow(non_snake_case)]
+        let T = design::tokens();
+        let mut apply = None;
+        egui::Panel::top("goto_line_strip")
+            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("goto line:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(input)
+                            .hint_text("1-indexed")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(120.0),
+                    );
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        apply = input.trim().parse::<usize>().ok();
+                    }
+                });
+            });
+        if let Some(line) = apply {
+            self.apply_goto_line(line);
         }
     }
 }
