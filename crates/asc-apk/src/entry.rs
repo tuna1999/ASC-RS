@@ -94,6 +94,17 @@ impl<'a> EntryBytes<'a> {
     pub fn is_empty(&self) -> bool {
         self.as_slice().is_empty()
     }
+
+    /// Own the entry's bytes: inflated payloads move out (no copy),
+    /// borrowed slices copy once. Lets callers parse straight from the
+    /// mmap-backed view and only materialize a `Vec` when a hit needs
+    /// independent ownership.
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            EntryBytes::Borrowed(b) => b.to_vec(),
+            EntryBytes::Inflated(v) => v,
+        }
+    }
 }
 
 impl<'a> AsRef<[u8]> for EntryBytes<'a> {

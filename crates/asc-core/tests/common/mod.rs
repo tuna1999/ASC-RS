@@ -1,3 +1,5 @@
+#![allow(dead_code)] // shared per test crate: not every test uses every helper
+
 //! Shared synthetic-DEX/APK builders for asc-core integration tests.
 //!
 //! `Dex` is the minimal DEX writer originally written for
@@ -18,6 +20,14 @@ pub type Proto = (&'static str, Vec<&'static str>);
 /// Method-id entry: owning class descriptor is an owned `String` so
 /// tests can build descriptors at runtime.
 pub type Member = (String, &'static str, Proto);
+
+/// One class in `Dex::finish`: (descriptor, static field names,
+/// [(method name, flags, regs, ins, insns)]).
+pub type ClassSpec<'a> = (
+    &'a str,
+    Vec<&'a str>,
+    Vec<(&'a str, u32, u16, u16, Vec<u16>)>,
+);
 
 pub const OBJECT: &str = "Ljava/lang/Object;";
 pub const STRING: &str = "Ljava/lang/String;";
@@ -262,6 +272,6 @@ pub fn write_apk(tag: &str, entries: &[(&str, Vec<u8>)]) -> PathBuf {
 /// A truncated DEX magic (parses as an error, not as a silent skip).
 pub fn corrupt_dex() -> Vec<u8> {
     let mut b = b"dex\n035\0".to_vec();
-    b.extend(std::iter::repeat(0u8).take(8));
+    b.extend([0u8; 8]);
     b
 }

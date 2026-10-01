@@ -98,5 +98,6 @@ Suspect a packer when `listclass` returns only a few classes but `classes.dex` i
 - On Windows, paths with non-ASCII characters (e.g. Vietnamese file names) can make captured stdout come back empty. Use `-o FILE` and read the file (set `PYTHONIOENCODING=utf-8` if a Python helper prints).
 - Constructors/static init are `<init>` / `<clinit>`.
 - Multidex is automatic (`classes*.dex` numeric order); `dex_name` says which.
+- A process-wide 2 GiB budget caps DEX bytes held by concurrent `getclass`/`disasm`/`findrefs` scans. An APK large enough to hit it fails with `memory budget exceeded` (exit `2`; `findrefs` records it per DEX and still exits `2` with partial output) — that means the input is pathological for this machine, not that the tool is broken.
 - No Smali, CFG, or call-graph output exists. Say the tool can't provide it; never fabricate.
 - Smoke-test on any small APK you have; verify the binary runs with `asc-rs --help` before relying on it.

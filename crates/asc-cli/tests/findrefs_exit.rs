@@ -78,7 +78,7 @@ impl Dex {
             .unwrap() as u16
     }
 
-    /// `classes`: (descriptor, [(method name, flags, regs, ins, insns)]).
+    #[allow(clippy::type_complexity)] // mirrors asc-core tests/common
     fn finish(&self, classes: &[(&str, Vec<(&str, u32, u16, u16, Vec<u16>)>)]) -> Vec<u8> {
         let ids_len = 0x70
             + self.strings.len() * 4
@@ -249,7 +249,7 @@ fn findrefs_partial_scan_keeps_results_exits_2_and_warns() {
     // classes.dex valid (defines the hit), classes2.dex truncated DEX.
     let corrupt = {
         let mut b = b"dex\n035\0".to_vec();
-        b.extend(std::iter::repeat(0u8).take(8)); // 16 bytes: header parse fails
+        b.extend([0u8; 8]); // 16 bytes: header parse fails
         b
     };
     let apk = write_apk(

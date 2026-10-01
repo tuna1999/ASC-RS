@@ -41,6 +41,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 // No `unsafe` in this crate.
 
+pub mod budget;
 pub mod cert;
 pub mod class_name;
 pub mod format;
@@ -52,6 +53,7 @@ pub mod report;
 pub mod resources;
 pub mod worker;
 
+pub use crate::budget::{DEFAULT_SCAN_BUDGET, Guard};
 pub use crate::cert::{CertReport, format_cert_text, run_cert};
 pub use crate::class_name::normalize_class_name;
 pub use crate::format::{

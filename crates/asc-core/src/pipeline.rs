@@ -92,6 +92,10 @@ pub enum CoreError {
     ClassNotFound(String),
     /// The `disasm --method` filter matched no method of the class.
     MethodNotFound(String),
+    /// The process-wide scan-memory budget was exceeded (see
+    /// [`crate::budget`]). Structured, recoverable-by-caller: no
+    /// panic, no abort.
+    MemoryBudget(String),
     /// The binary's CLI received bad input (e.g. neither `--class` nor
     /// `<name>` for `findrefs method`).
     Usage(String),
@@ -111,6 +115,7 @@ impl fmt::Display for CoreError {
                 write!(f, "Method {m} not found in class.")
             }
             CoreError::Usage(m) => write!(f, "{m}"),
+            CoreError::MemoryBudget(m) => write!(f, "{m}"),
         }
     }
 }
@@ -168,6 +173,10 @@ pub struct FindRefsOptions {
     /// `string` queries also match XOR-obfuscated literals (const-array
     /// + literal-key decoder, decoded from bytecode). Off by default.
     pub decode_xor: bool,
+    /// Total bytes of DEX entries this process may hold concurrently
+    /// across all scans (worker pools, GUI tasks, …). `0` = engine
+    /// default ([`crate::budget::DEFAULT_SCAN_BUDGET`]).
+    pub scan_budget_bytes: usize,
 }
 
 /// One getclass run.
@@ -202,6 +211,10 @@ pub struct GetClassOptions {
     /// Replace provable XOR-decoder calls (const-array + literal key,
     /// no aliasing) in the target class with the decoded literal.
     pub decode_xor: bool,
+    /// Total bytes of DEX entries this process may hold concurrently
+    /// across all scans (worker pools, GUI tasks, …). `0` = engine
+    /// default ([`crate::budget::DEFAULT_SCAN_BUDGET`]).
+    pub scan_budget_bytes: usize,
 }
 
 impl Default for GetClassOptions {
@@ -211,6 +224,7 @@ impl Default for GetClassOptions {
             debug: false,
             paranoid: false,
             decode_xor: false,
+            scan_budget_bytes: 0,
         }
     }
 }
@@ -260,6 +274,10 @@ pub struct DisasmOptions {
     pub threads: usize,
     /// Emit the winning DEX name + timings to stderr.
     pub debug: bool,
+    /// Total bytes of DEX entries this process may hold concurrently
+    /// across all scans (worker pools, GUI tasks, …). `0` = engine
+    /// default ([`crate::budget::DEFAULT_SCAN_BUDGET`]).
+    pub scan_budget_bytes: usize,
 }
 
 impl Default for DisasmOptions {
@@ -267,6 +285,7 @@ impl Default for DisasmOptions {
         Self {
             threads: 8,
             debug: false,
+            scan_budget_bytes: 0,
         }
     }
 }
@@ -302,13 +321,25 @@ pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchR
     };
     let xor = xor_decoders.as_deref();
     let mut report = SearchReport::empty();
+    let budget = effective_budget(opts.scan_budget_bytes);
     for entry in entries {
-        // `into_owned` is implicit: we always copy to a `Vec<u8>` so
-        // the borrow lifetime is decoupled from the APK's mmap. The
-        // apksigner-produced corpus is small (≤ 64 MiB per DEX), so
-        // the per-entry allocation is bounded.
+        // Process-wide budget: reserve the declared entry size for as
+        // long as this entry's bytes are alive. A budget failure is a
+        // per-DEX error (recorded, scan continues with the remaining
+        // entries) — never a panic or an abort.
+        let _guard = match crate::budget::acquire(budget, entry.uncompressed_size as usize) {
+            Ok(g) => g,
+            Err(e) => {
+                let msg = format!("{}: {}", entry.name, e);
+                report.errors.push(SearchError::from_apk(&entry.name, &msg));
+                report.complete = false;
+                continue;
+            }
+        };
+        // Parse straight from the EntryBytes view: mmap-backed for
+        // STORED entries (zero copy), inflated Vec for DEFLATED ones.
         let bytes = match apk.read_entry(&entry) {
-            Ok(b) => b.as_slice().to_vec(),
+            Ok(b) => b,
             Err(e) => {
                 let msg = format!("{}: read_entry failed: {e}", entry.name);
                 report.errors.push(SearchError::from_apk(&entry.name, &msg));
@@ -316,7 +347,14 @@ pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchR
                 continue;
             }
         };
-        scan_entry_bytes(&entry.name, &bytes, &job.query, paranoid, xor, &mut report);
+        scan_entry_bytes(
+            &entry.name,
+            bytes.as_slice(),
+            &job.query,
+            paranoid,
+            xor,
+            &mut report,
+        );
     }
     Ok(report)
 }
@@ -687,8 +725,23 @@ pub fn run_getclass(
         return Err(CoreError::ClassNotFound(target));
     }
 
-    let hit = find_defining_dex(&apk, &entries, opts.threads.max(1), &target)?;
+    let hit = find_defining_dex(
+        &apk,
+        &entries,
+        opts.threads.max(1),
+        &target,
+        opts.scan_budget_bytes,
+    )?;
     decompile_winner(hit, &target, opts, &apk)
+}
+
+/// `0` means "engine default budget".
+fn effective_budget(n: usize) -> usize {
+    if n == 0 {
+        crate::budget::DEFAULT_SCAN_BUDGET
+    } else {
+        n
+    }
 }
 
 /// Scan `entries` (already in `classes*.dex` numeric order) for the DEX
@@ -716,13 +769,21 @@ fn find_defining_dex(
     entries: &[DexEntry],
     threads: usize,
     target: &str,
+    scan_budget_bytes: usize,
 ) -> Result<ClassHit, CoreError> {
+    let budget = effective_budget(scan_budget_bytes);
     // Single-dex fast path: skip the worker pool entirely.
     if entries.len() == 1 {
         let entry = &entries[0];
-        let bytes = apk.read_entry(entry)?.as_slice().to_vec();
-        return scan_one_for_class(&entry.name, &bytes, target)?
-            .ok_or_else(|| CoreError::ClassNotFound(target.to_string()));
+        let _guard = crate::budget::acquire(budget, entry.uncompressed_size as usize)?;
+        let eb = apk.read_entry(entry)?;
+        return match scan_one_for_class(&entry.name, eb.as_slice(), target)? {
+            Some(mut hit) => {
+                hit.bytes = eb.into_vec();
+                Ok(hit)
+            }
+            None => Err(CoreError::ClassNotFound(target.to_string())),
+        };
     }
 
     let pool = WorkerPool::new(threads.max(1));
@@ -743,15 +804,28 @@ fn find_defining_dex(
         // pulled must run to completion, or a lower-index winner could
         // be skipped because a higher-index worker finished first.
         // The pool itself stops pulling new entries once `found` is set.
-        let bytes = match apk_clone.read_entry(entry) {
-            Ok(b) => b.as_slice().to_vec(),
+        //
+        // Memory: reserve the entry against the process-wide budget,
+        // then parse straight from the EntryBytes view (mmap-backed
+        // for STORED entries) and materialize a Vec ONLY on a hit —
+        // misses (the common multidex case) copy nothing.
+        let _guard = match crate::budget::acquire(budget, entry.uncompressed_size as usize) {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = err_clone.set(e);
+                return None;
+            }
+        };
+        let eb = match apk_clone.read_entry(entry) {
+            Ok(b) => b,
             Err(e) => {
                 let _ = err_clone.set(e.into());
                 return None;
             }
         };
-        match scan_one_for_class(&entry.name, &bytes, &target_arc) {
-            Ok(Some(hit)) => {
+        match scan_one_for_class(&entry.name, eb.as_slice(), &target_arc) {
+            Ok(Some(mut hit)) => {
+                hit.bytes = eb.into_vec();
                 {
                     let mut g = best_clone
                         .lock()
@@ -837,7 +911,9 @@ fn scan_one_for_class(
             return Ok(Some(ClassHit {
                 name: logical_dex_name(entry_name, offsets.len(), i),
                 class: target.to_owned(),
-                bytes: bytes.to_vec(),
+                // Caller attaches the entry bytes (copy-on-hit; see
+                // find_defining_dex / run_callees).
+                bytes: Vec::new(),
                 header_off,
             }));
         }
@@ -918,7 +994,13 @@ pub fn run_disasm(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult,
         return Err(CoreError::ClassNotFound(target));
     }
 
-    let hit = find_defining_dex(&apk, &entries, opts.threads.max(1), &target)?;
+    let hit = find_defining_dex(
+        &apk,
+        &entries,
+        opts.threads.max(1),
+        &target,
+        opts.scan_budget_bytes,
+    )?;
     disasm_winner(hit, &job.method, opts, started)
 }
 
@@ -1011,10 +1093,14 @@ pub fn run_callees(job: &CalleesJob) -> Result<CalleesResult, CoreError> {
     let apk = Apk::open(&job.apk)?;
     check_raw_dex(&apk)?;
     for entry in apk.dex_entries() {
-        let bytes = apk.read_entry(&entry)?.as_slice().to_vec();
-        let Some(hit) = scan_one_for_class(&entry.name, &bytes, &job.target)? else {
+        // Sequential one-shot lookup: budget with the engine default,
+        // copy only the winning entry.
+        let _guard = crate::budget::acquire(effective_budget(0), entry.uncompressed_size as usize)?;
+        let eb = apk.read_entry(&entry)?;
+        let Some(mut hit) = scan_one_for_class(&entry.name, eb.as_slice(), &job.target)? else {
             continue;
         };
+        hit.bytes = eb.into_vec();
         // DEX-041 containers: `header_off` points at the logical
         // member that defines the class (same as `decompile_winner`).
         let view = DexView::parse_at(&hit.bytes, hit.header_off)?;

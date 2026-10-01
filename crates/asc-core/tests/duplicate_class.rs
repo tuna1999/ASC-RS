@@ -33,7 +33,7 @@ fn dex_with_class(defines_target: bool, marker: &str, pad: usize) -> Vec<u8> {
     // const-string v0, marker ; return-object v0 (format 21c).
     let tag_insns = vec![0x001A, idx, 0x0011];
     // Dummies first, target last: class_defines has to walk them all.
-    let mut classes: Vec<(&str, Vec<&str>, Vec<(&str, u32, u16, u16, Vec<u16>)>)> = dummy_descs
+    let mut classes: Vec<common::ClassSpec<'_>> = dummy_descs
         .iter()
         .map(|d| {
             (

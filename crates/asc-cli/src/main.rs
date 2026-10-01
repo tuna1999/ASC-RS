@@ -332,6 +332,7 @@ fn run_getclass_cmd(
         debug,
         paranoid,
         decode_xor,
+        scan_budget_bytes: 0, // engine default
     };
     let job = GetClassJob::new(apk.to_path_buf(), target.clone());
     let result = run_getclass(&job, &opts)?;
@@ -379,7 +380,11 @@ fn run_disasm_cmd(
     debug: bool,
 ) -> Result<(), CoreError> {
     let target = asc_core::normalize_class_name(class).map_err(CoreError::Class)?;
-    let opts = DisasmOptions { threads, debug };
+    let opts = DisasmOptions {
+        threads,
+        debug,
+        scan_budget_bytes: 0, // engine default
+    };
     let job = DisasmJob::new(apk.to_path_buf(), target, method);
     let result = run_disasm(&job, &opts)?;
     let listing = result.listing;
@@ -422,6 +427,7 @@ fn run_findrefs_cmd(
         debug,
         paranoid,
         decode_xor,
+        scan_budget_bytes: 0, // engine default
     };
     let job = FindRefsJob::new(apk.to_path_buf(), query);
     let report = match run_findrefs(&job, &opts) {
