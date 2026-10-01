@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKED = [
     "Cargo.toml",
     "Cargo.lock",
+    "LICENSE",
+    "NOTICE",
     "README.md",
     ".gitignore",
     "crates",
@@ -30,6 +32,19 @@ PACKED = [
     "fuzz",
     "docs",
     "seeds",
+    "skills",
+]
+
+# Members every source release MUST contain (legal + agent skill docs).
+# Checked before packing so a forgotten file fails the build loudly.
+REQUIRED_MEMBERS = [
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "Cargo.toml",
+    "Cargo.lock",
+    "skills/apk-analysis/SKILL.md",
+    "crates/asc-core/src/pipeline.rs",
 ]
 
 _SEMVER = re.compile(
@@ -59,6 +74,11 @@ def build(version: str, output: Path) -> Path:
     paths = _list_files()
     if not paths:
         raise RuntimeError("git ls-files returned no paths; refusing to build empty release")
+    missing = [m for m in REQUIRED_MEMBERS if m not in set(paths)]
+    if missing:
+        raise RuntimeError(
+            "release is missing required members: " + ", ".join(sorted(missing))
+        )
 
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"ASC-RS-{version}-source.zip"

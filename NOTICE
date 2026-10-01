@@ -1,0 +1,56 @@
+ASC-RS
+Copyright 2026 The ASC-RS Authors
+
+This product includes software developed as a pure-Rust port of
+MG1937/ASC (https://github.com/MG1937/ASC), licensed under the
+Apache License, Version 2.0 (Copyright MG1937/ASC authors; behavioral
+oracle frozen in this repository at reference/asc @ ccc6bae).
+Portions of the engine's behavioral specification and test fixtures
+are derived from that project.
+
+This product includes software developed by third parties:
+
+  - droidsaw-dex (https://crates.io/crates/droidsaw-dex)
+    Copyright (c) 2026 Mark Esler <mark@hexproof.dev>
+    BSD-3-Clause. Used by asc-decompile as the DEX decompilation
+    backend (linked into the distributed binaries).
+
+  - Distributed binaries additionally link MIT OR Apache-2.0 / MIT /
+    BSD / ISC / Zlib / Unicode-licensed Rust crates (eframe/egui,
+    clap, serde, memmap2, …). Their full license texts are available
+    in the respective crate sources, reproducible from Cargo.lock
+    shipped in every source release.
+
+The Apache-2.0 text for this project is in LICENSE; droidsaw-dex's
+BSD-3-Clause text is reproduced below.
+
+---------------------------------------------------------------------
+droidsaw-dex — BSD 3-Clause License
+Copyright (c) 2026 Mark Esler <mark@hexproof.dev>
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in
+   the documentation and/or other materials provided with the
+   distribution.
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived
+   from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY
+WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

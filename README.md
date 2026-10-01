@@ -99,3 +99,10 @@ Install by copying (or symlinking) the folder into your agent's skills directory
 ```
 
 Build the CLI first (`cargo build --release -p asc-cli`). Then ask the agent e.g. *"use apk-analysis: who calls `getSystemService` in `app.apk`?"*. The agent runs `asc-rs` itself; the skill is picked up by its `description` trigger.
+
+## License
+
+Apache-2.0 (see [LICENSE](LICENSE)). ASC-RS is a rewrite of
+[MG1937/ASC](https://github.com/MG1937/ASC) (Apache-2.0); third-party
+attributions, including the BSD-3-Clause `droidsaw-dex` decompilation
+backend linked into the binaries, are listed in [NOTICE](NOTICE).
