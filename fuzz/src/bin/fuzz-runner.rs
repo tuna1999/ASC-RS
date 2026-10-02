@@ -154,26 +154,56 @@ fn print_registry() {
 // Regress mode
 // =====================================================================
 
-/// Replay every file under `dir` through `target` once. Returns the
-/// desired process exit code (0 if no panics). On panic, the panic
-/// hook dumps the crashing input and aborts — the outer shell loop
-/// notices the nonzero exit and reports RED.
+/// Replay the regression fixtures under `dir` through `target` once.
+///
+/// Fixtures are committed under `regress/` and named
+/// `<target>-<fnv1a_hex16>.bin` (the same convention the panic hook
+/// uses when writing NEW crashes to `crashes/`). Only the files that
+/// belong to `target` are replayed — never feed another target's
+/// crash into this parser.
+///
+/// Exit codes:
+/// - 0 — every fixture replayed without panic; or the target has no
+///   committed fixture (transparent SKIP, printed).
+/// - 2 — the fixture directory cannot be read, or a fixture file
+///   cannot be read. A committed fixture that cannot run is a CI
+///   failure, not a pass.
+/// - 3 — a fixture replayed as `SkippedDisabled`: the target's cargo
+///   feature is off, so the replay exercised no parser and proves
+///   nothing.
+///
+/// On panic, the panic hook dumps the crashing input and aborts —
+/// the outer shell loop notices the nonzero exit and reports RED.
 fn run_regress(target: TargetInfo, args: &Args) -> i32 {
     let dir = args.regress.as_ref().expect("set by caller");
+    let prefix = format!("{}-", target.name);
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".bin"))
+            })
             .collect(),
         Err(e) => {
             eprintln!("regress: cannot read directory {}: {e}", dir.display());
             return 2;
         }
     };
+    if entries.is_empty() {
+        eprintln!(
+            "regress: SKIP — no committed fixture '{prefix}*.bin' for target '{}' in {}",
+            target.name,
+            dir.display()
+        );
+        return 0;
+    }
     entries.sort();
 
     eprintln!(
-        "regress: replaying {} file(s) from {} through target '{}'",
+        "regress: replaying {} fixture(s) from {} through target '{}'",
         entries.len(),
         dir.display(),
         target.name
@@ -190,9 +220,19 @@ fn run_regress(target: TargetInfo, args: &Args) -> i32 {
         };
         set_panic_input(&input);
         let outcome = (target.func)(&input);
-        let status = if outcome.is_disabled() {
-            "DISABLED"
-        } else if outcome.is_interesting() {
+        if outcome.is_disabled() {
+            eprintln!(
+                "regress[{:04}/{}] {} -> SkippedDisabled: target '{}' is \
+                 feature-gated off; rebuild with its feature enabled \
+                 (CI uses --features all)",
+                i + 1,
+                entries.len(),
+                path.display(),
+                target.name
+            );
+            return 3;
+        }
+        let status = if outcome.is_interesting() {
             "boundary"
         } else {
             "ok"
