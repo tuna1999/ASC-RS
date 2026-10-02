@@ -1430,7 +1430,7 @@ fn collect_from_view(
         let def = view
             .class_def(i)
             .map_err(|e| CoreError::Usage(format!("bad class_defs range: {e}")))?;
-        if def.class.0 as u64 >= type_count as u64 {
+        if def.class.0 >= type_count {
             return Err(CoreError::Usage("bad class_def->type_idx".into()));
         }
         let sidx = view
@@ -1681,18 +1681,18 @@ mod tests {
     ///
     /// This is a **regression guard, not a reproduction.** The
     /// asymmetry that was real — phase 2 `?`-propagating a read error
-    /// and abandoning every entry still queued behind it — is not
-    /// reachable from the public API: `Apk::read_entry` fails only on
-    /// a CRC mismatch or an inflate error, and a *correctly declared*
-    /// `uncompressed_size` always fits inside the cap (a 320-byte cap
-    /// rejects a 400-byte entry before it is ever read, and that is
-    /// recorded as a permanent error rather than deferred). So no
-    /// fixture can make the two policies disagree observably, and this
-    /// test pins the shared outcome instead of pretending to
-    /// discriminate. Deferral here is forced, not hoped for: the test
-    /// holds one entry's worth of a two-entry cap, so the pool's
-    /// workers are refused and the broken second entry is carried by
-    /// the rescan.
+    /// and abandoning every entry still queued behind it — needs a
+    /// *deferred* entry whose bytes fail to read, and that pairing is
+    /// not constructible from outside the call: a corrupt local header
+    /// (or a CRC / inflate failure) would do it, but deferral only
+    /// happens when the budget is contended, and the contention is
+    /// released the moment the pool joins — there is no hook between
+    /// the two phases to hand the entry its error. So no fixture can
+    /// make the two policies disagree observably, and this test pins
+    /// the shared outcome instead of pretending to discriminate.
+    /// Deferral here is forced, not hoped for: the test holds one
+    /// entry's worth of a two-entry cap, so the pool's workers are
+    /// refused and the broken second entry is carried by the rescan.
     #[test]
     fn deferred_rescan_reports_the_broken_entry_and_releases_its_guards() {
         // classes.dex parses; classes2.dex is unreadable (valid magic,

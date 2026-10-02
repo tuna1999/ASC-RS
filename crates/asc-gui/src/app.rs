@@ -673,7 +673,10 @@ impl AscApp {
                     // (audit F09). Every submit path — the Run button,
                     // Enter-on-lost-focus, the toolbar Enter — lands
                     // here, so this one check bounds them all.
-                    && !self.tasks.findrefs_running()
+                    // `findrefs_live`, not `findrefs_running`: a
+                    // cancelled or superseded worker keeps running but
+                    // must not lock the user out of re-running.
+                    && !self.tasks.findrefs_live()
                     && let Some(session) = &self.session
                     && let Some(query) = self.search.query()
                 {

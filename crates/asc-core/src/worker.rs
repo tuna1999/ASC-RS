@@ -109,15 +109,34 @@ impl WorkerPool {
             };
         }
 
-        // Single-worker fast path: no spawn cost.
+        // Single-worker fast path: no spawn cost. The closure still runs
+        // under `catch_unwind` so a panic is reported like any other
+        // worker's — otherwise a multi-DEX APK scanned with
+        // `--threads 1` would unwind into the caller (a CLI crash)
+        // while the same APK with `--threads 4` returned a structured
+        // error. The two paths must not disagree about failure.
         if self.n == 1 || items.len() == 1 {
             for (i, item) in items.iter().enumerate() {
-                if worker(i, item).is_some() {
-                    return WorkerOutcome {
-                        winner: 0,
-                        found: true,
-                        panicked: 0,
-                    };
+                let hit =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| worker(i, item)));
+                match hit {
+                    Ok(Some(())) => {
+                        return WorkerOutcome {
+                            winner: 0,
+                            found: true,
+                            panicked: 0,
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        // This worker owned `items[i]`; everything it
+                        // had not yet pulled stays unscanned.
+                        return WorkerOutcome {
+                            winner: usize::MAX,
+                            found: false,
+                            panicked: 1,
+                        };
+                    }
                 }
             }
             return WorkerOutcome {
@@ -221,6 +240,32 @@ mod tests {
         // We don't assert on `processed` count strictly (it's racy by
         // construction), but it must be strictly less than 1000.
         assert!(processed.load(Ordering::SeqCst) < 1000);
+    }
+
+    /// The inline path (`--threads 1`, or a single work item) must
+    /// report a panic the same way the spawned path does, not unwind
+    /// into the caller (audit F03).
+    #[test]
+    fn inline_path_reports_a_panic_instead_of_unwinding() {
+        for pool_n in [0usize, 1] {
+            let pool = WorkerPool::new(pool_n);
+            let items: Vec<u32> = (0..4).collect();
+            let outcome = pool.run(&items, |i, _| {
+                if i == 2 {
+                    panic!("inline explosion")
+                }
+                None
+            });
+            assert!(
+                !outcome.is_clean(),
+                "threads={pool_n}: an inline panic must be reported, not propagated"
+            );
+            assert!(!outcome.is_found());
+        }
+        // A single work item takes the same fast path.
+        let pool = WorkerPool::new(4);
+        let outcome = pool.run(&[7u32], |_, _| panic!("single-item explosion"));
+        assert!(!outcome.is_clean());
     }
 
     #[test]

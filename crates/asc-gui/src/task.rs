@@ -451,6 +451,18 @@ impl TaskManager {
         self.in_flight.iter().any(|t| t.kind == TaskKind::FindRefs)
     }
 
+    /// Whether a findrefs task is running that is still wanted.
+    ///
+    /// Same as [`Self::findrefs_running`] except that a superseded or
+    /// cancelled task does not count: its worker may still be churning
+    /// out a result nobody will read, but it must not block the user
+    /// from starting the search they actually asked for.
+    pub fn findrefs_live(&self) -> bool {
+        self.in_flight
+            .iter()
+            .any(|t| t.kind == TaskKind::FindRefs && !t.discarded.load(Ordering::Acquire))
+    }
+
     /// Recent completed tasks (Tasks view), newest first.
     pub fn recent(&self) -> impl Iterator<Item = &TaskLogEntry> {
         self.log.iter().rev()
