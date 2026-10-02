@@ -1888,8 +1888,11 @@ mod tests {
     // gates in `test_faults` inject panics at a fixed ENTRY index, so
     // every scenario below is deterministic without sleeps: whoever
     // owns the gated entry dies, the other entries are always scanned.
-    #[path = "../../../tests/common/mod.rs"]
-    mod common;
+    // NOTE: no `#[path]` include of `tests/common` here — rustfmt on
+    // POSIX resolves such an attr through the synthetic (nonexistent)
+    // `src/pipeline/tests/` directory and cannot collapse the `..`,
+    // so CI's `rustfmt --check` fails even though rustc accepts it.
+    // House style is per-suite builders anyway.
 
     /// Fault-gate and budget tests in this module serialize on this
     /// lock: the gates are process-wide statics and `in_flight` is
@@ -1902,14 +1905,42 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// One-string/one-type DEX whose single class_def (when `define` is
+    /// set) resolves to `class`. Same byte length for both variants so
+    /// budget-cap math in TEST-06 is exact.
+    fn unit_dex(class: &str, define: bool) -> Vec<u8> {
+        const IDS_LEN: usize = 0x98; // string_ids + type_ids + class_def
+        let mut b = vec![0u8; IDS_LEN + 64];
+        b[..8].copy_from_slice(b"dex\n035\0");
+        b[0x24..0x28].copy_from_slice(&0x70u32.to_le_bytes()); // header_size
+        b[0x28..0x2C].copy_from_slice(&0x1234_5678u32.to_le_bytes()); // endian
+        b[0x38..0x3C].copy_from_slice(&1u32.to_le_bytes()); // string_ids_size
+        b[0x3C..0x40].copy_from_slice(&0x70u32.to_le_bytes()); // string_ids_off
+        b[0x40..0x44].copy_from_slice(&1u32.to_le_bytes()); // type_ids_size
+        b[0x44..0x48].copy_from_slice(&0x74u32.to_le_bytes()); // type_ids_off
+        b[0x70..0x74].copy_from_slice(&(IDS_LEN as u32).to_le_bytes()); // -> string data
+        b[0x74..0x78].copy_from_slice(&0u32.to_le_bytes()); // type[0] -> string[0]
+        if define {
+            b[0x60..0x64].copy_from_slice(&1u32.to_le_bytes()); // class_defs_size
+            b[0x64..0x68].copy_from_slice(&0x78u32.to_le_bytes()); // class_defs_off
+            let mut cd = [0u8; 32];
+            cd[4..8].copy_from_slice(&1u32.to_le_bytes()); // access_flags
+            cd[8..12].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // super = none
+            cd[20..24].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // source_file = none
+            b[0x78..0x98].copy_from_slice(&cd);
+        }
+        // string_data_item at IDS_LEN: uleb128 len + MUTF-8 + NUL.
+        b[IDS_LEN] = class.len() as u8;
+        b[IDS_LEN + 1..IDS_LEN + 1 + class.len()].copy_from_slice(class.as_bytes());
+        let size = b.len() as u32;
+        b[0x20..0x24].copy_from_slice(&size.to_le_bytes()); // file_size
+        b[0x68..0x6C].copy_from_slice(&(size - IDS_LEN as u32).to_le_bytes()); // data_size
+        b[0x6C..0x70].copy_from_slice(&(IDS_LEN as u32).to_le_bytes()); // data_off
+        b
+    }
+
     fn defining_dex_buf(class: &str) -> Vec<u8> {
-        common::Dex::new(
-            &[common::OBJECT, class],
-            vec![],
-            vec![],
-            &[common::u(common::OBJECT), common::u(class)],
-        )
-        .finish(&[(class, vec![], vec![])])
+        unit_dex(class, true)
     }
 
     fn scan_fixture(tag: &str, classes: &[Option<&str>]) -> (std::sync::Arc<Apk>, Vec<DexEntry>) {
@@ -1923,22 +1954,19 @@ mod tests {
                     format!("classes{}.dex", i + 1)
                 };
                 let bytes = match c {
-                    Some(cls) => defining_dex_buf(cls),
-                    // No class_defs: cannot define anything.
-                    None => common::Dex::new(
-                        &[common::OBJECT],
-                        vec![],
-                        vec![],
-                        &[common::u(common::OBJECT)],
-                    )
-                    .finish(&[]),
+                    Some(cls) => unit_dex(cls, true),
+                    None => unit_dex(A, false),
                 };
                 (name, bytes)
             })
             .collect();
-        let refs: Vec<(&str, Vec<u8>)> =
-            bufs.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
-        let path = common::write_apk(tag, &refs);
+        let refs: Vec<(&str, &[u8])> = bufs
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        let path =
+            std::env::temp_dir().join(format!("asc_panic_prov_{tag}_{}.apk", std::process::id()));
+        std::fs::write(&path, stored_zip(&refs)).unwrap();
         let apk = std::sync::Arc::new(Apk::open(&path).unwrap());
         let list = apk.dex_entries();
         (apk, list)
