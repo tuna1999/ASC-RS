@@ -50,11 +50,15 @@ pub struct WorkerOutcome {
     /// not "proven absent" — callers must not read a `found: false`
     /// outcome as a clean negative when this is non-zero (audit F03).
     pub panicked: usize,
-    /// Item indexes a panicking worker owned when it died (and, on the
-    /// inline path, everything behind the panicking item). These
-    /// entries are unscanned, not absent; callers that care about
-    /// index priority must rescan or fail before trusting a winner
-    /// whose index sits above any of these.
+    /// Item indexes that were never PROVEN scanned: the entry a
+    /// panicking worker owned when it died (plus, on the inline path,
+    /// everything behind the panicking item), and — when every worker
+    /// died before the queue drained — the entries never handed out
+    /// (final cursor .. len). Callers that care about index priority
+    /// must rescan or fail before trusting a winner whose index sits
+    /// above any of these. Entries above a recorded winner may appear
+    /// here after an early `found` exit; they cannot change the winner
+    /// and callers filter them.
     pub unscanned: Vec<usize>,
 }
 
@@ -218,6 +222,14 @@ impl WorkerPool {
                 }
             }
         }
+        // Every index below the final cursor was handed to exactly one
+        // worker (fetch_add hands out each value once). If the cursor
+        // stopped short of `len`, the tail was never claimed — that
+        // happens when every worker died before draining the queue
+        // (with a winner, the pool stops pulling by design and the tail
+        // sits above the winner). Unclaimed entries are unscanned too.
+        let cursor = next.load(Ordering::Acquire).min(items_arc.len());
+        unscanned.extend(cursor..items_arc.len());
 
         WorkerOutcome {
             winner: winner_idx.load(Ordering::Acquire),
