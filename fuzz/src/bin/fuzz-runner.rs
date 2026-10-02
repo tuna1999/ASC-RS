@@ -24,11 +24,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 
 use asc_fuzz::{
-    crash_path, fnv1a_64, install_panic_hook, registry, set_panic_input, FuzzOutcome, TargetInfo,
+    FuzzOutcome, TargetInfo, crash_path, fnv1a_64, install_panic_hook, registry, set_panic_input,
 };
-
-#[cfg(unix)]
-extern crate libc;
 
 // =====================================================================
 // CLI
@@ -128,9 +125,7 @@ fn main() {
     let target = match registry().into_iter().find(|t| t.name == target_name) {
         Some(t) => t,
         None => {
-            eprintln!(
-                "error: unknown target '{target_name}'; pass --list to see options"
-            );
+            eprintln!("error: unknown target '{target_name}'; pass --list to see options");
             std::process::exit(2);
         }
     };
@@ -340,7 +335,10 @@ fn run_mutation_loop(target: TargetInfo, args: &Args) -> i32 {
         if args.verbose >= 2 {
             eprintln!(
                 "exec {:08} base={:04} -> outcome={:?} len={}",
-                stats.executions, base_idx, outcome, mutated.len()
+                stats.executions,
+                base_idx,
+                outcome,
+                mutated.len()
             );
         }
 
@@ -531,11 +529,7 @@ fn mutate_truncate(base: &[u8], rng: &mut Splitmix64) -> Vec<u8> {
         return Vec::new();
     }
     let len = base.len();
-    let new_len = if len == 1 {
-        0
-    } else {
-        rng.next_usize(len)
-    };
+    let new_len = if len == 1 { 0 } else { rng.next_usize(len) };
     base[..new_len].to_vec()
 }
 

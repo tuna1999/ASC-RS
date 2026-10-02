@@ -8,7 +8,7 @@ use crate::FuzzOutcome;
 
 #[cfg(feature = "core")]
 pub fn run(input: &[u8]) -> FuzzOutcome {
-    use asc_core::{run_cert, run_inspect, run_native, run_resources, ResourcesQuery};
+    use asc_core::{ResourcesQuery, run_cert, run_inspect, run_native, run_resources};
 
     let staged = match crate::stage_temp_file("inspect", input) {
         Ok(s) => s,

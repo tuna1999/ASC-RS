@@ -62,19 +62,23 @@ impl Drop for Guard {
 /// (use [`DEFAULT_SCAN_BUDGET`] unless configured otherwise). `0` is
 /// always allowed (an empty entry cannot grow the footprint).
 pub fn acquire(cap: usize, bytes: usize) -> Result<Guard, CoreError> {
-    if IN_FLIGHT
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
-            let next = cur.saturating_add(bytes);
-            (next <= cap).then_some(next)
-        })
-        .is_err()
-    {
-        return Err(CoreError::MemoryBudget(format!(
-            "scan budget exceeded: reserving {bytes} more bytes would push \
-             concurrently-held DEX bytes over the {cap}-byte cap"
-        )));
+    // CAS loop instead of the deprecated `fetch_update` (renamed
+    // `try_update` in 1.98, above our MSRV 1.93). `weak` is fine here:
+    // a spurious failure just retries with the observed value.
+    let mut cur = IN_FLIGHT.load(Ordering::Acquire);
+    loop {
+        let next = cur.saturating_add(bytes);
+        if next > cap {
+            return Err(CoreError::MemoryBudget(format!(
+                "scan budget exceeded: reserving {bytes} more bytes would push \
+                 concurrently-held DEX bytes over the {cap}-byte cap"
+            )));
+        }
+        match IN_FLIGHT.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(Guard { reserved: bytes }),
+            Err(actual) => cur = actual,
+        }
     }
-    Ok(Guard { reserved: bytes })
 }
 
 /// Bytes currently reserved by all scans in this process (for tests).

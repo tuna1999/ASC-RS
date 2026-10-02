@@ -57,6 +57,12 @@ asc-resources = { path = "../crates/asc-resources", optional = true }
 asc-core = { path = "../crates/asc-core", optional = true }
 asc-decompile = { path = "../crates/asc-decompile", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# fuzz-runner installs a SIGINT handler on Unix. Must come from
+# crates.io: `extern crate libc` against the sysroot copy is
+# rustc_private (E0658) and broke the Linux CI build.
+libc = "0.2"
+
 [dev-dependencies]
 # Integration smoke tests live as `tests/*.rs`; only std needed.
 
