@@ -45,7 +45,7 @@ L5 asc-cli (bin asc-rs, single main.rs)   asc-gui (bin asc-gui)
 | `tests/` | `differential/` runner, `fixtures/golden/` + `capture_golden.py`, `compatibility/parity_matrix.md`, `gui_features/` manifest |
 | `corpus/` | **Gitignored** APK/DEX fixtures; recipe in `corpus/MANIFEST.md`, CI recreates them |
 | `benches/` | `perf_compare.py` (perf gate), `benchmark.py`, `bench_ascrs.py` |
-| `fuzz/` | **Detached workspace** (own `Cargo.lock`), 12 targets, in-tree deterministic runner (no cargo-fuzz/nightly) |
+| `fuzz/` | **Detached workspace** (own `Cargo.lock`), 18 contract targets (+1 self-test dummy), in-tree deterministic runner (no cargo-fuzz/nightly) |
 | `reference/` | Frozen oracle pin + behavior spec + `requirements-freeze.txt` |
 | `scripts/build_release.py` | Byte-reproducible source ZIP + `SHA256SUMS` |
 | `docs/` | GUI audit/architecture/design docs |
@@ -79,7 +79,7 @@ python scripts/build_release.py v0.2.0 --output dist
 
 CLI flags are `#[arg(global = true)]` (`SharedFlags`), valid before or after the APK. Exit codes: `0` ok, `1` not-found / invalid input, `2` engine error; `findrefs` with any per-DEX scan failure prints all found hits + stderr warnings and exits `2` (`crates/asc-cli/src/main.rs`).
 
-Fuzz (from `fuzz/`): `cargo run --release --bin fuzz-runner -- --list`; `./run.sh <target> [sec] [features]` (or `.\run.ps1 -Target <t> [-Features all]`); `--regress regress` replays committed fixtures (per-target `<target>-<fnv1a>.bin` filtering; SKIP+0 when a target has none). Features `dex|bytecode|apk|rebuild|resources|core|decompile|all` are OFF by default → targets report `SkippedDisabled`; CI's `fuzz` job runs `cargo test --features all` (registry tests prove parsers engaged) plus a 10 s-per-target smoke loop and crash-regression replay.
+Fuzz (from `fuzz/`): `cargo run --release --bin fuzz-runner -- --list`; `./run.sh <target> [sec] [features]` (or `.\run.ps1 -Target <t> [-Features all]`); `--regress regress` replays committed fixtures (per-target `<target>-<fnv1a>.bin` filtering; SKIP+0 when a target has none). Features `dex|bytecode|apk|rebuild|resources|core|decompile|manifest|all` are OFF by default → targets report `SkippedDisabled`; CI's `fuzz` job runs `cargo test --features all` (registry tests prove parsers engaged) plus a 10 s-per-target smoke loop and crash-regression replay.
 
 ## Code Conventions & Common Patterns
 
