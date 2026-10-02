@@ -1072,7 +1072,13 @@ fn full_manifest_fixture_extracts_p0_fields() {
                             ),
                             elem(
                                 "intent-filter",
-                                vec![],
+                                vec![attr(
+                                    Some(ANDROID_NS),
+                                    "priority",
+                                    // -10 as aapt stores it: INT_DEC with
+                                    // the u32 two's-complement payload.
+                                    Val::IntDec(0xFFFF_FFF6),
+                                )],
                                 vec![
                                     elem(
                                         "action",
@@ -1180,7 +1186,14 @@ fn full_manifest_fixture_extracts_p0_fields() {
                                 Val::Str("com.example.READ"),
                             ),
                         ],
-                        vec![],
+                        vec![elem(
+                            "meta-data",
+                            vec![
+                                attr(Some(ANDROID_NS), "name", Val::Str("provider.level")),
+                                attr(Some(ANDROID_NS), "value", Val::Str("pv")),
+                            ],
+                            vec![],
+                        )],
                     ),
                 ],
             ),
@@ -1244,6 +1257,7 @@ fn full_manifest_fixture_extracts_p0_fields() {
     assert_eq!(a.intent_filters[0].auto_verify, Some(true));
     assert_eq!(a.intent_filters[0].priority, Some(10));
     let f1 = &a.intent_filters[1];
+    assert_eq!(f1.priority, Some(-10), "negative INT_DEC priority");
     assert_eq!(f1.categories.len(), 2, "categories preserved");
     assert_eq!(f1.data.len(), 2, "two <data> elements stay separate");
     assert_eq!(f1.data[0].scheme.as_deref(), Some("https"));
@@ -1267,11 +1281,14 @@ fn full_manifest_fixture_extracts_p0_fields() {
     );
     assert_eq!(alias.component.intent_filters.len(), 1);
 
-    // Provider: declared exported, read permission.
+    // Provider: declared exported, read permission, nested meta-data.
     let p = &info.providers[0];
     assert_eq!(p.exported_explicit, Some(true));
     assert!(p.exported);
     assert_eq!(p.read_permission.as_deref(), Some("com.example.READ"));
+    assert_eq!(p.meta_data.len(), 1, "provider meta-data must be routed");
+    assert_eq!(p.meta_data[0].name, "provider.level");
+    assert_eq!(p.meta_data[0].value.as_deref(), Some("pv"));
 }
 
 /// Locket Widget 1.216.0 real-fixture: deep links, aliases, queries,
@@ -1447,5 +1464,56 @@ fn axml_mismatched_close_tag_errors() {
     match crate::axml::parse_axml(&bytes) {
         Err(ManifestError::BadChunk(m)) => assert!(m.contains("does not match"), "{m}"),
         other => panic!("expected BadChunk, got {other:?}"),
+    }
+}
+
+#[test]
+fn cdata_chunks_are_skipped_not_rejected() {
+    use axml::elem;
+    let doc = elem("a", vec![], vec![elem("b", vec![], vec![])]);
+    let mut bytes = axml::build(&doc);
+    // Layout: [root 8][pool][ns 24][start a][start b][end b 24][end a 24].
+    // Splice a ResXMLTree_cdata chunk (0x0104) before </a>: header(8) +
+    // lineNumber(4) + comment(4) + dataRes(4) = 20 bytes, then grow the
+    // root chunk size to cover it.
+    let mut cdata = Vec::with_capacity(20);
+    cdata.extend_from_slice(&0x0104u16.to_le_bytes());
+    cdata.extend_from_slice(&16u16.to_le_bytes()); // headerSize
+    cdata.extend_from_slice(&20u32.to_le_bytes()); // size
+    cdata.extend_from_slice(&1u32.to_le_bytes()); // lineNumber
+    cdata.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // comment
+    cdata.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // dataRes
+    let at = bytes.len() - 24;
+    bytes.splice(at..at, cdata);
+    let root_size = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) + 20;
+    bytes[4..8].copy_from_slice(&root_size.to_le_bytes());
+
+    let parsed = crate::axml::parse_axml(&bytes).expect("CDATA must be skipped, not rejected");
+    assert_eq!(
+        parsed.root.as_ref().unwrap().children.len(),
+        1,
+        "b survives"
+    );
+    // The manifest parser must skip CDATA the same way.
+    parse_manifest(&bytes).expect("manifest parser skips CDATA too");
+}
+
+#[test]
+fn axml_element_nesting_is_capped_for_recursion_safety() {
+    use axml::elem;
+    let chain = |depth: usize| {
+        let mut e = elem("leaf", vec![], vec![]);
+        for _ in 1..depth {
+            e = elem("n", vec![], vec![e]);
+        }
+        e
+    };
+    // Within the cap: parses and renders (render/serde/drop recurse).
+    let ok = crate::axml::parse_axml(&axml::build(&chain(200))).expect("200 deep is fine");
+    assert!(crate::axml::format_axml_text(&ok).contains("<leaf"));
+    // Over the cap: structured error, never a stack overflow.
+    match crate::axml::parse_axml(&axml::build(&chain(300))) {
+        Err(ManifestError::BadChunk(m)) => assert!(m.contains("nesting"), "{m}"),
+        other => panic!("expected BadChunk for deep nesting, got {other:?}"),
     }
 }

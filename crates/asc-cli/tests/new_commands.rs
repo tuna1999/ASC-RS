@@ -208,3 +208,20 @@ fn axml_and_strings_work_on_corpus_workload() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json");
     assert!(v["total_matched"] == 0, "{v}");
 }
+
+#[test]
+fn strings_skips_non_dex_entry_without_failing() {
+    // A classes*.dex entry that is not a DEX is deliberately skipped
+    // (findrefs F06 policy): warning on stderr, but exit 0 — the scan
+    // itself did not fail.
+    let apk = target_dir("strskip");
+    write_stored_apk(&apk, &[("classes.dex", b"not a dex at all")]);
+    let out = run_cli(&["strings", apk.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("skipped"),
+        "stderr must carry the skip warning: {:?}",
+        out.stderr
+    );
+    let _ = std::fs::remove_file(&apk);
+}

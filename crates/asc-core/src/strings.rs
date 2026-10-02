@@ -39,8 +39,8 @@ impl Default for StringsOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StringHit {
-    /// Logical DEX name (`classes.dex`, or `classes.dex#1` for DEX-041
-    /// containers).
+    /// Logical DEX name (`classes.dex`, or `entry!classes2.dex` for
+    /// DEX-041 containers).
     pub dex: String,
     /// Index into that DEX's `string_ids`.
     pub index: u32,
@@ -67,8 +67,11 @@ pub struct StringsReport {
     pub total_matched: usize,
     /// True when `limit` cut the result short.
     pub truncated: bool,
-    /// Non-fatal problems (per-string decode failures, DEX read
-    /// failures). `complete` is false whenever this is non-empty.
+    /// Non-fatal problems (per-string decode failures, DEX read/parse
+    /// failures, deliberately skipped non-DEX entries — same F06
+    /// policy as findrefs: a deliberate skip is recorded but does not
+    /// flip `complete`). `complete` is false whenever a real scan
+    /// failure was recorded.
     pub errors: Vec<String>,
     pub complete: bool,
 }
@@ -103,12 +106,13 @@ pub fn run_strings(path: &Path, opts: &StringsOptions) -> Result<StringsReport, 
         };
         let b = bytes.as_slice();
         if b.len() < 8 || !b.starts_with(b"dex\n") {
-            // Same policy as findrefs/listclass: non-DEX classes*.dex
-            // entries are skipped, recorded as an error.
+            // Same policy as findrefs (audit F06): an entry we
+            // deliberately declined to decode is not a failed scan —
+            // record the skip in `errors` but do NOT flip `complete`,
+            // so exit 2 keeps meaning "the scan ran and hit an error".
             report
                 .errors
-                .push(format!("{}: entry is not a DEX (skipped)", e.name));
-            report.complete = false;
+                .push(format!("{}: skipped: entry is not a DEX", e.name));
             continue;
         }
         let views: Vec<(String, DexView<'_>)> = if &b[4..8] == b"041\0" {
@@ -117,9 +121,20 @@ pub fn run_strings(path: &Path, opts: &StringsOptions) -> Result<StringsReport, 
                     .iter()
                     .enumerate()
                     .filter_map(|(i, off)| {
-                        DexView::parse_at(b, *off)
-                            .ok()
-                            .map(|v| (logical_dex_name(&e.name, offsets.len(), i), v))
+                        let name = logical_dex_name(&e.name, offsets.len(), i);
+                        match DexView::parse_at(b, *off) {
+                            Ok(v) => Some((name, v)),
+                            Err(x) => {
+                                // A logical DEX we could not parse is a
+                                // failed scan (mirrors findrefs): record
+                                // it, never drop it silently.
+                                report
+                                    .errors
+                                    .push(format!("{name}: DexView::parse_at failed: {x}"));
+                                report.complete = false;
+                                None
+                            }
+                        }
                     })
                     .collect(),
                 Err(x) => {

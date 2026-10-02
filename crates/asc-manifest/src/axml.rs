@@ -11,11 +11,15 @@
 use serde::Serialize;
 
 use crate::{
-    ANDROID_NS, MAX_CHILDREN, MAX_CHUNK_BODY, MAX_STRING_BYTES, MAX_STRING_COUNT, ManifestError,
-    NO_INDEX, RES_STRING_POOL_TYPE, RES_XML_END_ELEMENT_TYPE, RES_XML_RESOURCE_MAP_TYPE,
+    ANDROID_NS, MAX_CHUNK_BODY, MAX_STRING_BYTES, MAX_STRING_COUNT, ManifestError, NO_INDEX,
+    RES_STRING_POOL_TYPE, RES_XML_CDATA_TYPE, RES_XML_END_ELEMENT_TYPE, RES_XML_RESOURCE_MAP_TYPE,
     RES_XML_START_ELEMENT_TYPE, RES_XML_START_NAMESPACE_TYPE, XML_TREE_BODY_OFF, read_u16,
     read_u32, render_typed_value_str, validate_string_index_str,
 };
+/// Maximum element nesting. The decoded tree is walked recursively
+/// (render, serde, drop), so the cap bounds the recursion depth; real
+/// compiled resources nest a few levels deep at most.
+const MAX_ELEMENT_DEPTH: usize = 256;
 
 /// One attribute: namespace URI (if any), local name, the rendered
 /// value string, and the raw `Res_value.dataType` byte.
@@ -158,9 +162,9 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
             }
             crate::RES_XML_END_NAMESPACE_TYPE => {}
             RES_XML_START_ELEMENT_TYPE => {
-                if stack.len() >= MAX_CHILDREN {
+                if stack.len() >= MAX_ELEMENT_DEPTH {
                     return Err(ManifestError::BadChunk(format!(
-                        "element nesting exceeds cap {MAX_CHILDREN}"
+                        "element nesting exceeds cap {MAX_ELEMENT_DEPTH}"
                     )));
                 }
                 let element = parse_element(bytes, cursor, chunk_end, &strings)?;
@@ -199,6 +203,9 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
                     }
                 }
             }
+            // Text nodes are dropped (tree holds elements/attrs only);
+            // extent was validated by the chunk_end check above.
+            RES_XML_CDATA_TYPE => {}
             _ => {
                 return Err(ManifestError::Unsupported(format!(
                     "chunk type 0x{chunk_type:04x} not handled"

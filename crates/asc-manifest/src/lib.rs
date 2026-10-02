@@ -71,6 +71,7 @@ const RES_XML_START_NAMESPACE_TYPE: u16 = 0x0100;
 const RES_XML_END_NAMESPACE_TYPE: u16 = 0x0101;
 const RES_XML_START_ELEMENT_TYPE: u16 = 0x0102;
 const RES_XML_END_ELEMENT_TYPE: u16 = 0x0103;
+const RES_XML_CDATA_TYPE: u16 = 0x0104;
 
 const NO_INDEX: u32 = 0xFFFF_FFFF;
 
@@ -470,6 +471,10 @@ enum ComponentKind {
     Service,
     Receiver,
     ActivityAlias,
+    /// Not a [`ComponentEntry`]: providers carry their own meta-data
+    /// and never take intent filters, so `component_mut` maps this to
+    /// `None` and the meta-data arm routes into `ProviderEntry`.
+    Provider,
 }
 
 /// A stack frame carries the element's local name plus enough state to
@@ -479,8 +484,8 @@ enum ComponentKind {
 struct Frame {
     name: String,
     /// If this frame is an `<activity>` / `<service>` / `<receiver>` /
-    /// `<activity-alias>`, the index of the corresponding entry in the
-    /// output vector.
+    /// `<activity-alias>` / `<provider>`, the index of the corresponding
+    /// entry in the output vector.
     component: Option<(ComponentKind, usize)>,
     /// If this frame is an `<intent-filter>`, the slot inside its owning
     /// component's `intent_filters` vector.
@@ -609,6 +614,10 @@ impl<'a> Parser<'a> {
                         return Ok(());
                     }
                 }
+                // Text nodes carry no manifest data; aapt only emits them
+                // for whitespace between elements. Extent is validated by
+                // the chunk_end check above, so just consume.
+                RES_XML_CDATA_TYPE => {}
                 _ => {
                     return Err(ManifestError::Unsupported(format!(
                         "chunk type 0x{chunk_type:04x} not handled"
@@ -885,6 +894,10 @@ impl<'a> Parser<'a> {
                 .activity_aliases
                 .get_mut(idx)
                 .map(|a| &mut a.component),
+            // Providers are not ComponentEntry; their meta-data is
+            // routed directly by the caller. They never take intent
+            // filters, so this arm only ever maps to `None`.
+            ComponentKind::Provider => None,
         }
     }
 
@@ -958,8 +971,16 @@ impl<'a> Parser<'a> {
                     }
                     "meta-data" => {
                         let md = meta_data_from_attrs(attrs);
-                        if let Some(comp) = self.component_mut(kind, comp_idx) {
-                            comp.meta_data.push(md);
+                        let target = match kind {
+                            ComponentKind::Provider => self
+                                .info
+                                .providers
+                                .get_mut(comp_idx)
+                                .map(|p| &mut p.meta_data),
+                            _ => self.component_mut(kind, comp_idx).map(|c| &mut c.meta_data),
+                        };
+                        if let Some(mds) = target {
+                            mds.push(md);
                         }
                     }
                     _ => {}
@@ -1183,8 +1204,10 @@ impl<'a> Parser<'a> {
                         label: attr(attrs, "label").map(str::to_string),
                         meta_data: Vec::new(),
                     });
+                    Some((ComponentKind::Provider, self.info.providers.len() - 1))
+                } else {
+                    None
                 }
-                None
             }
             "meta-data" => {
                 let md = meta_data_from_attrs(attrs);
@@ -1420,7 +1443,10 @@ pub(crate) fn render_typed_value_str(
             }
         }
         TYPE_REFERENCE | TYPE_ATTRIBUTE => Some(format!("@0x{data:08x}")),
-        TYPE_INT_DEC => Some(data.to_string()),
+        // AOSP TypedValue.coerceToString renders INT_DEC signed
+        // (Integer.toString): android:priority="-10" arrives as 0xFFFFFFF6
+        // and must render "-10", not "4294967286".
+        TYPE_INT_DEC => Some((data as i32).to_string()),
         TYPE_INT_HEX => Some(format!("0x{data:08x}")),
         TYPE_INT_BOOLEAN => Some(if data != 0 { "true" } else { "false" }.to_string()),
         _ => Some(format!("0x{data:08x}")),

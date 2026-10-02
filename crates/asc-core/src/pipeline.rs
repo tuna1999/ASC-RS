@@ -1449,7 +1449,7 @@ pub struct ListClassesResult {
     /// the APK contains no DEX entries).
     pub names: Vec<String>,
     /// Logical DEX name per descriptor, parallel to `names` (e.g.
-    /// `classes.dex`, `classes.dex#1` for DEX-041 containers). Lets
+    /// `classes.dex`, `entry!classes2.dex` for DEX-041 containers). Lets
     /// consumers trace every class to its source DEX; same-length
     /// duplicate descriptors across DEXes stay distinguishable.
     pub dexes: Vec<String>,
@@ -1526,7 +1526,7 @@ pub fn run_listclasses(
 /// Walk one entry's bytes: detect a DEX-041 container or a single DEX,
 /// then collect `(descriptor, logical DEX name)` pairs into `out`
 /// (filtered by `prefix`). The logical name is `entry_name` for plain
-/// DEX entries and `entry_name#N` for DEX-041 containers.
+/// DEX entries and `entry_name!classesN.dex` for DEX-041 containers.
 ///
 /// Per-class-index failures propagate (matches the oracle's
 /// `ValueError("bad class_def->type_idx")` exit-1 path); per-DEX
@@ -2253,10 +2253,11 @@ mod tests {
     }
 
     /// T04 (case B): more entries than workers and every worker dies on
-    /// its FIRST claim — entries 2 and 3 are never handed out, so they
-    /// are not in `WorkerOutcome::unscanned`. They must still reach the
-    /// phase-2 rescan; otherwise a class living only in an unclaimed
-    /// entry becomes a false `ClassNotFound` (silent negative).
+    /// its FIRST claim — entries 2 and 3 are never handed out; they land
+    /// in `WorkerOutcome::unscanned` only via the post-join
+    /// `cursor..len` tail. They must still reach the phase-2 rescan;
+    /// otherwise a class living only in an unclaimed entry becomes a
+    /// false `ClassNotFound` (silent negative).
     #[test]
     fn t04_unclaimed_entries_reach_the_rescan() {
         use std::sync::atomic::Ordering;

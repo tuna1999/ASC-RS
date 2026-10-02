@@ -929,7 +929,7 @@ fn run_extract_cmd(
     let n = bytes.as_slice().len();
     if let Err(x) = std::fs::write(&out, bytes.as_slice()) {
         eprintln!("Error: write {}: {x}", out.display());
-        return ExitCode::from(EXIT_INTERNAL);
+        return ExitCode::from(EXIT_USER_ERROR);
     }
     let method = if e.method == asc_apk::Compression::Stored {
         "stored"
@@ -1081,7 +1081,7 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
         s,
         "  hasCode={} extractNativeLibs={} requestLegacyExternalStorage={}",
         declared_or_default(a.has_code, true),
-        declared_or_default(a.extract_native_libs, false),
+        declared_or_default(a.extract_native_libs, true),
         declared_or_default(a.request_legacy_external_storage, false),
     );
     for md in &a.meta_data {
