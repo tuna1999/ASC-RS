@@ -23,8 +23,8 @@ pub fn run(input: &[u8]) -> FuzzOutcome {
         return FuzzOutcome::Ok;
     };
 
-    let off = (u32::from_le_bytes([input[0], input[1], input[2], input[3]]) as usize)
-        .min(host.len() - 1);
+    let off =
+        (u32::from_le_bytes([input[0], input[1], input[2], input[3]]) as usize).min(host.len() - 1);
     let mut boundary = false;
 
     if view.encoded_value(&host, off).is_err() {

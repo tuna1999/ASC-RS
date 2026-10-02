@@ -54,8 +54,8 @@ const ENTROPY_BYTE_2: usize = 0x2C;
 
 #[cfg(feature = "decompile")]
 pub fn run(input: &[u8]) -> FuzzOutcome {
-    use asc_decompile::droidsaw::DroidsawBackend;
     use asc_decompile::ClassDecompiler;
+    use asc_decompile::droidsaw::DroidsawBackend;
 
     let bytes = reseal(input);
     let backend = DroidsawBackend::new();

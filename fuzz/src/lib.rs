@@ -340,7 +340,7 @@ pub fn host_dex(fuzz: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(b"dex\n035\x00");
     buf.extend_from_slice(&[0u8; 4]); // checksum (unchecked by parse)
     buf.extend_from_slice(&[0u8; 20]); // signature (unchecked by parse)
-                                       // file_size placeholder at 0x20 — patched below.
+    // file_size placeholder at 0x20 — patched below.
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&0x70u32.to_le_bytes()); // header_size
     buf.extend_from_slice(&0x1234_5678u32.to_le_bytes()); // endian_tag

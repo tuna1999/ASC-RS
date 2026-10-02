@@ -1008,13 +1008,3 @@ pub fn dex_with_switch_try_array() -> Vec<u8> {
     });
     d.build()
 }
-
-/// Set the two literal units of the `31t` that starts at `units[0]`
-/// (opcode, low, high) so it branches `rel_units` code units past
-/// itself. The DEX spec stores `target_addr - switch_addr`, i.e. the
-/// offset is in code-UNIT units.
-fn set_rel32(units: &mut [u16], rel_units: usize) {
-    let w = (rel_units as i32).to_le_bytes();
-    units[1] = u16::from_le_bytes([w[0], w[1]]);
-    units[2] = u16::from_le_bytes([w[2], w[3]]);
-}

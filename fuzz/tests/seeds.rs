@@ -71,8 +71,8 @@ fn dex_minimal_header_is_well_formed() {
 #[cfg(feature = "decompile")]
 #[test]
 fn disasm_seed_parses_and_renders_every_payload_form() {
-    use asc_decompile::droidsaw::DroidsawBackend;
     use asc_decompile::ClassDecompiler;
+    use asc_decompile::droidsaw::DroidsawBackend;
 
     let bytes = asc_fuzz::dex_builder::dex_with_switch_try_array();
     assert_eq!(&bytes[..4], b"dex\n", "seed must carry the DEX magic");

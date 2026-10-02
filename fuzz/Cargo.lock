@@ -125,6 +125,7 @@ dependencies = [
  "asc-rebuild",
  "asc-resources",
  "clap",
+ "libc",
 ]
 
 [[package]]
