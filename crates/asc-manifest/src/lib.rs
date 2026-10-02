@@ -1,8 +1,10 @@
 //! # asc-manifest
 //!
 //! Binary AXML (AndroidManifest.xml inside APKs) parsing for display:
-//! package/version, permissions, activities/services/receivers, intent
-//! filters. Read-only, bounds-checked.
+//! package/version, permissions, activities/services/receivers/providers
+//! (with intent filters incl. `<data>` specs, `autoVerify`, `priority`),
+//! `activity-alias`, application attributes and `<meta-data>`, `<queries>`,
+//! `<uses-feature>`, and split-APK markers. Read-only, bounds-checked.
 //!
 //! ## Format overview
 //!
@@ -21,6 +23,12 @@
 //! We model the document as a sequence of element-open / element-close
 //! events with a stack of element names; we never build a full XML tree,
 //! just enough to extract the summary fields a user-facing display needs.
+//!
+//! Attribute namespaces are resolved: an attribute only matches an
+//! `android:` (or namespace-less) name when its namespace URI is absent
+//! or `http://schemas.android.com/apk/res/android`; foreign namespaces
+//! (e.g. `tools:`, `dist:`) are recorded but never confused with Android
+//! attributes.
 //!
 //! ## Layout conventions (AOSP)
 //!
@@ -65,6 +73,9 @@ const RES_XML_START_ELEMENT_TYPE: u16 = 0x0102;
 const RES_XML_END_ELEMENT_TYPE: u16 = 0x0103;
 
 const NO_INDEX: u32 = 0xFFFF_FFFF;
+
+/// The Android resource namespace URI every `android:` attribute carries.
+pub const ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
 
 /// Sanity caps. These are large enough to cover every real APK in the
 /// wild (Android's own build emits manifests a few hundred KB at most)
@@ -122,15 +133,63 @@ pub struct PermissionEntry {
     pub protection_level: Option<String>,
     /// Optional human-readable label.
     pub label: Option<String>,
+    /// `android:maxSdkVersion` on `<uses-permission>`: the permission is
+    /// not requested on newer platforms.
+    pub max_sdk: Option<u32>,
 }
 
-/// One intent filter attached to a component.
+/// One `<data>` element of an `<intent-filter>` / queries `<intent>`.
+/// Every field is `None` when the element did not declare it; multiple
+/// `<data>` elements stay separate entries (they are OR-ed by Android,
+/// never merged).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct DataSpec {
+    /// `android:scheme` (e.g. `https`).
+    pub scheme: Option<String>,
+    /// `android:host` (e.g. `locket.app`).
+    pub host: Option<String>,
+    /// `android:port`.
+    pub port: Option<String>,
+    /// `android:path`.
+    pub path: Option<String>,
+    /// `android:pathPrefix`.
+    pub path_prefix: Option<String>,
+    /// `android:pathPattern`.
+    pub path_pattern: Option<String>,
+    /// `android:pathAdvancedPattern` (API 31+).
+    pub path_advanced_pattern: Option<String>,
+    /// `android:pathSuffix` (API 31+).
+    pub path_suffix: Option<String>,
+    /// `android:mimeType` (e.g. `image/*`).
+    pub mime_type: Option<String>,
+}
+
+/// One intent filter attached to a component (also reused for `<intent>`
+/// entries inside `<queries>`, where `auto_verify` / `priority` stay
+/// `None`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct IntentFilter {
     /// Action URIs (e.g. `android.intent.action.MAIN`).
     pub actions: Vec<String>,
     /// Category names (e.g. `android.intent.category.LAUNCHER`).
     pub categories: Vec<String>,
+    /// `<data>` elements in source order.
+    pub data: Vec<DataSpec>,
+    /// `android:autoVerify` (App Links, API 23+); `None` when undeclared.
+    pub auto_verify: Option<bool>,
+    /// `android:priority` (integer, may be negative); `None` when undeclared.
+    pub priority: Option<i32>,
+}
+
+/// One `<meta-data>` element (application level or inside a component).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct MetaDataEntry {
+    /// `android:name`.
+    pub name: String,
+    /// `android:value` (literal string or rendered typed value).
+    pub value: Option<String>,
+    /// `android:resource` (rendered `@0x…` reference).
+    pub resource: Option<String>,
 }
 
 /// One activity / service / receiver declaration.
@@ -138,16 +197,34 @@ pub struct IntentFilter {
 pub struct ComponentEntry {
     /// Class name (e.g. `com.aurora.store.MainActivity`).
     pub name: String,
-    /// `android:exported` value (default `false` if not present; the
-    /// framework infers the default from intent filters, but we just
-    /// record what the manifest says).
+    /// Effective `android:exported`: the declared value when present,
+    /// otherwise Android's inference (components with intent filters are
+    /// exported, see the post-parse pass in [`parse_manifest`]).
     pub exported: bool,
+    /// The explicitly declared `android:exported`; `None` when the
+    /// attribute is absent (so `exported` above was inferred).
+    pub exported_explicit: Option<bool>,
     /// `android:permission` attribute (optional).
     pub permission: Option<String>,
     /// Optional human-readable label.
     pub label: Option<String>,
+    /// `android:process` when the component runs in a non-default process.
+    pub process: Option<String>,
     /// Nested `<intent-filter>` blocks (in source order).
     pub intent_filters: Vec<IntentFilter>,
+    /// Nested `<meta-data>` entries.
+    pub meta_data: Vec<MetaDataEntry>,
+}
+
+/// One `<activity-alias>` declaration. Carries the same shape as a
+/// component plus `android:targetActivity`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActivityAliasEntry {
+    /// `android:targetActivity`.
+    pub target_activity: Option<String>,
+    /// The alias entry itself (name/exported/filters/…).
+    #[serde(flatten)]
+    pub component: ComponentEntry,
 }
 
 /// One `<provider>` declaration.
@@ -157,14 +234,78 @@ pub struct ProviderEntry {
     pub name: String,
     /// `android:authorities` value (optional).
     pub authorities: Option<String>,
-    /// `android:exported`.
+    /// Effective `android:exported` (declared value, or the target-SDK
+    /// dependent default computed in [`parse_manifest`]).
     pub exported: bool,
+    /// The explicitly declared `android:exported`.
+    pub exported_explicit: Option<bool>,
     /// `android:permission`.
     pub permission: Option<String>,
+    /// `android:readPermission`.
+    pub read_permission: Option<String>,
+    /// `android:writePermission`.
+    pub write_permission: Option<String>,
     /// `android:grantUriPermissions`.
     pub grant_uri_permissions: bool,
     /// Optional human-readable label.
     pub label: Option<String>,
+    /// Nested `<meta-data>` entries.
+    pub meta_data: Vec<MetaDataEntry>,
+}
+
+/// `<application>` attributes with triage value. Boolean fields store the
+/// *declared* value (`None` = absent); effective defaults depend on the
+/// target SDK and are computed by the `effective_*` helpers on
+/// [`ManifestInfo`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ApplicationInfo {
+    /// `android:label` (literal string or `@0x…` reference).
+    pub label: Option<String>,
+    /// `android:allowBackup` (platform default `true`).
+    pub allow_backup: Option<bool>,
+    /// `android:fullBackupContent` (usually a `@xml/…` reference).
+    pub full_backup_content: Option<String>,
+    /// `android:dataExtractionRules` (API 31+).
+    pub data_extraction_rules: Option<String>,
+    /// `android:usesCleartextTraffic` (default: disabled for targetSdk 28+).
+    pub uses_cleartext_traffic: Option<bool>,
+    /// `android:networkSecurityConfig` (usually a `@xml/…` reference).
+    pub network_security_config: Option<String>,
+    /// `android:debuggable`.
+    pub debuggable: Option<bool>,
+    /// `android:testOnly`.
+    pub test_only: Option<bool>,
+    /// `android:hasCode` (platform default `true`).
+    pub has_code: Option<bool>,
+    /// `android:extractNativeLibs`.
+    pub extract_native_libs: Option<bool>,
+    /// `android:requestLegacyExternalStorage`.
+    pub request_legacy_external_storage: Option<bool>,
+    /// Application-level `<meta-data>` entries.
+    pub meta_data: Vec<MetaDataEntry>,
+}
+
+/// `<queries>` contents (package-visibility declarations, API 30+).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct QueriesInfo {
+    /// `<package android:name="…">` entries.
+    pub packages: Vec<String>,
+    /// `<intent>` entries (actions/categories/data, reused filter shape).
+    pub intents: Vec<IntentFilter>,
+    /// `<provider android:authorities="…">` entries (raw attribute value).
+    pub providers: Vec<String>,
+}
+
+/// One `<uses-feature>` declaration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureEntry {
+    /// `android:name` (e.g. `android.hardware.camera`); `None` when only
+    /// `glEsVersion` is declared.
+    pub name: Option<String>,
+    /// `android:required` (platform default `true`).
+    pub required: Option<bool>,
+    /// `android:glEsVersion` (e.g. `0x00030001`), rendered as declared.
+    pub gl_es_version: Option<String>,
 }
 
 /// Top-level structured view of an Android manifest.
@@ -188,11 +329,32 @@ pub struct ManifestInfo {
     pub platform_build_version_code: Option<u32>,
     /// `<manifest platformBuildVersionName>`.
     pub platform_build_version_name: Option<String>,
+    /// Split-APK marker: the plain `split` attribute (e.g.
+    /// `config.arm64_v8a`); `None` for a base / standalone APK.
+    pub split: Option<String>,
+    /// `android:splitTypes` (e.g. `base__abi`).
+    pub split_types: Option<String>,
+    /// `android:requiredSplitTypes`.
+    pub required_split_types: Option<String>,
+    /// `android:isSplitRequired` (deprecated in favor of
+    /// `requiredSplitTypes`).
+    pub is_split_required: Option<bool>,
+    /// `android:isFeatureSplit`.
+    pub is_feature_split: Option<bool>,
+    /// Plain `configForSplit` attribute set by bundletool on config splits.
+    pub config_for_split: Option<String>,
     /// `<application android:label>` (resolved only when the value is a
     /// literal string; resource references are stored as `@0x…`).
     pub application_label: Option<String>,
+    /// `<application>` attributes (duplicated label for backward
+    /// compatibility).
+    pub application: ApplicationInfo,
     /// `<permission>` + `<uses-permission>` entries (in source order).
     pub permissions: Vec<PermissionEntry>,
+    /// `<uses-feature>` entries.
+    pub uses_features: Vec<FeatureEntry>,
+    /// `<queries>` element contents; `None` when the element is absent.
+    pub queries: Option<QueriesInfo>,
     /// `<activity>` entries.
     pub activities: Vec<ComponentEntry>,
     /// `<service>` entries.
@@ -201,6 +363,38 @@ pub struct ManifestInfo {
     pub receivers: Vec<ComponentEntry>,
     /// `<provider>` entries.
     pub providers: Vec<ProviderEntry>,
+    /// `<activity-alias>` entries.
+    pub activity_aliases: Vec<ActivityAliasEntry>,
+}
+
+impl ManifestInfo {
+    /// Effective `allowBackup`: declared value, else the platform default
+    /// (`true`). A `false` here is a declaration, not an inference.
+    pub fn effective_allow_backup(&self) -> bool {
+        self.application.allow_backup.unwrap_or(true)
+    }
+
+    /// Effective `usesCleartextTraffic`: declared value, else the platform
+    /// default (allowed only when targetSdk < 28).
+    pub fn effective_uses_cleartext_traffic(&self) -> bool {
+        self.application
+            .uses_cleartext_traffic
+            .unwrap_or_else(|| self.target_sdk.is_none_or(|t| t < 28))
+    }
+
+    /// Whether any component's `exported` is Android's inference rather
+    /// than a manifest declaration (targetSdk 31+ requires the explicit
+    /// attribute whenever intent filters are present).
+    pub fn has_inferred_exported(&self) -> bool {
+        let mut comps = self
+            .activities
+            .iter()
+            .chain(&self.services)
+            .chain(&self.receivers)
+            .chain(self.activity_aliases.iter().map(|a| &a.component));
+        comps.any(|c| c.exported_explicit.is_none())
+            || self.providers.iter().any(|p| p.exported_explicit.is_none())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +406,9 @@ pub struct ManifestInfo {
 pub fn parse_manifest(axml: &[u8]) -> Result<ManifestInfo, ManifestError> {
     let mut parser = Parser::new(axml)?;
     parser.run()?;
-    Ok(parser.info)
+    let mut info = parser.info;
+    finalize_exported(&mut info);
+    Ok(info)
 }
 
 /// Convenience: open `path` as an APK, look up the `AndroidManifest.xml`
@@ -234,6 +430,34 @@ pub fn parse_from_apk(path: impl AsRef<Path>) -> Result<ManifestInfo, ManifestEr
     parse_manifest(bytes.as_slice())
 }
 
+/// Fill in effective `exported` values from the declared tri-state:
+///
+/// - activity / service / receiver / activity-alias: `true` when the
+///   component declares any intent filter, else `false`
+///   (`PackageParser.setDefaultActivityAlias` / `setExported` semantics).
+/// - provider: `false` only when the effective target SDK is >= 17;
+///   otherwise `true`.
+fn finalize_exported(info: &mut ManifestInfo) {
+    let infer = |comps: &mut Vec<ComponentEntry>| {
+        for c in comps {
+            c.exported = c.exported_explicit.unwrap_or(!c.intent_filters.is_empty());
+        }
+    };
+    infer(&mut info.activities);
+    infer(&mut info.services);
+    infer(&mut info.receivers);
+    for a in &mut info.activity_aliases {
+        a.component.exported = a
+            .component
+            .exported_explicit
+            .unwrap_or(!a.component.intent_filters.is_empty());
+    }
+    let effective_target = info.target_sdk.or(info.min_sdk).unwrap_or(1);
+    for p in &mut info.providers {
+        p.exported = p.exported_explicit.unwrap_or(effective_target < 17);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Implementation.
 // ---------------------------------------------------------------------------
@@ -245,19 +469,34 @@ enum ComponentKind {
     Activity,
     Service,
     Receiver,
+    ActivityAlias,
 }
 
 /// A stack frame carries the element's local name plus enough state to
-/// route nested `<intent-filter>` / `<action>` / `<category>` events.
+/// route nested `<intent-filter>` / `<action>` / `<category>` / `<data>`
+/// events.
 #[derive(Debug, Clone)]
 struct Frame {
     name: String,
-    /// If this frame is an `<activity>` / `<service>` / `<receiver>`,
-    /// the index of the corresponding entry in the output vector.
+    /// If this frame is an `<activity>` / `<service>` / `<receiver>` /
+    /// `<activity-alias>`, the index of the corresponding entry in the
+    /// output vector.
     component: Option<(ComponentKind, usize)>,
     /// If this frame is an `<intent-filter>`, the slot inside its owning
     /// component's `intent_filters` vector.
     filter_slot: Option<usize>,
+    /// If this frame is an `<intent>` inside `<queries>`, the slot inside
+    /// `queries.intents`.
+    queries_intent: Option<usize>,
+}
+
+/// A parsed attribute with its resolved namespace URI (`None` = no
+/// namespace). Values are pre-rendered strings.
+#[derive(Debug, Clone)]
+struct XmlAttr {
+    ns: Option<String>,
+    name: String,
+    value: Option<String>,
 }
 
 /// Single-pass event walker over the binary XML stream.
@@ -472,10 +711,9 @@ impl<'a> Parser<'a> {
         let uri = read_u32(self.bytes, body_off + 4)?;
         self.validate_string_index(prefix, "start-ns prefix", true)?;
         self.validate_string_index(uri, "start-ns uri", true)?;
-        // We do not currently consult the namespace stack at element-
-        // open time — namespaced element / attribute names arrive with
-        // the **URI** as their ns string-pool index, which is what the
-        // display layer cares about. We record nothing here.
+        // Namespace events are validated but not tracked: attribute
+        // namespace URIs arrive inline in each attribute record, which
+        // is all the display layer needs.
         Ok(())
     }
 
@@ -547,13 +785,13 @@ impl<'a> Parser<'a> {
             return Err(ManifestError::Truncated("attribute table".into()));
         }
 
-        // Owned attribute name + value pairs so we can release the
-        // immutable borrow of `self.strings` before the mutable
-        // `process_element_open` call below.
-        let mut attrs: Vec<(String, Option<String>)> = Vec::with_capacity(attr_count);
+        // Owned attribute records so we can release the immutable borrow
+        // of `self.strings` before the mutable `process_element_open`
+        // call below.
+        let mut attrs: Vec<XmlAttr> = Vec::with_capacity(attr_count);
         for i in 0..attr_count {
             let attr_off = attr_table_off + i * attr_size;
-            let _a_ns = read_u32(self.bytes, attr_off)?;
+            let a_ns = read_u32(self.bytes, attr_off)?;
             let a_name = read_u32(self.bytes, attr_off + 4)?;
             let a_raw = read_u32(self.bytes, attr_off + 8)?;
             let _tv_size = read_u16(self.bytes, attr_off + 12)?;
@@ -561,9 +799,19 @@ impl<'a> Parser<'a> {
             let tv_type = self.bytes[attr_off + 15];
             let tv_data = read_u32(self.bytes, attr_off + 16)?;
             self.validate_string_index(a_name, "attribute name", false)?;
+            let ns = if a_ns == NO_INDEX {
+                None
+            } else {
+                self.validate_string_index(a_ns, "attribute ns", false)?;
+                Some(self.strings[a_ns as usize].clone())
+            };
             let a_name_str = self.strings[a_name as usize].clone();
             let value = self.render_typed_value(tv_type, tv_data, a_raw)?;
-            attrs.push((a_name_str, value));
+            attrs.push(XmlAttr {
+                ns,
+                name: a_name_str,
+                value,
+            });
         }
 
         let frame = self.process_element_open(&name, &attrs)?;
@@ -623,11 +871,20 @@ impl<'a> Parser<'a> {
         let result = match kind {
             TYPE_NULL => None,
             TYPE_STRING => {
-                if raw_index == NO_INDEX {
+                // AOSP semantics: for string-typed values `data` *is* the
+                // string-pool index; `rawValue` is a convenience copy
+                // aapt sets when the source was a literal. Resolve via
+                // `rawValue` when present, else via `data`.
+                let idx = if raw_index != NO_INDEX {
+                    raw_index
+                } else {
+                    data
+                };
+                if idx == NO_INDEX {
                     None
                 } else {
-                    self.validate_string_index(raw_index, "string-typed rawValue", true)?;
-                    Some(self.strings[raw_index as usize].clone())
+                    self.validate_string_index(idx, "string-typed value", true)?;
+                    Some(self.strings[idx as usize].clone())
                 }
             }
             TYPE_REFERENCE | TYPE_ATTRIBUTE => Some(format!("@0x{data:08x}")),
@@ -666,79 +923,119 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Resolve `&mut ComponentEntry` for a routing slot (also covers
+    /// activity-alias via its flattened `component` field).
+    fn component_mut(&mut self, kind: ComponentKind, idx: usize) -> Option<&mut ComponentEntry> {
+        match kind {
+            ComponentKind::Activity => self.info.activities.get_mut(idx),
+            ComponentKind::Service => self.info.services.get_mut(idx),
+            ComponentKind::Receiver => self.info.receivers.get_mut(idx),
+            ComponentKind::ActivityAlias => self
+                .info
+                .activity_aliases
+                .get_mut(idx)
+                .map(|a| &mut a.component),
+        }
+    }
+
     fn process_element_open(
         &mut self,
         name: &str,
-        attrs: &[(String, Option<String>)],
+        attrs: &[XmlAttr],
     ) -> Result<Frame, ManifestError> {
-        let parent = self
-            .stack
-            .last()
-            .map(|f| (f.name.as_str(), f.component, f.filter_slot));
+        let parent = self.stack.last().map(|f| {
+            (
+                f.name.as_str(),
+                f.component,
+                f.filter_slot,
+                f.queries_intent,
+            )
+        });
         let mut component: Option<(ComponentKind, usize)> = None;
         let mut filter_slot: Option<usize> = None;
+        let mut queries_intent: Option<usize> = None;
         match parent {
             None => self.process_root_element(name, attrs)?,
-            Some(("manifest", _, _)) => self.process_manifest_child(name, attrs)?,
-            Some(("application", _, _)) => {
+            Some(("manifest", _, _, _)) => self.process_manifest_child(name, attrs)?,
+            Some(("application", _, _, _)) => {
                 component = self.process_application_child(name, attrs)?;
             }
-            Some((parent_name, Some((kind, comp_idx)), _))
-                if matches!(
-                    (kind, parent_name),
-                    (ComponentKind::Activity, "activity")
-                        | (ComponentKind::Service, "service")
-                        | (ComponentKind::Receiver, "receiver")
-                ) =>
-            {
-                if name == "intent-filter" {
-                    let slot = match kind {
-                        ComponentKind::Activity => {
-                            let comp = &mut self.info.activities[comp_idx];
-                            comp.intent_filters.push(IntentFilter::default());
-                            comp.intent_filters.len() - 1
+            Some(("queries", _, _, _)) => {
+                queries_intent = self.process_queries_child(name, attrs);
+            }
+            Some(("intent-filter", Some((kind, comp_idx)), Some(filter_idx), _)) => {
+                // <action> / <category> / <data> inside a filter. This arm
+                // must precede the generic component arm: a filter frame
+                // also carries its owning component.
+                if let Some(comp) = self.component_mut(kind, comp_idx)
+                    && let Some(f) = comp.intent_filters.get_mut(filter_idx)
+                {
+                    match name {
+                        "action" => {
+                            if let Some(n) = attr(attrs, "name") {
+                                f.actions.push(n.to_string());
+                            }
                         }
-                        ComponentKind::Service => {
-                            let comp = &mut self.info.services[comp_idx];
-                            comp.intent_filters.push(IntentFilter::default());
-                            comp.intent_filters.len() - 1
+                        "category" => {
+                            if let Some(n) = attr(attrs, "name") {
+                                f.categories.push(n.to_string());
+                            }
                         }
-                        ComponentKind::Receiver => {
-                            let comp = &mut self.info.receivers[comp_idx];
-                            comp.intent_filters.push(IntentFilter::default());
-                            comp.intent_filters.len() - 1
+                        "data" => {
+                            f.data.push(data_spec_from_attrs(attrs));
                         }
-                    };
-                    filter_slot = Some(slot);
-                    // Inherit the parent component so nested <action> /
-                    // <category> events can route into the right slot.
-                    component = Some((kind, comp_idx));
+                        _ => {}
+                    }
                 }
             }
-            Some(("intent-filter", Some((kind, comp_idx)), Some(filter_idx))) => {
-                let name_attr = attr(attrs, "name");
+            Some((_, Some((kind, comp_idx)), _, _)) => {
+                // Direct child of a component: intent-filter (creates a
+                // slot) or meta-data; anything else is ignored.
                 match name {
-                    "action" => {
-                        if let Some(n) = name_attr {
-                            push_filter_action(
-                                self.info_for_kind_mut(kind),
-                                comp_idx,
-                                filter_idx,
-                                n,
-                            );
+                    "intent-filter" => {
+                        let filter = IntentFilter {
+                            auto_verify: tri_bool_attr(attrs, "autoVerify"),
+                            priority: int32_attr(attrs, "priority"),
+                            ..IntentFilter::default()
+                        };
+                        if let Some(comp) = self.component_mut(kind, comp_idx) {
+                            comp.intent_filters.push(filter);
+                            filter_slot = Some(comp.intent_filters.len() - 1);
                         }
+                        // Inherit the parent component so nested <action> /
+                        // <category> / <data> events route into the slot.
+                        component = Some((kind, comp_idx));
                     }
-                    "category" => {
-                        if let Some(n) = name_attr {
-                            push_filter_category(
-                                self.info_for_kind_mut(kind),
-                                comp_idx,
-                                filter_idx,
-                                n,
-                            );
+                    "meta-data" => {
+                        let md = meta_data_from_attrs(attrs);
+                        if let Some(comp) = self.component_mut(kind, comp_idx) {
+                            comp.meta_data.push(md);
                         }
                     }
                     _ => {}
+                }
+            }
+            Some(("intent", _, _, Some(qi))) => {
+                // <action>/<category>/<data> inside a queries <intent>.
+                if let Some(q) = self.info.queries.as_mut()
+                    && let Some(f) = q.intents.get_mut(qi)
+                {
+                    match name {
+                        "action" => {
+                            if let Some(n) = attr(attrs, "name") {
+                                f.actions.push(n.to_string());
+                            }
+                        }
+                        "category" => {
+                            if let Some(n) = attr(attrs, "name") {
+                                f.categories.push(n.to_string());
+                            }
+                        }
+                        "data" => {
+                            f.data.push(data_spec_from_attrs(attrs));
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -748,15 +1045,12 @@ impl<'a> Parser<'a> {
             name: name.to_string(),
             component,
             filter_slot,
+            queries_intent,
         })
     }
 
     /// Process a top-level element (no parent on the stack).
-    fn process_root_element(
-        &mut self,
-        name: &str,
-        attrs: &[(String, Option<String>)],
-    ) -> Result<(), ManifestError> {
+    fn process_root_element(&mut self, name: &str, attrs: &[XmlAttr]) -> Result<(), ManifestError> {
         match name {
             "manifest" => {
                 if let Some(p) = attr(attrs, "package") {
@@ -780,6 +1074,7 @@ impl<'a> Parser<'a> {
                 if let Some(v) = attr(attrs, "platformBuildVersionName") {
                     self.info.platform_build_version_name = Some(v.to_string());
                 }
+                read_split_attrs(&mut self.info, attrs);
             }
             "uses-sdk" => {
                 if let Some(v) = int_attr(attrs, "minSdkVersion") {
@@ -795,6 +1090,7 @@ impl<'a> Parser<'a> {
                         name: p.to_string(),
                         protection_level: None,
                         label: None,
+                        max_sdk: int_attr(attrs, "maxSdkVersion"),
                     });
                 }
             }
@@ -804,26 +1100,27 @@ impl<'a> Parser<'a> {
                         name: p.to_string(),
                         protection_level: attr(attrs, "protectionLevel").map(str::to_string),
                         label: attr(attrs, "label").map(str::to_string),
+                        max_sdk: None,
                     });
                 }
             }
             "application" => {
-                if let Some(v) = attr(attrs, "label") {
-                    self.info.application_label = Some(v.to_string());
-                }
+                read_application_attrs(&mut self.info, attrs);
             }
             _ => {}
         }
         Ok(())
     }
 
-    /// Process a child of `<application>`. Returns the new component
-    /// Process a child of `<manifest>`. Returns nothing — these elements
-    /// contribute fields directly to `self.info` and don't push a frame.
+    /// Process a child of `<manifest>`: SDK declarations, permissions,
+    /// features, `<queries>`, and `<application>` itself (the only path a
+    /// well-formed manifest takes — see `process_root_element` for the
+    /// degenerate root-level variants, kept for malformed-input
+    /// tolerance).
     fn process_manifest_child(
         &mut self,
         name: &str,
-        attrs: &[(String, Option<String>)],
+        attrs: &[XmlAttr],
     ) -> Result<(), ManifestError> {
         match name {
             "uses-sdk" => {
@@ -840,6 +1137,7 @@ impl<'a> Parser<'a> {
                         name: p.to_string(),
                         protection_level: None,
                         label: None,
+                        max_sdk: int_attr(attrs, "maxSdkVersion"),
                     });
                 }
             }
@@ -849,19 +1147,34 @@ impl<'a> Parser<'a> {
                         name: p.to_string(),
                         protection_level: attr(attrs, "protectionLevel").map(str::to_string),
                         label: attr(attrs, "label").map(str::to_string),
+                        max_sdk: None,
                     });
                 }
+            }
+            "uses-feature" => {
+                self.info.uses_features.push(FeatureEntry {
+                    name: attr(attrs, "name").map(str::to_string),
+                    required: tri_bool_attr(attrs, "required"),
+                    gl_es_version: attr(attrs, "glEsVersion").map(str::to_string),
+                });
+            }
+            "queries" => {
+                self.info.queries = Some(QueriesInfo::default());
+            }
+            "application" => {
+                read_application_attrs(&mut self.info, attrs);
             }
             _ => {}
         }
         Ok(())
     }
+
     /// Process a child of `<application>`. Returns the new component
     /// frame context (if any) so the caller can push it onto the stack.
     fn process_application_child(
         &mut self,
         name: &str,
-        attrs: &[(String, Option<String>)],
+        attrs: &[XmlAttr],
     ) -> Result<Option<(ComponentKind, usize)>, ManifestError> {
         let ctx = match name {
             "activity" => {
@@ -891,17 +1204,41 @@ impl<'a> Parser<'a> {
                     None
                 }
             }
+            "activity-alias" => {
+                if let Some(p) = attr(attrs, "name") {
+                    let entry = ActivityAliasEntry {
+                        target_activity: attr(attrs, "targetActivity").map(str::to_string),
+                        component: component_from_attrs(p, attrs),
+                    };
+                    self.info.activity_aliases.push(entry);
+                    Some((
+                        ComponentKind::ActivityAlias,
+                        self.info.activity_aliases.len() - 1,
+                    ))
+                } else {
+                    None
+                }
+            }
             "provider" => {
                 if let Some(p) = attr(attrs, "name") {
                     self.info.providers.push(ProviderEntry {
                         name: p.to_string(),
                         authorities: attr(attrs, "authorities").map(str::to_string),
-                        exported: bool_attr(attrs, "exported"),
+                        exported: false, // finalize_exported computes the default
+                        exported_explicit: tri_bool_attr(attrs, "exported"),
                         permission: attr(attrs, "permission").map(str::to_string),
+                        read_permission: attr(attrs, "readPermission").map(str::to_string),
+                        write_permission: attr(attrs, "writePermission").map(str::to_string),
                         grant_uri_permissions: bool_attr(attrs, "grantUriPermissions"),
                         label: attr(attrs, "label").map(str::to_string),
+                        meta_data: Vec::new(),
                     });
                 }
+                None
+            }
+            "meta-data" => {
+                let md = meta_data_from_attrs(attrs);
+                self.info.application.meta_data.push(md);
                 None
             }
             _ => None,
@@ -909,33 +1246,82 @@ impl<'a> Parser<'a> {
         Ok(ctx)
     }
 
-    fn info_for_kind_mut(&mut self, kind: ComponentKind) -> &mut Vec<ComponentEntry> {
-        match kind {
-            ComponentKind::Activity => &mut self.info.activities,
-            ComponentKind::Service => &mut self.info.services,
-            ComponentKind::Receiver => &mut self.info.receivers,
+    /// Process a child of `<queries>`: package / intent / provider.
+    /// Returns the `queries.intents` slot when the element is `<intent>`
+    /// (so nested action/category/data events can route into it).
+    fn process_queries_child(&mut self, name: &str, attrs: &[XmlAttr]) -> Option<usize> {
+        let q = self.info.queries.as_mut()?;
+        match name {
+            "package" => {
+                if let Some(n) = attr(attrs, "name") {
+                    q.packages.push(n.to_string());
+                }
+                None
+            }
+            "intent" => {
+                q.intents.push(IntentFilter::default());
+                Some(q.intents.len() - 1)
+            }
+            "provider" => {
+                if let Some(a) = attr(attrs, "authorities") {
+                    q.providers.push(a.to_string());
+                }
+                None
+            }
+            _ => None,
         }
     }
 }
 
-fn push_filter_action(vec: &mut [ComponentEntry], comp_idx: usize, filter_idx: usize, name: &str) {
-    if let Some(comp) = vec.get_mut(comp_idx)
-        && let Some(f) = comp.intent_filters.get_mut(filter_idx)
-    {
-        f.actions.push(name.to_string());
+/// Read the split-APK markers off `<manifest>`.
+fn read_split_attrs(info: &mut ManifestInfo, attrs: &[XmlAttr]) {
+    info.split = attr(attrs, "split").map(str::to_string);
+    info.split_types = attr(attrs, "splitTypes").map(str::to_string);
+    info.required_split_types = attr(attrs, "requiredSplitTypes").map(str::to_string);
+    info.is_split_required = tri_bool_attr(attrs, "isSplitRequired");
+    info.is_feature_split = tri_bool_attr(attrs, "isFeatureSplit");
+    info.config_for_split = attr(attrs, "configForSplit").map(str::to_string);
+}
+
+/// Read `<application>` attributes into `info` (both the structured
+/// `ApplicationInfo` and the legacy `application_label` mirror).
+fn read_application_attrs(info: &mut ManifestInfo, attrs: &[XmlAttr]) {
+    let app = &mut info.application;
+    app.label = attr(attrs, "label").map(str::to_string);
+    info.application_label = app.label.clone();
+    app.allow_backup = tri_bool_attr(attrs, "allowBackup");
+    app.full_backup_content = attr(attrs, "fullBackupContent").map(str::to_string);
+    app.data_extraction_rules = attr(attrs, "dataExtractionRules").map(str::to_string);
+    app.uses_cleartext_traffic = tri_bool_attr(attrs, "usesCleartextTraffic");
+    app.network_security_config = attr(attrs, "networkSecurityConfig").map(str::to_string);
+    app.debuggable = tri_bool_attr(attrs, "debuggable");
+    app.test_only = tri_bool_attr(attrs, "testOnly");
+    app.has_code = tri_bool_attr(attrs, "hasCode");
+    app.extract_native_libs = tri_bool_attr(attrs, "extractNativeLibs");
+    app.request_legacy_external_storage = tri_bool_attr(attrs, "requestLegacyExternalStorage");
+}
+
+/// Build a `<meta-data>` record.
+fn meta_data_from_attrs(attrs: &[XmlAttr]) -> MetaDataEntry {
+    MetaDataEntry {
+        name: attr(attrs, "name").unwrap_or_default().to_string(),
+        value: attr(attrs, "value").map(str::to_string),
+        resource: attr(attrs, "resource").map(str::to_string),
     }
 }
 
-fn push_filter_category(
-    vec: &mut [ComponentEntry],
-    comp_idx: usize,
-    filter_idx: usize,
-    name: &str,
-) {
-    if let Some(comp) = vec.get_mut(comp_idx)
-        && let Some(f) = comp.intent_filters.get_mut(filter_idx)
-    {
-        f.categories.push(name.to_string());
+/// Build a `<data>` spec from a `<data>` element's attributes.
+fn data_spec_from_attrs(attrs: &[XmlAttr]) -> DataSpec {
+    DataSpec {
+        scheme: attr(attrs, "scheme").map(str::to_string),
+        host: attr(attrs, "host").map(str::to_string),
+        port: attr(attrs, "port").map(str::to_string),
+        path: attr(attrs, "path").map(str::to_string),
+        path_prefix: attr(attrs, "pathPrefix").map(str::to_string),
+        path_pattern: attr(attrs, "pathPattern").map(str::to_string),
+        path_advanced_pattern: attr(attrs, "pathAdvancedPattern").map(str::to_string),
+        path_suffix: attr(attrs, "pathSuffix").map(str::to_string),
+        mime_type: attr(attrs, "mimeType").map(str::to_string),
     }
 }
 
@@ -943,28 +1329,51 @@ fn push_filter_category(
 // Helpers.
 // ---------------------------------------------------------------------------
 
-fn attr<'a>(attrs: &'a [(String, Option<String>)], name: &str) -> Option<&'a str> {
+/// Look up an attribute by local name, only when it carries no namespace
+/// or the Android resource namespace. Foreign namespaces (`tools:`,
+/// `dist:`, …) never match, mirroring PackageParser.
+fn attr<'a>(attrs: &'a [XmlAttr], name: &str) -> Option<&'a str> {
     attrs
         .iter()
-        .find(|(n, _)| n == name)
-        .and_then(|(_, v)| v.as_deref())
+        .find(|a| a.name == name && a.ns.as_deref().is_none_or(|u| u == ANDROID_NS))
+        .and_then(|a| a.value.as_deref())
 }
 
-fn int_attr(attrs: &[(String, Option<String>)], name: &str) -> Option<u32> {
+fn int_attr(attrs: &[XmlAttr], name: &str) -> Option<u32> {
     attr(attrs, name).and_then(|v| v.parse().ok())
 }
 
-fn bool_attr(attrs: &[(String, Option<String>)], name: &str) -> bool {
+fn int32_attr(attrs: &[XmlAttr], name: &str) -> Option<i32> {
+    attr(attrs, name).and_then(|v| v.parse().ok())
+}
+
+/// Boolean attribute with a real tri-state: `None` when absent or not a
+/// boolean, so "declared false" stays distinguishable from "undeclared".
+fn tri_bool_attr(attrs: &[XmlAttr], name: &str) -> Option<bool> {
+    match attr(attrs, name) {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
+}
+
+/// Boolean attribute with a `false` default (used where the platform
+/// default is false and the declared/undeclared split is not
+/// security-relevant).
+fn bool_attr(attrs: &[XmlAttr], name: &str) -> bool {
     matches!(attr(attrs, name), Some("true"))
 }
 
-fn component_from_attrs(name: &str, attrs: &[(String, Option<String>)]) -> ComponentEntry {
+fn component_from_attrs(name: &str, attrs: &[XmlAttr]) -> ComponentEntry {
     ComponentEntry {
         name: name.to_string(),
-        exported: bool_attr(attrs, "exported"),
+        exported: false, // finalize_exported computes the effective value
+        exported_explicit: tri_bool_attr(attrs, "exported"),
         permission: attr(attrs, "permission").map(str::to_string),
         label: attr(attrs, "label").map(str::to_string),
+        process: attr(attrs, "process").map(str::to_string),
         intent_filters: Vec::new(),
+        meta_data: Vec::new(),
     }
 }
 

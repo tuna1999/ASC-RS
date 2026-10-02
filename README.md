@@ -5,8 +5,11 @@ Android APK analysis: `findrefs` (string/type/method/field cross-reference
 search across all DEX entries), `getclass` (locate a class, extract a
 minimal standalone DEX, decompile), `listclass` (enumerate every class
 descriptor across all DEX entries, with optional ASCII prefix filter), and
-`manifest` (dump package, permissions, components; tolerates the AXML
-tampering Android itself ignores), and `disasm` (Smali-syntax listing of one
+`manifest` (full dump: package, split markers, application attributes +
+meta-data, permissions, uses-features, queries, components with deep-link
+intent-filter data and activity-aliases; tolerates the AXML tampering
+Android itself ignores),
+and `disasm` (Smali-syntax listing of one
 class, no decompiler structuring).
 No Python, no JVM, no Node at runtime.
 
@@ -51,7 +54,7 @@ asc-rs getclass   <apk> Lcom/foo/Bar;              # decompiled Java source on s
 asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
 asc-rs disasm     <apk> Lcom/foo/Bar; [--method m]    # Smali-syntax listing (annotations/debug info not emitted)
 asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
-asc-rs manifest   <apk>                             # package, permissions, components
+asc-rs manifest   <apk>                             # full manifest: app attrs, meta-data, permissions, queries, deep links, aliases
 asc-rs inspect    <apk|dex>                         # inventory, DEX coverage/checksums, packer signals
 asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match
 asc-rs cert       <apk>                             # signing certs (v1/v2/v3), fingerprints; display only, no verification

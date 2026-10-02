@@ -769,10 +769,117 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
         num(m.target_sdk),
         num(m.compile_sdk)
     );
+    // Split markers (only when the manifest declares any).
+    let mut split = Vec::new();
+    let push_split = |out: &mut Vec<String>, k: &str, v: &Option<String>| {
+        // Empty declarations (bundletool writes `splitTypes=""`) are noise
+        // in text; JSON keeps them verbatim.
+        if let Some(v) = v
+            && !v.is_empty()
+        {
+            out.push(format!("{k}={v}"));
+        }
+    };
+    push_split(&mut split, "split", &m.split);
+    push_split(&mut split, "configForSplit", &m.config_for_split);
+    push_split(&mut split, "splitTypes", &m.split_types);
+    push_split(&mut split, "requiredSplitTypes", &m.required_split_types);
+    if m.is_split_required == Some(true) {
+        split.push("isSplitRequired".into());
+    }
+    if m.is_feature_split == Some(true) {
+        split.push("isFeatureSplit".into());
+    }
+    if !split.is_empty() {
+        let _ = writeln!(s, "split: {}", split.join(" "));
+    }
+
+    // Application attributes (declared vs effective distinguished).
+    let a = &m.application;
+    let _ = writeln!(s, "application:");
+    let _ = writeln!(s, "  label: {}", opt(&a.label));
+    let declared_or_default = |v: Option<bool>, eff: bool| match v {
+        Some(x) => x.to_string(),
+        None => format!("{eff}(default)"),
+    };
+    let _ = writeln!(
+        s,
+        "  allowBackup={} debuggable={} testOnly={}",
+        declared_or_default(a.allow_backup, m.effective_allow_backup()),
+        declared_or_default(a.debuggable, false),
+        declared_or_default(a.test_only, false),
+    );
+    let _ = writeln!(
+        s,
+        "  usesCleartextTraffic={} networkSecurityConfig={} fullBackupContent={} dataExtractionRules={}",
+        declared_or_default(
+            a.uses_cleartext_traffic,
+            m.effective_uses_cleartext_traffic()
+        ),
+        opt(&a.network_security_config),
+        opt(&a.full_backup_content),
+        opt(&a.data_extraction_rules),
+    );
+    let _ = writeln!(
+        s,
+        "  hasCode={} extractNativeLibs={} requestLegacyExternalStorage={}",
+        declared_or_default(a.has_code, true),
+        declared_or_default(a.extract_native_libs, false),
+        declared_or_default(a.request_legacy_external_storage, false),
+    );
+    for md in &a.meta_data {
+        write_meta_data(&mut s, "  ", md);
+    }
+
     let _ = writeln!(s, "permissions ({}):", m.permissions.len());
     for p in &m.permissions {
-        let _ = writeln!(s, "  {}", p.name);
+        let max = p
+            .max_sdk
+            .map(|v| format!(" (maxSdk={v})"))
+            .unwrap_or_default();
+        let _ = writeln!(s, "  {}{}", p.name, max);
     }
+
+    if !m.uses_features.is_empty() {
+        let _ = writeln!(s, "uses-features ({}):", m.uses_features.len());
+        for f in &m.uses_features {
+            let req = match f.required {
+                Some(false) => " required=false",
+                Some(true) => " required=true",
+                None => " required=true(default)",
+            };
+            let gl = f
+                .gl_es_version
+                .as_ref()
+                .map(|v| format!(" glEsVersion={v}"))
+                .unwrap_or_default();
+            let _ = writeln!(s, "  {}{}{}", opt(&f.name), req, gl);
+        }
+    }
+
+    if let Some(q) = &m.queries {
+        let _ = writeln!(s, "queries:");
+        for p in &q.packages {
+            let _ = writeln!(s, "  package {p}");
+        }
+        for prov in &q.providers {
+            let _ = writeln!(s, "  provider authorities={prov}");
+        }
+        for f in &q.intents {
+            let _ = write!(s, "  intent:");
+            for a in &f.actions {
+                let _ = write!(s, " action {a}");
+            }
+            for c in &f.categories {
+                let _ = write!(s, " category {c}");
+            }
+            for d in &f.data {
+                let _ = write!(s, " {}", render_data(d));
+            }
+            let _ = writeln!(s);
+        }
+    }
+
     for (label, list) in [
         ("activities", &m.activities),
         ("services", &m.services),
@@ -780,21 +887,142 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
     ] {
         let _ = writeln!(s, "{label} ({}):", list.len());
         for c in list {
-            let exported = if c.exported { " [exported]" } else { "" };
-            let _ = writeln!(s, "  {}{exported}", c.name);
-            for f in &c.intent_filters {
-                for a in &f.actions {
-                    let _ = writeln!(s, "    action {a}");
-                }
-            }
+            write_component(&mut s, c);
+        }
+    }
+    let _ = writeln!(s, "activity-alias ({}):", m.activity_aliases.len());
+    for alias in &m.activity_aliases {
+        let c = &alias.component;
+        let _ = write!(
+            s,
+            "  {} -> {}{}",
+            c.name,
+            opt(&alias.target_activity),
+            render_exported(c)
+        );
+        if let Some(p) = &c.permission {
+            let _ = write!(s, " perm={p}");
+        }
+        let _ = writeln!(s);
+        for f in &c.intent_filters {
+            write_filter(&mut s, f);
+        }
+        for md in &c.meta_data {
+            write_meta_data(&mut s, "    ", md);
         }
     }
     let _ = writeln!(s, "providers ({}):", m.providers.len());
     for p in &m.providers {
-        let exported = if p.exported { " [exported]" } else { "" };
-        let _ = writeln!(s, "  {} auth={}{exported}", p.name, opt(&p.authorities));
+        let _ = writeln!(
+            s,
+            "  {} auth={}{}{}",
+            p.name,
+            opt(&p.authorities),
+            render_exported_raw(p.exported, p.exported_explicit),
+            p.permission
+                .as_ref()
+                .map(|v| format!(" perm={v}"))
+                .unwrap_or_default(),
+        );
+        for md in &p.meta_data {
+            write_meta_data(&mut s, "  ", md);
+        }
     }
     s
+}
+
+/// `[exported=…]` annotation that keeps declared vs inferred traceable:
+/// `(auto)` marks Android's inference, not a manifest declaration.
+fn render_exported_raw(exported: bool, explicit: Option<bool>) -> String {
+    match explicit {
+        Some(_) => format!(" [exported={exported}]"),
+        None if exported => " [exported=true(auto)]".into(),
+        None => String::new(),
+    }
+}
+
+fn render_exported(c: &asc_manifest::ComponentEntry) -> String {
+    render_exported_raw(c.exported, c.exported_explicit)
+}
+
+fn render_data(d: &asc_manifest::DataSpec) -> String {
+    let mut parts = Vec::new();
+    let mut push = |k: &str, v: &Option<String>| {
+        if let Some(v) = v {
+            parts.push(format!("{k}={v}"));
+        }
+    };
+    push("scheme", &d.scheme);
+    push("host", &d.host);
+    push("port", &d.port);
+    push("path", &d.path);
+    push("pathPrefix", &d.path_prefix);
+    push("pathPattern", &d.path_pattern);
+    push("pathAdvancedPattern", &d.path_advanced_pattern);
+    push("pathSuffix", &d.path_suffix);
+    push("mimeType", &d.mime_type);
+    format!("data {}", parts.join(" "))
+}
+
+fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter) {
+    use std::fmt::Write as _;
+    let mut flags = Vec::new();
+    if let Some(v) = f.auto_verify {
+        flags.push(format!("autoVerify={v}"));
+    }
+    if let Some(v) = f.priority {
+        flags.push(format!("priority={v}"));
+    }
+    if flags.is_empty() {
+        let _ = writeln!(s, "    filter:");
+    } else {
+        let _ = writeln!(s, "    filter ({}):", flags.join(" "));
+    }
+    for a in &f.actions {
+        let _ = writeln!(s, "      action {a}");
+    }
+    for c in &f.categories {
+        let _ = writeln!(s, "      category {c}");
+    }
+    for d in &f.data {
+        let _ = writeln!(s, "      {}", render_data(d));
+    }
+}
+
+fn write_component(s: &mut String, c: &asc_manifest::ComponentEntry) {
+    use std::fmt::Write as _;
+    let _ = write!(s, "  {}{}", c.name, render_exported(c));
+    if let Some(p) = &c.permission {
+        let _ = write!(s, " perm={p}");
+    }
+    if let Some(p) = &c.process {
+        let _ = write!(s, " process={p}");
+    }
+    if let Some(l) = &c.label {
+        let _ = write!(s, " label={l}");
+    }
+    let _ = writeln!(s);
+    for f in &c.intent_filters {
+        write_filter(s, f);
+    }
+    for md in &c.meta_data {
+        write_meta_data(s, "    ", md);
+    }
+}
+
+fn write_meta_data(s: &mut String, indent: &str, md: &asc_manifest::MetaDataEntry) {
+    use std::fmt::Write as _;
+    let value = md
+        .value
+        .clone()
+        .map(|v| format!(" = {v}"))
+        .unwrap_or_default();
+    let resource = md
+        .resource
+        .clone()
+        .map(|r| format!(" resource={r}"))
+        .unwrap_or_default();
+    let _ = writeln!(s, "{indent}meta-data: {}{value}{resource}", md.name);
 }
 
 /// Translate the CLI `FindRefsKind` into an [`Query`]. For method/field

@@ -508,3 +508,871 @@ fn apk_without_manifest_errors() {
     assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
     let _ = std::fs::remove_file(&tmp);
 }
+
+// ---------------------------------------------------------------------------
+// Binary-AXML fixture builder (test-only).
+//
+// Assembles a complete, AOSP-shaped binary XML document: root chunk, UTF-16
+// string pool, namespace events, and element events with typed attributes.
+// Used by the P0 regression tests and the full-manifest fixture.
+// ---------------------------------------------------------------------------
+mod axml {
+    pub const ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
+    pub const TOOLS_NS: &str = "http://schemas.android.com/tools";
+
+    const TYPE_REFERENCE: u8 = 0x01;
+    const TYPE_STRING: u8 = 0x03;
+    const TYPE_INT_DEC: u8 = 0x10;
+    const TYPE_INT_HEX: u8 = 0x11;
+    const TYPE_INT_BOOLEAN: u8 = 0x12;
+    const NO_INDEX: u32 = 0xFFFF_FFFF;
+
+    /// A typed attribute value, mirroring how aapt compiles source XML.
+    #[derive(Clone)]
+    pub enum Val {
+        /// `TYPE_STRING` with both `rawValue` and `typedValue.data` set.
+        Str(&'static str),
+        /// `TYPE_STRING` with `rawValue = NO_INDEX` and only `data` valid —
+        /// the AOSP fallback path (`Res_value.data` holds the string index).
+        StrDataOnly(&'static str),
+        Bool(bool),
+        IntDec(u32),
+        IntHex(u32),
+        Reference(u32),
+    }
+
+    #[derive(Clone)]
+    pub struct Attr {
+        pub ns: Option<&'static str>,
+        pub name: &'static str,
+        pub val: Val,
+    }
+
+    pub fn attr(ns: Option<&'static str>, name: &'static str, val: Val) -> Attr {
+        Attr { ns, name, val }
+    }
+
+    pub struct Elem {
+        pub name: &'static str,
+        pub attrs: Vec<Attr>,
+        pub children: Vec<Elem>,
+    }
+
+    pub fn elem(name: &'static str, attrs: Vec<Attr>, children: Vec<Elem>) -> Elem {
+        Elem {
+            name,
+            attrs,
+            children,
+        }
+    }
+
+    /// String pool writer: strings deduplicated in insertion order; returns
+    /// `(pool chunk bytes, lookup map)`.
+    fn build_pool(strings: &[String]) -> (Vec<u8>, std::collections::HashMap<String, u32>) {
+        let mut map = std::collections::HashMap::new();
+        for (i, s) in strings.iter().enumerate() {
+            map.insert(s.clone(), i as u32);
+        }
+        let mut data: Vec<u8> = Vec::new();
+        let mut offsets = Vec::with_capacity(strings.len());
+        for s in strings {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            assert!(units.len() < 0x8000, "fixture string too long: {s}");
+            offsets.push(data.len() as u32);
+            data.extend_from_slice(&(units.len() as u16).to_le_bytes());
+            for u in units {
+                data.extend_from_slice(&u.to_le_bytes());
+            }
+            data.extend_from_slice(&0u16.to_le_bytes()); // NUL terminator
+        }
+        while !data.len().is_multiple_of(4) {
+            data.push(0);
+        }
+        let strings_start = 28 + strings.len() * 4; // header + offsets table
+        let size = strings_start + data.len();
+        let mut pool = Vec::with_capacity(size);
+        pool.extend_from_slice(&1u16.to_le_bytes()); // RES_STRING_POOL_TYPE
+        pool.extend_from_slice(&28u16.to_le_bytes()); // headerSize
+        pool.extend_from_slice(&(size as u32).to_le_bytes());
+        pool.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+        pool.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+        pool.extend_from_slice(&0u32.to_le_bytes()); // flags: UTF-16
+        pool.extend_from_slice(&(strings_start as u32).to_le_bytes());
+        pool.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+        for off in offsets {
+            pool.extend_from_slice(&off.to_le_bytes());
+        }
+        pool.extend_from_slice(&data);
+        (pool, map)
+    }
+
+    fn collect_strings(e: &Elem, ns_uris: &mut Vec<String>, out: &mut Vec<String>) {
+        // Element names are plain; attribute names/values may reference URIs.
+        if !out.iter().any(|s| s == e.name) {
+            out.push(e.name.to_string());
+        }
+        for a in &e.attrs {
+            if let Some(uri) = a.ns
+                && uri != ANDROID_NS // android URI also emitted explicitly below
+                && !ns_uris.iter().any(|s| s == uri)
+            {
+                ns_uris.push(uri.to_string());
+            }
+            if !out.iter().any(|s| s == a.name) {
+                out.push(a.name.to_string());
+            }
+            if let Val::Str(s) | Val::StrDataOnly(s) = a.val
+                && !out.iter().any(|x| x == s)
+            {
+                out.push(s.to_string());
+            }
+        }
+        for c in &e.children {
+            collect_strings(c, ns_uris, out);
+        }
+    }
+
+    fn push_element(out: &mut Vec<u8>, e: &Elem, map: &std::collections::HashMap<String, u32>) {
+        let idx = |s: &str| map[s];
+        let start_off = out.len();
+        out.extend_from_slice(&0x0102u16.to_le_bytes()); // START_ELEMENT
+        out.extend_from_slice(&16u16.to_le_bytes()); // headerSize
+        let size_off = out.len();
+        out.extend_from_slice(&0u32.to_le_bytes()); // size (patched)
+        out.extend_from_slice(&1u32.to_le_bytes()); // lineNumber (u32)
+        out.extend_from_slice(&NO_INDEX.to_le_bytes()); // comment
+        out.extend_from_slice(&NO_INDEX.to_le_bytes()); // ns (manifest elements are plain)
+        out.extend_from_slice(&idx(e.name).to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes()); // attributeStart
+        out.extend_from_slice(&20u16.to_le_bytes()); // attributeSize
+        out.extend_from_slice(&(e.attrs.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // idIndex
+        out.extend_from_slice(&0u16.to_le_bytes()); // classIndex
+        out.extend_from_slice(&0u16.to_le_bytes()); // styleIndex
+        for a in &e.attrs {
+            let ns_idx = a.ns.map_or(NO_INDEX, idx);
+            out.extend_from_slice(&ns_idx.to_le_bytes());
+            out.extend_from_slice(&idx(a.name).to_le_bytes());
+            let (raw, ty, data) = match &a.val {
+                Val::Str(s) => (idx(s), TYPE_STRING, idx(s)),
+                Val::StrDataOnly(s) => (NO_INDEX, TYPE_STRING, idx(s)),
+                Val::Bool(b) => (NO_INDEX, TYPE_INT_BOOLEAN, u32::from(*b)),
+                Val::IntDec(v) => (NO_INDEX, TYPE_INT_DEC, *v),
+                Val::IntHex(v) => (NO_INDEX, TYPE_INT_HEX, *v),
+                Val::Reference(v) => (NO_INDEX, TYPE_REFERENCE, *v),
+            };
+            out.extend_from_slice(&raw.to_le_bytes());
+            out.extend_from_slice(&8u16.to_le_bytes()); // typedValue.size
+            out.extend_from_slice(&0u8.to_le_bytes()); // res0
+            out.extend_from_slice(&ty.to_le_bytes());
+            out.extend_from_slice(&data.to_le_bytes());
+        }
+        let size = (out.len() - start_off) as u32;
+        out[size_off..size_off + 4].copy_from_slice(&size.to_le_bytes());
+
+        for c in &e.children {
+            push_element(out, c, map);
+        }
+
+        // END_ELEMENT
+        out.extend_from_slice(&0x0103u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(&24u32.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes()); // lineNumber (u32)
+        out.extend_from_slice(&NO_INDEX.to_le_bytes()); // comment
+        out.extend_from_slice(&NO_INDEX.to_le_bytes()); // ns
+        out.extend_from_slice(&idx(e.name).to_le_bytes());
+    }
+
+    /// Serialize the tree to a complete binary XML document.
+    pub fn build(root: &Elem) -> Vec<u8> {
+        // String pool: all names/values first, then the android URI + prefix
+        // (the parser validates ns string indexes), then extra URIs.
+        let mut ns_uris = Vec::new();
+        let mut strings = Vec::new();
+        collect_strings(root, &mut ns_uris, &mut strings);
+        for extra in [ANDROID_NS, "android", "tools"] {
+            if !strings.iter().any(|s| s == extra) {
+                strings.push(extra.to_string());
+            }
+        }
+        for u in &ns_uris {
+            if !strings.iter().any(|s| s == u) {
+                strings.push(u.clone());
+            }
+        }
+        let (pool, map) = build_pool(&strings);
+
+        let mut body = pool;
+        // Namespace start events for every URI in play.
+        for (i, uri) in std::iter::once(ANDROID_NS)
+            .chain(ns_uris.iter().map(String::as_str))
+            .enumerate()
+        {
+            let prefix = if uri == ANDROID_NS {
+                "android"
+            } else {
+                "tools"
+            };
+            body.extend_from_slice(&0x0100u16.to_le_bytes()); // START_NAMESPACE
+            body.extend_from_slice(&16u16.to_le_bytes());
+            body.extend_from_slice(&24u32.to_le_bytes());
+            body.extend_from_slice(&1u32.to_le_bytes()); // lineNumber (u32)
+            body.extend_from_slice(&NO_INDEX.to_le_bytes()); // comment
+            body.extend_from_slice(&map[prefix].to_le_bytes());
+            body.extend_from_slice(&map[uri].to_le_bytes());
+            let _ = i;
+        }
+
+        let elem_start = body.len();
+        push_element(&mut body, root, &map);
+
+        // Root chunk header: type ignored by the parser, headerSize 8.
+        let total = 8 + body.len();
+        let mut doc = Vec::with_capacity(total);
+        doc.extend_from_slice(&0x0003u16.to_le_bytes());
+        doc.extend_from_slice(&8u16.to_le_bytes());
+        doc.extend_from_slice(&(total as u32).to_le_bytes());
+        doc.extend_from_slice(&body[..elem_start]);
+        doc.extend_from_slice(&body[elem_start..]);
+        // (end-namespace events omitted: the parser ignores them and the
+        // manifest element-close already terminates the document walk)
+        doc
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P0.4 regression tests (written against the pre-fix model; each failed
+// before the corresponding fix).
+// ---------------------------------------------------------------------------
+
+/// P0.4.1: `<application>` is a child of `<manifest>` in every real AXML;
+/// its label must still be captured.
+#[test]
+fn application_label_is_parsed_when_nested_under_manifest() {
+    let doc = axml::elem(
+        "manifest",
+        vec![axml::attr(
+            None,
+            "package",
+            axml::Val::Str("com.example.app"),
+        )],
+        vec![axml::elem(
+            "application",
+            vec![axml::attr(
+                Some(axml::ANDROID_NS),
+                "label",
+                axml::Val::Str("Example App"),
+            )],
+            vec![],
+        )],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+    assert_eq!(info.application_label.as_deref(), Some("Example App"));
+}
+
+/// P0.4.2: `TYPE_STRING` with `rawValue = NO_INDEX` must resolve through
+/// `typedValue.data` (AOSP `Res_value` semantics), not vanish.
+#[test]
+fn string_typed_attribute_without_rawvalue_resolves_via_data() {
+    let doc = axml::elem(
+        "manifest",
+        vec![],
+        vec![axml::elem(
+            "application",
+            vec![axml::attr(
+                Some(axml::ANDROID_NS),
+                "label",
+                axml::Val::StrDataOnly("DataOnlyLabel"),
+            )],
+            vec![],
+        )],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+    assert_eq!(info.application_label.as_deref(), Some("DataOnlyLabel"));
+}
+
+/// P0.4.3: an attribute with the same local name in a non-Android namespace
+/// (e.g. `tools:exported`) must not be mistaken for `android:exported`.
+#[test]
+fn attributes_in_non_android_namespace_are_ignored() {
+    let doc = axml::elem(
+        "manifest",
+        vec![],
+        vec![axml::elem(
+            "application",
+            vec![],
+            vec![axml::elem(
+                "activity",
+                vec![
+                    axml::attr(
+                        Some(axml::ANDROID_NS),
+                        "name",
+                        axml::Val::Str("com.example.MainActivity"),
+                    ),
+                    axml::attr(Some(axml::TOOLS_NS), "exported", axml::Val::Bool(true)),
+                ],
+                vec![],
+            )],
+        )],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+    let activity = info.activities.first().expect("activity captured");
+    assert!(
+        !activity.exported,
+        "tools:exported leaked into android:exported: {activity:?}"
+    );
+}
+
+/// Hand-built minimal document with one START_ELEMENT carrying exactly
+/// one attribute with fully controllable raw fields (for malformed-index
+/// regression tests; the fixture builder always emits valid indexes).
+fn element_with_attr(attr_ns: u32, attr_name: u32, attr_raw: u32, ty: u8, data: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0x0003u16.to_le_bytes());
+    bytes.extend_from_slice(&0x0008u16.to_le_bytes()); // headerSize
+    let root_size_placeholder = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+
+    // String pool with 2 strings: "n0", "n1".
+    let sp_start = bytes.len();
+    bytes.extend_from_slice(&0x0001u16.to_le_bytes());
+    bytes.extend_from_slice(&0x001Cu16.to_le_bytes());
+    let sp_size_placeholder = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes()); // stringCount
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // flags (UTF-16)
+    bytes.extend_from_slice(&0x24u32.to_le_bytes()); // stringsStart
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]
+    bytes.extend_from_slice(&4u32.to_le_bytes()); // offsets[1]
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // len 1
+    bytes.extend_from_slice(&0x6Eu16.to_le_bytes()); // 'n'
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NUL
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // len 1
+    bytes.extend_from_slice(&0x31u16.to_le_bytes()); // '1'
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NUL
+    while bytes.len() % 4 != 0 {
+        bytes.push(0);
+    }
+    let sp_size = (bytes.len() - sp_start) as u32;
+    bytes[sp_size_placeholder..sp_size_placeholder + 4].copy_from_slice(&sp_size.to_le_bytes());
+
+    // START_ELEMENT "n0" with one attribute.
+    let se_start = bytes.len();
+    bytes.extend_from_slice(&0x0102u16.to_le_bytes());
+    bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+    let se_size_placeholder = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // lineNumber
+    bytes.extend_from_slice(&NO_INDEX.to_le_bytes()); // comment
+    bytes.extend_from_slice(&NO_INDEX.to_le_bytes()); // element ns
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // element name -> "n0"
+    bytes.extend_from_slice(&20u16.to_le_bytes()); // attributeStart
+    bytes.extend_from_slice(&20u16.to_le_bytes()); // attributeSize
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // attributeCount
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // idIndex
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // classIndex
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // styleIndex
+    bytes.extend_from_slice(&attr_ns.to_le_bytes());
+    bytes.extend_from_slice(&attr_name.to_le_bytes());
+    bytes.extend_from_slice(&attr_raw.to_le_bytes());
+    bytes.extend_from_slice(&8u16.to_le_bytes()); // typedValue.size
+    bytes.extend_from_slice(&0u8.to_le_bytes()); // res0
+    bytes.extend_from_slice(&ty.to_le_bytes());
+    bytes.extend_from_slice(&data.to_le_bytes());
+    let se_size = (bytes.len() - se_start) as u32;
+    bytes[se_size_placeholder..se_size_placeholder + 4].copy_from_slice(&se_size.to_le_bytes());
+
+    let root_size = bytes.len() as u32;
+    bytes[root_size_placeholder..root_size_placeholder + 4]
+        .copy_from_slice(&root_size.to_le_bytes());
+    bytes
+}
+
+/// P0.4.3 companion: an out-of-range attribute-namespace index is a
+/// hard error (malformed), never a panic or silent ignore.
+#[test]
+fn attribute_ns_index_out_of_range_errors_not_panics() {
+    let doc = element_with_attr(0x0006_0000, 1, NO_INDEX, 0x12, 1);
+    match parse_manifest(&doc) {
+        Err(ManifestError::BadChunk(m)) => assert!(m.contains("attribute ns"), "{m}"),
+        other => panic!("expected BadChunk, got {other:?}"),
+    }
+}
+
+/// P0.1-P0.3 comprehensive synthetic fixture: data specs, autoVerify,
+/// priority, activity-alias, meta-data at both levels, queries,
+/// uses-feature, split markers, exported tri-state.
+#[test]
+fn full_manifest_fixture_extracts_p0_fields() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "manifest",
+        vec![
+            attr(None, "package", Val::Str("com.example.app")),
+            attr(None, "split", Val::Str("config.arm64_v8a")),
+            attr(Some(ANDROID_NS), "splitTypes", Val::Str("base__abi")),
+            attr(Some(ANDROID_NS), "isFeatureSplit", Val::Bool(false)),
+        ],
+        vec![
+            elem(
+                "uses-sdk",
+                vec![
+                    attr(Some(ANDROID_NS), "minSdkVersion", Val::IntDec(21)),
+                    attr(Some(ANDROID_NS), "targetSdkVersion", Val::IntDec(35)),
+                ],
+                vec![],
+            ),
+            elem(
+                "uses-permission",
+                vec![
+                    attr(
+                        Some(ANDROID_NS),
+                        "name",
+                        Val::Str("android.permission.CAMERA"),
+                    ),
+                    attr(Some(ANDROID_NS), "maxSdkVersion", Val::IntDec(28)),
+                ],
+                vec![],
+            ),
+            elem(
+                "uses-feature",
+                vec![
+                    attr(
+                        Some(ANDROID_NS),
+                        "name",
+                        Val::Str("android.hardware.camera"),
+                    ),
+                    attr(Some(ANDROID_NS), "required", Val::Bool(false)),
+                ],
+                vec![],
+            ),
+            elem(
+                "uses-feature",
+                vec![attr(
+                    Some(ANDROID_NS),
+                    "glEsVersion",
+                    Val::IntHex(0x0003_0001),
+                )],
+                vec![],
+            ),
+            elem(
+                "queries",
+                vec![],
+                vec![
+                    elem(
+                        "package",
+                        vec![attr(
+                            Some(ANDROID_NS),
+                            "name",
+                            Val::Str("com.example.other"),
+                        )],
+                        vec![],
+                    ),
+                    elem(
+                        "intent",
+                        vec![],
+                        vec![
+                            elem(
+                                "action",
+                                vec![attr(
+                                    Some(ANDROID_NS),
+                                    "name",
+                                    Val::Str("android.intent.action.VIEW"),
+                                )],
+                                vec![],
+                            ),
+                            elem(
+                                "category",
+                                vec![attr(
+                                    Some(ANDROID_NS),
+                                    "name",
+                                    Val::Str("android.intent.category.BROWSABLE"),
+                                )],
+                                vec![],
+                            ),
+                            elem(
+                                "data",
+                                vec![attr(Some(ANDROID_NS), "scheme", Val::Str("https"))],
+                                vec![],
+                            ),
+                        ],
+                    ),
+                    elem(
+                        "provider",
+                        vec![attr(
+                            Some(ANDROID_NS),
+                            "authorities",
+                            Val::Str("com.example.cp"),
+                        )],
+                        vec![],
+                    ),
+                ],
+            ),
+            elem(
+                "application",
+                vec![
+                    attr(Some(ANDROID_NS), "label", Val::Str("Example")),
+                    attr(Some(ANDROID_NS), "allowBackup", Val::Bool(false)),
+                    attr(Some(ANDROID_NS), "debuggable", Val::Bool(true)),
+                    attr(
+                        Some(ANDROID_NS),
+                        "networkSecurityConfig",
+                        Val::Reference(0x7f15_0002),
+                    ),
+                ],
+                vec![
+                    elem(
+                        "meta-data",
+                        vec![
+                            attr(Some(ANDROID_NS), "name", Val::Str("app.level")),
+                            attr(Some(ANDROID_NS), "value", Val::Str("v1")),
+                        ],
+                        vec![],
+                    ),
+                    elem(
+                        "activity",
+                        vec![
+                            attr(
+                                Some(ANDROID_NS),
+                                "name",
+                                Val::Str("com.example.MainActivity"),
+                            ),
+                            attr(Some(ANDROID_NS), "process", Val::Str(":remote")),
+                        ],
+                        vec![
+                            elem(
+                                "intent-filter",
+                                vec![
+                                    attr(Some(ANDROID_NS), "autoVerify", Val::Bool(true)),
+                                    attr(Some(ANDROID_NS), "priority", Val::IntDec(10)),
+                                ],
+                                vec![
+                                    elem(
+                                        "action",
+                                        vec![attr(
+                                            Some(ANDROID_NS),
+                                            "name",
+                                            Val::Str("android.intent.action.MAIN"),
+                                        )],
+                                        vec![],
+                                    ),
+                                    elem(
+                                        "category",
+                                        vec![attr(
+                                            Some(ANDROID_NS),
+                                            "name",
+                                            Val::Str("android.intent.category.LAUNCHER"),
+                                        )],
+                                        vec![],
+                                    ),
+                                ],
+                            ),
+                            elem(
+                                "intent-filter",
+                                vec![],
+                                vec![
+                                    elem(
+                                        "action",
+                                        vec![attr(
+                                            Some(ANDROID_NS),
+                                            "name",
+                                            Val::Str("android.intent.action.VIEW"),
+                                        )],
+                                        vec![],
+                                    ),
+                                    elem(
+                                        "category",
+                                        vec![attr(
+                                            Some(ANDROID_NS),
+                                            "name",
+                                            Val::Str("android.intent.category.BROWSABLE"),
+                                        )],
+                                        vec![],
+                                    ),
+                                    elem(
+                                        "category",
+                                        vec![attr(
+                                            Some(ANDROID_NS),
+                                            "name",
+                                            Val::Str("android.intent.category.DEFAULT"),
+                                        )],
+                                        vec![],
+                                    ),
+                                    elem(
+                                        "data",
+                                        vec![
+                                            attr(Some(ANDROID_NS), "scheme", Val::Str("https")),
+                                            attr(Some(ANDROID_NS), "host", Val::Str("example.com")),
+                                            attr(Some(ANDROID_NS), "port", Val::Str("8443")),
+                                            attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/app")),
+                                        ],
+                                        vec![],
+                                    ),
+                                    elem(
+                                        "data",
+                                        vec![attr(
+                                            Some(ANDROID_NS),
+                                            "mimeType",
+                                            Val::Str("image/*"),
+                                        )],
+                                        vec![],
+                                    ),
+                                ],
+                            ),
+                            elem(
+                                "meta-data",
+                                vec![
+                                    attr(Some(ANDROID_NS), "name", Val::Str("comp.level")),
+                                    attr(Some(ANDROID_NS), "resource", Val::Reference(0x7f02_0001)),
+                                ],
+                                vec![],
+                            ),
+                        ],
+                    ),
+                    elem(
+                        "activity-alias",
+                        vec![
+                            attr(Some(ANDROID_NS), "name", Val::Str("com.example.AliasMain")),
+                            attr(
+                                Some(ANDROID_NS),
+                                "targetActivity",
+                                Val::Str("com.example.MainActivity"),
+                            ),
+                            attr(Some(ANDROID_NS), "exported", Val::Bool(false)),
+                        ],
+                        vec![elem(
+                            "intent-filter",
+                            vec![],
+                            vec![
+                                elem(
+                                    "action",
+                                    vec![attr(
+                                        Some(ANDROID_NS),
+                                        "name",
+                                        Val::Str("android.intent.action.MAIN"),
+                                    )],
+                                    vec![],
+                                ),
+                                elem(
+                                    "category",
+                                    vec![attr(
+                                        Some(ANDROID_NS),
+                                        "name",
+                                        Val::Str("android.intent.category.LAUNCHER"),
+                                    )],
+                                    vec![],
+                                ),
+                            ],
+                        )],
+                    ),
+                    elem(
+                        "provider",
+                        vec![
+                            attr(Some(ANDROID_NS), "name", Val::Str("com.example.CP")),
+                            attr(Some(ANDROID_NS), "authorities", Val::Str("com.example.cp")),
+                            attr(Some(ANDROID_NS), "exported", Val::Bool(true)),
+                            attr(
+                                Some(ANDROID_NS),
+                                "readPermission",
+                                Val::Str("com.example.READ"),
+                            ),
+                        ],
+                        vec![],
+                    ),
+                ],
+            ),
+        ],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+
+    // Split markers (P0.3).
+    assert_eq!(info.split.as_deref(), Some("config.arm64_v8a"));
+    assert_eq!(info.split_types.as_deref(), Some("base__abi"));
+    assert_eq!(info.is_feature_split, Some(false));
+
+    // Permissions with maxSdkVersion.
+    assert_eq!(
+        info.permissions[0].max_sdk,
+        Some(28),
+        "{:?}",
+        info.permissions
+    );
+
+    // Uses-features.
+    assert_eq!(info.uses_features.len(), 2);
+    assert_eq!(info.uses_features[0].required, Some(false));
+    assert_eq!(
+        info.uses_features[1].gl_es_version.as_deref(),
+        Some("0x00030001")
+    );
+
+    // Queries.
+    let q = info.queries.as_ref().expect("queries");
+    assert_eq!(q.packages, ["com.example.other"]);
+    assert_eq!(q.providers, ["com.example.cp"]);
+    assert_eq!(q.intents.len(), 1);
+    assert_eq!(q.intents[0].actions, ["android.intent.action.VIEW"]);
+    assert_eq!(q.intents[0].data.len(), 1);
+    assert_eq!(q.intents[0].data[0].scheme.as_deref(), Some("https"));
+
+    // Application attributes and meta-data (P0.2).
+    assert_eq!(info.application_label.as_deref(), Some("Example"));
+    assert_eq!(info.application.allow_backup, Some(false));
+    assert!(!info.effective_allow_backup());
+    assert_eq!(info.application.debuggable, Some(true));
+    assert_eq!(
+        info.application.network_security_config.as_deref(),
+        Some("@0x7f150002")
+    );
+    assert!(
+        !info.effective_uses_cleartext_traffic(),
+        "target 35 disables cleartext"
+    );
+    assert_eq!(info.application.meta_data.len(), 1);
+    assert_eq!(info.application.meta_data[0].name, "app.level");
+    assert_eq!(info.application.meta_data[0].value.as_deref(), Some("v1"));
+
+    // Activity: process, tri-state exported, filters with data.
+    let a = &info.activities[0];
+    assert_eq!(a.process.as_deref(), Some(":remote"));
+    assert_eq!(a.exported_explicit, None, "exported not declared");
+    assert!(a.exported, "inferred exported from filters");
+    assert_eq!(a.intent_filters.len(), 2);
+    assert_eq!(a.intent_filters[0].auto_verify, Some(true));
+    assert_eq!(a.intent_filters[0].priority, Some(10));
+    let f1 = &a.intent_filters[1];
+    assert_eq!(f1.categories.len(), 2, "categories preserved");
+    assert_eq!(f1.data.len(), 2, "two <data> elements stay separate");
+    assert_eq!(f1.data[0].scheme.as_deref(), Some("https"));
+    assert_eq!(f1.data[0].host.as_deref(), Some("example.com"));
+    assert_eq!(f1.data[0].port.as_deref(), Some("8443"));
+    assert_eq!(f1.data[0].path_prefix.as_deref(), Some("/app"));
+    assert_eq!(f1.data[1].mime_type.as_deref(), Some("image/*"));
+    assert_eq!(a.meta_data.len(), 1);
+    assert_eq!(a.meta_data[0].resource.as_deref(), Some("@0x7f020001"));
+
+    // Activity-alias: declared exported=false wins over the LAUNCHER filter.
+    let alias = &info.activity_aliases[0];
+    assert_eq!(
+        alias.target_activity.as_deref(),
+        Some("com.example.MainActivity")
+    );
+    assert_eq!(alias.component.exported_explicit, Some(false));
+    assert!(
+        !alias.component.exported,
+        "declared false beats filter inference"
+    );
+    assert_eq!(alias.component.intent_filters.len(), 1);
+
+    // Provider: declared exported, read permission.
+    let p = &info.providers[0];
+    assert_eq!(p.exported_explicit, Some(true));
+    assert!(p.exported);
+    assert_eq!(p.read_permission.as_deref(), Some("com.example.READ"));
+}
+
+/// Locket Widget 1.216.0 real-fixture: deep links, aliases, queries,
+/// application attrs — values cross-checked against androguard.
+#[test]
+fn locket_manifest_real_fixture_p0_fields() {
+    let Some(path) = corpus("com.locket.Locket.apk") else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let info = parse_from_apk(&path).expect("locket manifest should parse");
+
+    // Application attrs observed via androguard.
+    assert_eq!(info.application.uses_cleartext_traffic, Some(true));
+    assert_eq!(info.application.extract_native_libs, Some(false));
+    // The label is a resource reference; it must be captured (P0.4.1)
+    // and rendered as `@0x…` rather than dropped.
+    let label = info.application_label.as_ref().expect("label captured");
+    assert!(label.starts_with("@0x"), "unexpected label {label}");
+
+    // MainActivity deep links.
+    let main = info
+        .activities
+        .iter()
+        .find(|a| a.name == "com.locket.Locket.MainActivity")
+        .expect("MainActivity");
+    assert_eq!(main.exported_explicit, Some(true));
+    assert!(main.intent_filters.len() >= 4, "expected >=4 filters");
+    let f0 = &main.intent_filters[0];
+    assert_eq!(f0.auto_verify, Some(true));
+    let hosts: Vec<&str> = f0.data.iter().filter_map(|d| d.host.as_deref()).collect();
+    assert!(hosts.contains(&"locket.page.link"), "hosts {hosts:?}");
+    let f1 = &main.intent_filters[1];
+    let prefixes: Vec<&str> = f1
+        .data
+        .iter()
+        .filter_map(|d| d.path_prefix.as_deref())
+        .collect();
+    assert!(
+        prefixes.contains(&"/links") && prefixes.contains(&"/invites"),
+        "pathPrefixes {prefixes:?}"
+    );
+    let schemes: Vec<&str> = main
+        .intent_filters
+        .iter()
+        .flat_map(|f| f.data.iter().filter_map(|d| d.scheme.as_deref()))
+        .collect();
+    assert!(
+        schemes.contains(&"com.locket.locket"),
+        "custom scheme missing: {schemes:?}"
+    );
+
+    // Activity-alias with a LAUNCHER filter.
+    assert!(
+        info.activity_aliases
+            .iter()
+            .any(|a| a.target_activity.as_deref() == Some("com.locket.Locket.MainActivity")),
+        "expected an alias targeting MainActivity"
+    );
+
+    // Queries: known package-visibility declarations.
+    let q = info.queries.as_ref().expect("queries element");
+    assert!(
+        q.packages.iter().any(|p| p == "com.snapchat.android"),
+        "packages {:?}",
+        q.packages
+    );
+    assert!(
+        q.intents
+            .iter()
+            .any(|f| f.data.iter().any(|d| d.scheme.as_deref() == Some("https")))
+    );
+}
+
+/// Real bundletool split manifest, read out of the corpus XAPK without
+/// extracting it to the repository (nested ZIP via `asc_apk::ZipView`).
+#[test]
+fn split_manifest_real_fixture_marks_split() {
+    let Some(xapk) = corpus("Locket Widget_1.216.0_APKPure.xapk") else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let bytes = std::fs::read(&xapk).expect("read xapk");
+    let outer = asc_apk::ZipView::parse(bytes.as_slice()).expect("outer zip");
+    let entry = outer
+        .entry("config.arm64_v8a.apk")
+        .expect("config split present");
+    let split_bytes = outer.read_entry(&entry).expect("read split");
+    let inner = asc_apk::ZipView::parse(split_bytes.as_slice()).expect("inner zip");
+    let m = inner.entry("AndroidManifest.xml").expect("manifest entry");
+    let axml = inner.read_entry(&m).expect("read manifest");
+    let info = parse_manifest(axml.as_slice()).expect("parse split manifest");
+
+    assert_eq!(info.split.as_deref(), Some("config.arm64_v8a"));
+    assert_eq!(info.split_types.as_deref(), Some("base__abi"));
+    assert_eq!(info.application.has_code, Some(false));
+    assert!(
+        info.application
+            .meta_data
+            .iter()
+            .any(|md| md.name == "com.android.vending.derived.apk.id"),
+        "expected Play derived-apk-id meta-data"
+    );
+}
