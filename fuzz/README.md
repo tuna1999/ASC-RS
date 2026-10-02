@@ -119,17 +119,30 @@ the process. The outer restart loop notices the nonzero exit,
 increments the panic counter, and starts another invocation
 with a fresh `--seed`.
 
-### Replay saved crashes
+### Replay regression fixtures
 
 ```bash
-cargo run --release --bin fuzz-runner -- \
-    --target dummy --regress crashes
+cargo run --release --bin fuzz-runner --features apk -- \
+    --target fuzz_zip_directory --regress regress
 ```
 
-Replays every file under `crashes/` through the target. The
-runner exits 0 if every replay completed without panic; the
-panic hook aborts the process on the first panic, so the outer
-loop sees a nonzero exit and reports RED.
+Two directories with different jobs:
+
+- `regress/` — **committed** regression fixtures, replayed by CI.
+  Named `<target>-<fnv1a_hex16>.bin`, the same convention the
+  panic hook uses. Only files whose prefix matches `--target`
+  are replayed, so one target never ingests another target's
+  crash.
+- `crashes/` — where the panic hook writes **new** crashes while
+  fuzzing. Promote a crash to a regression by `git mv` into
+  `regress/` (the name already matches).
+
+Exit codes: `0` every fixture replayed clean, or the target has no
+committed fixture (a transparent `SKIP` line is printed); `2` the
+fixture directory or a fixture file cannot be read; `3` a fixture
+replayed as `SkippedDisabled` — the feature gate is off, so the
+replay exercised no parser and proves nothing. A panic aborts the
+process (nonzero exit), which is the regression actually firing.
 
 ## Mutation strategies
 
@@ -190,7 +203,7 @@ hook actually fires:
 `cargo run --release --bin fuzz-runner -- --target dummy
 --seconds 2` finds a crashing input within a few hundred
 iterations. The runner dumps it to `crashes/dummy-*.bin`.
-Re-running with `--regress crashes` aborts on the first
+Re-running with `--target dummy --regress crashes` aborts on the first
 replayed crash (panic hook → process abort → nonzero exit).
 
 ## Switching to cargo-fuzz later

@@ -12,6 +12,10 @@ Exit codes:
    1 = red   (one or more panics; see .\crashes\)
    2 = usage / setup error
 #>
+# Regression replay is separate: committed fixtures live in regress/
+# and are replayed directly (fuzz-runner --target T --regress regress);
+# this script only runs the mutation loop and writes NEW crashes to
+# .\crashes\.
 
 param(
     [Parameter(Mandatory = $true)][string]$Target,

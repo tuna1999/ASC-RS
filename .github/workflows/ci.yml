@@ -187,18 +187,27 @@ jobs:
             ./run.sh "$t" 10 all
           done
 
-      - name: Replay committed crash regressions (if any)
+      - name: Replay committed crash regressions
+        # `regress/` holds committed fixtures named
+        # `<target>-<fnv1a>.bin`; the runner replays only the files
+        # matching --target (SKIP + exit 0 when a target has none,
+        # exit 2/3/abort on unreadable fixture, disabled parser, or
+        # a firing regression). New crashes still land in crashes/.
         working-directory: fuzz
         run: |
           set -euo pipefail
+          TARGETS=$(./target/release/fuzz-runner --list | awk 'NR>1 {print $1}' | grep -v '^dummy$')
+          for t in $TARGETS; do
+            echo "=== fuzz regress: $t ==="
+            ./target/release/fuzz-runner --target "$t" --regress regress
+          done
+          # Every committed fixture must belong to a known target;
+          # otherwise it silently rots un-replayed.
           shopt -s nullglob
-          files=(crashes/*.bin)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "no committed crash regressions"
-            exit 0
-          fi
-          for c in "${files[@]}"; do
-            t=$(basename "$c" | cut -d- -f1)
-            echo "=== fuzz regress: $t ($c) ==="
-            ./target/release/fuzz-runner --target "$t" --regress crashes
+          for f in regress/*.bin; do
+            ft=$(basename "$f" | cut -d- -f1)
+            if ! printf '%s\n' $TARGETS | grep -qx "$ft"; then
+              echo "regress fixture $f does not match any target" >&2
+              exit 2
+            fi
           done
