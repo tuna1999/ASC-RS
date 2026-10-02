@@ -18,11 +18,12 @@ Targets are written against the **contract APIs** of sibling crates
 (`asc_dex::DexView`, `asc_bytecode::RefWalker`, `asc_apk::ZipView`,
 `asc_rebuild::rebuild`). Every target is registered unconditionally
 but its crate-coupling body is gated behind a per-crate Cargo
-feature — `dex`, `bytecode`, `apk`, `rebuild`, `decompile` — so
+feature — `dex`, `bytecode`, `apk`, `rebuild`, `resources`, `core`,
+`decompile`, `manifest` — so
 `cargo build` in `fuzz/` stays green while sibling agents finish
 landing the real APIs. With features OFF, each contract target
 reports `FuzzOutcome::SkippedDisabled` and the registry remains
-fully populated (17 entries). At integration, flip the matching
+fully populated (18 entries). At integration, flip the matching
 feature on:
 
 ```bash
@@ -242,6 +243,7 @@ when the matching crate lands.
 | `fuzz_elf`            | `asc-apk`     | `elf::parse_elf(&[u8]) -> Result<ElfInfo, &str>`                    |
 | `fuzz_signing`        | `asc-apk`     | `signing::scan`, `der::parse_cert`, `der::parse_pkcs7`              |
 | `fuzz_arsc`           | `asc-resources` | `asc_resources::parse`, `Table::render`, `describe_config`        |
+| `fuzz_axml`          | `asc-manifest` | `axml::parse_axml(&[u8])`, `axml::format_axml_text(&doc)`           |
 | `fuzz_apk_open`      | `asc-apk`     | `Apk::open(path)`, `entries()`, `read_entry_prefix`, `dex_entries()`, `signing_scan()` |
 | `fuzz_inspect`       | `asc-core`    | `run_inspect`, `run_native`, `run_cert`, `run_resources(path, query)` |
 | `fuzz_rebuild`        | `asc-rebuild` | `rebuild(view, type_idx) -> Result<Vec<u8>, Error>`                 |
@@ -261,7 +263,7 @@ it exists for self-test only.
 - `cargo run --release --bin fuzz-runner -- --target dummy
   --regress crashes` exits nonzero when replaying the saved
   crash.
-- All 17 seed subdirectories are populated by `gen-seeds`.
+- All 18 seed subdirectories are populated by `gen-seeds`.
 - `fuzz_disasm` ran 20 s (`--features decompile`, seed
   0xA5A5C0DEBEEF, 6 seeds) with no panic: 4243 executions,
   ok=67 / boundary=4176. `ok` counts inputs that got past the DEX

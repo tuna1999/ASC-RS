@@ -11,6 +11,7 @@ pub mod dummy;
 pub mod fuzz_annotations;
 pub mod fuzz_apk_open;
 pub mod fuzz_arsc;
+pub mod fuzz_axml;
 pub mod fuzz_class_data;
 pub mod fuzz_code_item;
 pub mod fuzz_dex041;

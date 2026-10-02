@@ -37,11 +37,12 @@ bytecode = ["dep:asc-bytecode"]
 apk = ["dep:asc-apk"]
 rebuild = ["dep:asc-rebuild"]
 resources = ["dep:asc-resources"]
+manifest = ["dep:asc-manifest"]
 core = ["dep:asc-core"]
 # `dex` comes along: the disassemble target resolves a fuzz-chosen
 # class descriptor through `asc_dex::DexView`.
 decompile = ["dep:asc-decompile", "dex"]
-all = ["dex", "bytecode", "apk", "rebuild", "resources", "core", "decompile"]
+all = ["dex", "bytecode", "apk", "rebuild", "resources", "core", "decompile", "manifest"]
 
 # -------- Optional path deps --------
 # These MUST stay optional so a missing/unbuilt sibling crate never breaks
@@ -56,6 +57,7 @@ asc-rebuild = { path = "../crates/asc-rebuild", optional = true }
 asc-resources = { path = "../crates/asc-resources", optional = true }
 asc-core = { path = "../crates/asc-core", optional = true }
 asc-decompile = { path = "../crates/asc-decompile", optional = true }
+asc-manifest = { path = "../crates/asc-manifest", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # fuzz-runner installs a SIGINT handler on Unix. Must come from

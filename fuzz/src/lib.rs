@@ -146,6 +146,11 @@ pub fn registry() -> Vec<TargetInfo> {
             default_seed: "arsc_table",
         },
         TargetInfo {
+            name: "fuzz_axml",
+            func: fuzz_targets::fuzz_axml::run,
+            default_seed: "axml_blob",
+        },
+        TargetInfo {
             name: "fuzz_rebuild",
             func: fuzz_targets::fuzz_rebuild::run,
             default_seed: "dex_minimal",

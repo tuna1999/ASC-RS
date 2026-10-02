@@ -29,6 +29,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_elf" => emit_elf(&dir)?,
             "fuzz_signing" => emit_signing(&dir)?,
             "fuzz_arsc" => emit_arsc(&dir)?,
+            "fuzz_axml" => emit_axml(&dir)?,
             "fuzz_apk_open" | "fuzz_inspect" => emit_apk_file(&dir)?,
             "fuzz_rebuild" => {
                 // Reuses the dex_minimal seed; nothing extra to emit
@@ -164,6 +165,15 @@ fn emit_arsc(dir: &Path) -> io::Result<usize> {
     t.extend(&pkg);
     let mut n = write_bytes(dir.join("arsc_empty_package.bin"), &t)?;
     n += write_bytes(dir.join("arsc_empty.bin"), b"")?;
+    Ok(n)
+}
+
+/// Seed corpus for `fuzz_axml`: one minimal valid document (pool + one
+/// plain element) and one AOSP-shaped document with a namespace event
+/// and typed attributes.
+fn emit_axml(dir: &Path) -> io::Result<usize> {
+    let mut n = write_bytes(dir.join("00_axml_minimal.bin"), &axml_minimal())?;
+    n += write_bytes(dir.join("01_axml_ns_attrs.bin"), &axml_ns_attrs())?;
     Ok(n)
 }
 
@@ -346,6 +356,162 @@ pub fn zip_multi_entry() -> Vec<u8> {
     v.extend_from_slice(&0u32.to_le_bytes());
     v.extend_from_slice(&0u16.to_le_bytes());
     v
+}
+
+/// Minimal valid binary AXML: root chunk, one-string UTF-16 pool, a
+/// single START/END element pair. Mirrors the byte layout asserted by
+/// `asc-manifest`'s own fixture builder.
+pub fn axml_minimal() -> Vec<u8> {
+    let pool = string_pool_utf16(&["item"]);
+    let start = element_chunk(0xFFFF_FFFF, 0, &[]);
+    let end = end_element_chunk(0xFFFF_FFFF, 0);
+    seal_root(pool, start, end)
+}
+
+/// AOSP-shaped document: namespace event + `<rules debug="true"
+/// android:backups="0x10">` with typed attributes, a nested child, and
+/// the matching END_NAMESPACE.
+pub fn axml_ns_attrs() -> Vec<u8> {
+    const ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
+    let strings = [
+        "rules",
+        "domain-config",
+        "debug",
+        "true",
+        "backups",
+        ANDROID_NS,
+        "android",
+    ];
+    let pool = string_pool_utf16(&strings);
+    let (name_rules, name_child) = (0u32, 1u32);
+    let attrs = [
+        // debug="true" — TYPE_STRING with rawValue + data set.
+        (0xFFFF_FFFF, 2u32, 3u32, 0x03u8, 3u32),
+        // android:backups=0x10 — TYPE_INT_HEX under the android NS.
+        (5u32, 4u32, 0xFFFF_FFFF, 0x11u8, 0x10u32),
+    ];
+    let start = element_chunk(0xFFFF_FFFF, name_rules, &attrs);
+    let child = element_chunk(0xFFFF_FFFF, name_child, &[]);
+    let end_child = end_element_chunk(0xFFFF_FFFF, name_child);
+    let end = end_element_chunk(0xFFFF_FFFF, name_rules);
+    // START/END_NAMESPACE bodies: prefix idx 6 ("android"), uri idx 5.
+    let ns = ns_chunk(0x0100, 6, 5);
+    let ns_end = ns_chunk(0x0101, 6, 5);
+    let mut doc = seal_root(pool, ns, start);
+    doc.extend_from_slice(&child);
+    doc.extend_from_slice(&end_child);
+    doc.extend_from_slice(&end);
+    doc.extend_from_slice(&ns_end);
+    let total = doc.len() as u32;
+    doc[4..8].copy_from_slice(&total.to_le_bytes());
+    doc
+}
+
+/// Root + string pool + one leading inner chunk; caller appends the rest
+/// and patches the root size. Returned header already carries the size
+/// of what is present so intermediate states stay parseable-by-parts.
+fn seal_root(pool: Vec<u8>, a: Vec<u8>, b: Vec<u8>) -> Vec<u8> {
+    let mut doc = Vec::new();
+    doc.extend_from_slice(&0x0003u16.to_le_bytes()); // RES_XML_TYPE
+    doc.extend_from_slice(&0x0008u16.to_le_bytes()); // headerSize
+    doc.extend_from_slice(&0u32.to_le_bytes()); // size (patched later)
+    doc.extend_from_slice(&pool);
+    doc.extend_from_slice(&a);
+    doc.extend_from_slice(&b);
+    let total = doc.len() as u32;
+    doc[4..8].copy_from_slice(&total.to_le_bytes());
+    doc
+}
+
+/// UTF-16 string-pool chunk, the format `asc_manifest` fixtures use.
+fn string_pool_utf16(strings: &[&str]) -> Vec<u8> {
+    let mut data: Vec<u8> = Vec::new();
+    let mut offsets = Vec::with_capacity(strings.len());
+    for s in strings {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        offsets.push(data.len() as u32);
+        data.extend_from_slice(&(units.len() as u16).to_le_bytes());
+        for u in units {
+            data.extend_from_slice(&u.to_le_bytes());
+        }
+        data.extend_from_slice(&0u16.to_le_bytes()); // NUL terminator
+    }
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let strings_start = 28 + strings.len() * 4;
+    let size = strings_start + data.len();
+    let mut pool = Vec::with_capacity(size);
+    pool.extend_from_slice(&0x0001u16.to_le_bytes()); // RES_STRING_POOL_TYPE
+    pool.extend_from_slice(&28u16.to_le_bytes()); // headerSize
+    pool.extend_from_slice(&(size as u32).to_le_bytes());
+    pool.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+    pool.extend_from_slice(&0u32.to_le_bytes()); // flags: UTF-16
+    pool.extend_from_slice(&(strings_start as u32).to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    for off in offsets {
+        pool.extend_from_slice(&off.to_le_bytes());
+    }
+    pool.extend_from_slice(&data);
+    pool
+}
+
+/// START_ELEMENT chunk with `(ns, name, raw, type, data)` attributes.
+fn element_chunk(ns: u32, name: u32, attrs: &[(u32, u32, u32, u8, u32)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0102u16.to_le_bytes()); // START_ELEMENT
+    out.extend_from_slice(&16u16.to_le_bytes()); // headerSize
+    let size_off = out.len();
+    out.extend_from_slice(&0u32.to_le_bytes()); // size (patched)
+    out.extend_from_slice(&1u32.to_le_bytes()); // lineNumber
+    out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // comment
+    out.extend_from_slice(&ns.to_le_bytes());
+    out.extend_from_slice(&name.to_le_bytes());
+    out.extend_from_slice(&20u16.to_le_bytes()); // attributeStart
+    out.extend_from_slice(&20u16.to_le_bytes()); // attributeSize
+    out.extend_from_slice(&(attrs.len() as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // idIndex
+    out.extend_from_slice(&0u16.to_le_bytes()); // classIndex
+    out.extend_from_slice(&0u16.to_le_bytes()); // styleIndex
+    for (a_ns, a_name, raw, ty, data) in attrs {
+        out.extend_from_slice(&a_ns.to_le_bytes());
+        out.extend_from_slice(&a_name.to_le_bytes());
+        out.extend_from_slice(&raw.to_le_bytes());
+        out.extend_from_slice(&8u16.to_le_bytes()); // typedValue.size
+        out.push(0); // res0
+        out.push(*ty); // dataType
+        out.extend_from_slice(&data.to_le_bytes());
+    }
+    let size = out.len() as u32;
+    out[size_off..size_off + 4].copy_from_slice(&size.to_le_bytes());
+    out
+}
+
+/// END_ELEMENT chunk (ns + name at chunk_start + 16).
+fn end_element_chunk(ns: u32, name: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0103u16.to_le_bytes()); // END_ELEMENT
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(&24u32.to_le_bytes()); // size
+    out.extend_from_slice(&1u32.to_le_bytes()); // lineNumber
+    out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // comment
+    out.extend_from_slice(&ns.to_le_bytes());
+    out.extend_from_slice(&name.to_le_bytes());
+    out
+}
+
+/// Namespace event chunk (0x0100 start / 0x0101 end): prefix + uri.
+fn ns_chunk(kind: u16, prefix: u32, uri: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&kind.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(&24u32.to_le_bytes()); // size
+    out.extend_from_slice(&1u32.to_le_bytes()); // lineNumber
+    out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // comment
+    out.extend_from_slice(&prefix.to_le_bytes());
+    out.extend_from_slice(&uri.to_le_bytes());
+    out
 }
 
 // =====================================================================

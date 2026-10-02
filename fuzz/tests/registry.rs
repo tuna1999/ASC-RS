@@ -72,6 +72,7 @@ const CONTRACT_TARGETS: &[(&str, &str)] = &[
     ("fuzz_signing", "apk"),
     ("fuzz_apk_open", "apk"),
     ("fuzz_arsc", "resources"),
+    ("fuzz_axml", "manifest"),
     ("fuzz_rebuild", "rebuild"),
     ("fuzz_inspect", "core"),
     ("fuzz_disasm", "decompile"),
@@ -85,6 +86,7 @@ fn feature_on(f: &str) -> bool {
         "rebuild" => cfg!(feature = "rebuild"),
         "resources" => cfg!(feature = "resources"),
         "core" => cfg!(feature = "core"),
+        "manifest" => cfg!(feature = "manifest"),
         "decompile" => cfg!(feature = "decompile"),
         other => panic!("unknown feature {other}"),
     }
