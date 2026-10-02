@@ -535,6 +535,34 @@ fn forged_eocd_in_comment_does_not_hide_signed_dex_entries() {
     );
 }
 
+/// A forgery that *self-terminates* — placed as the last 22 bytes of the
+/// comment with its own `comment_len` = 0 — satisfies
+/// `pos + 22 + comment_len == len` and so passes the termination check.
+/// Pinned as a documented residual rather than left implicit: the engine
+/// returns an empty directory, which is what Python's `zipfile` and
+/// .NET's `ZipFile` also do on the same bytes. Matching mainstream ZIP
+/// readers is deliberate; see `locate_eocd`.
+#[test]
+fn self_terminating_forged_eocd_matches_mainstream_parsers() {
+    let mut b = ZipBuilder::new();
+    b.add_stored(
+        "classes.dex",
+        vec![0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00],
+    );
+    let mut comment = vec![b'A'; 64];
+    comment.extend(forged_eocd_record(0)); // forged record's own comment_len is 0
+    b.set_comment(&comment);
+    let bytes = b.build();
+
+    let view = parse_view(&bytes).expect("a self-terminating EOCD is still a valid EOCD");
+    assert_eq!(
+        view.dex_entries().len(),
+        0,
+        "known residual: we agree with zipfile / .NET here rather than \
+         applying a non-standard CD heuristic"
+    );
+}
+
 #[test]
 fn corrupt_real_eocd_is_reported_not_guessed() {
     // Damage the real EOCD's entry count so no candidate validates.

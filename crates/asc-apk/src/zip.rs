@@ -256,8 +256,17 @@ pub(crate) fn parse_directory(buf: &[u8]) -> Result<Vec<DexEntry>, ApkError> {
 /// Info-ZIP, `java.util.zip.ZipFile` and Python's `zipfile` apply.
 /// The Python oracle's `mm.rfind(_EOCD_SIG, …)` does not, so the engine
 /// is deliberately stricter than the oracle here: on a well-formed
-/// archive the two agree, and on a hostile one the engine keeps reading
-/// the real directory instead of silently reporting zero DEX files.
+/// archive the two agree.
+///
+/// Residual, measured: a forgery placed as the *last* 22 bytes of the
+/// comment, with its own `comment_len` set to 0, also satisfies the
+/// termination check, and this parser then reads zero entries — as do
+/// Python's `zipfile` and .NET's `ZipFile` on the same bytes. We match
+/// mainstream ZIP readers here rather than carrying a stricter,
+/// non-standard central-directory heuristic that would risk rejecting
+/// real archives (trailing data, self-extracting prefixes, comment
+/// layouts we have not seen). Adversarial ZIPs are hostile input by
+/// definition: prefer a tool that reports the mismatch.
 pub(crate) fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
     if len < EOCD_FIXED_LEN {
         return Err(ApkError::NotAZip);
