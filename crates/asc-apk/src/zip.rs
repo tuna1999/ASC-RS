@@ -245,8 +245,19 @@ pub(crate) fn parse_directory(buf: &[u8]) -> Result<Vec<DexEntry>, ApkError> {
 }
 
 /// Locate the EOCD signature by scanning backwards from EOF within the
-/// PKWARE-mandated window. Mirrors the Python oracle's
-/// `mm.rfind(_EOCD_SIG, max(0, len(mm) - 65536 - 22))`.
+/// PKWARE-mandated window.
+///
+/// Every `PK\x05\x06` candidate is validated before it is accepted: the
+/// record that ends the archive is the one whose 22-byte fixed body plus
+/// its declared comment length lands exactly on EOF. A bare signature
+/// match is not enough — `PK\x05\x06` bytes can legitimately occur
+/// inside the archive comment, and taking one of those makes us read a
+/// central directory that does not exist. This is the same check
+/// Info-ZIP, `java.util.zip.ZipFile` and Python's `zipfile` apply.
+/// The Python oracle's `mm.rfind(_EOCD_SIG, …)` does not, so the engine
+/// is deliberately stricter than the oracle here: on a well-formed
+/// archive the two agree, and on a hostile one the engine keeps reading
+/// the real directory instead of silently reporting zero DEX files.
 pub(crate) fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
     if len < EOCD_FIXED_LEN {
         return Err(ApkError::NotAZip);
@@ -264,8 +275,9 @@ pub(crate) fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
         // A valid EOCD needs its full 22-byte fixed record on disk; a
         // signature with fewer bytes behind it is garbage, not an EOCD
         // (fuzz-found: previously the field reads at eocd_pos+8..20
-        // indexed past EOF and panicked).
-        if buf[i..i + 4] == target {
+        // indexed past EOF and panicked). It must additionally be the
+        // record that terminates the file.
+        if buf[i..i + 4] == target && eocd_terminates_archive(buf, i, len) {
             return Ok(i);
         }
         if i == start {
@@ -274,6 +286,14 @@ pub(crate) fn locate_eocd(buf: &[u8], len: usize) -> Result<usize, ApkError> {
         i -= 1;
     }
     Err(ApkError::NotAZip)
+}
+
+/// `true` iff the 22-byte EOCD fixed record at `pos` plus its declared
+/// comment length ends exactly at `len`.
+#[inline]
+fn eocd_terminates_archive(buf: &[u8], pos: usize, len: usize) -> bool {
+    let comment_len = u16::from_le_bytes([buf[pos + 20], buf[pos + 21]]) as usize;
+    pos + EOCD_FIXED_LEN + comment_len == len
 }
 
 /// Resolve ZIP64 extended-information fields for the three size/offset
@@ -369,9 +389,15 @@ fn walk_extra(
 /// Resolve the local file header for an entry and return the byte offset
 /// where the entry data begins.
 ///
-/// The local header carries its own (name_len, extra_len) pair, which may
-/// differ from the central directory. The returned offset is the start of
-/// the compressed data payload.
+/// Only the local header's *geometry* is trusted — `name_len` and
+/// `extra_len`. Its method, CRC and sizes are deliberately ignored:
+/// APPNOTE 4.4.4 bit 3 requires them to be zero when a data descriptor
+/// is used, and 6.3.10 lets the local extra field differ in size from
+/// the central one, so cross-checking them would reject valid archives.
+/// `read_entry_inner` takes the compression method and both sizes from
+/// the central directory, which is the authority on content. This is
+/// exactly what OpenJDK's `ZipFile.Source.initDataOffset` does. (Audit
+/// F07: the absence of a local-vs-central cross-check is intentional.)
 pub(crate) fn resolve_local_data_offset(buf: &[u8], entry: &DexEntry) -> Result<u64, ApkError> {
     let lho = entry.local_header_offset as usize;
     if lho

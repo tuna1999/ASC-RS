@@ -200,7 +200,11 @@ fn component_descriptor(pkg: Option<&str>, name: &str) -> String {
 
 fn analyze_dex(name: &str, bytes: &[u8], names: &mut Vec<String>) -> DexInfo {
     let before = names.len();
-    let _ = collect_classes_from_bytes(bytes, None, names);
+    // A class-collection failure is not cosmetic: the descriptors left
+    // in `names` are then an unknown subset, so every downstream
+    // manifest cross-check built on them is unsound. Surface it as a
+    // coverage note (audit F05).
+    let collect_err = collect_classes_from_bytes(bytes, None, names).err();
     let mut info = DexInfo {
         name: name.to_string(),
         size: bytes.len(),
@@ -209,7 +213,7 @@ fn analyze_dex(name: &str, bytes: &[u8], names: &mut Vec<String>) -> DexInfo {
         sha1_ok: None,
         class_count: names.len() - before,
         data_end: None,
-        coverage_note: None,
+        coverage_note: collect_err.map(|e| format!("class collection incomplete: {e}")),
         tail_bytes: None,
         tail_entropy: None,
     };
@@ -233,7 +237,11 @@ fn analyze_dex(name: &str, bytes: &[u8], names: &mut Vec<String>) -> DexInfo {
             let tail = &bytes[end..];
             info.tail_entropy = entropy(&tail[..tail.len().min(SAMPLE_CAP)]);
         }
-        DataEnd::Unknown(why) => info.coverage_note = Some(why.to_string()),
+        // Do not overwrite a class-collection failure: that one makes
+        // the manifest cross-check unsound, which is the stronger claim.
+        DataEnd::Unknown(why) => {
+            info.coverage_note.get_or_insert_with(|| why.to_string());
+        }
     }
     info
 }
@@ -297,7 +305,19 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
         };
         let b = bytes.as_slice();
         virbox_string |= b.windows(6).any(|w| w == b"Virbox");
-        dex.push(analyze_dex(&e.name, b, &mut descriptors));
+        let info = analyze_dex(&e.name, b, &mut descriptors);
+        // A partial class collection is a hard error for this report:
+        // `complete` must not stay true and the manifest cross-check
+        // must not present an unknown subset as a definite "missing
+        // component" (audit F05).
+        if let Some(note) = info
+            .coverage_note
+            .as_deref()
+            .filter(|n| n.starts_with("class collection incomplete: "))
+        {
+            err(format!("{}: {note}", e.name));
+        }
+        dex.push(info);
     }
 
     let mut manifest = None;

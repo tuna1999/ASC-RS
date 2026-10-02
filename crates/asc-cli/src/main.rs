@@ -486,6 +486,14 @@ fn run_findrefs_cmd(
         for e in &report.errors {
             eprintln!("warning: scan incomplete: {e}");
         }
+    } else {
+        // `complete` is false only for a *failed* scan. An entry we
+        // declined to decode (a `classes*.dex` whose bytes are not a
+        // DEX) leaves the run "complete" but partially covered, and
+        // has to surface somewhere other than the exit code.
+        for e in &report.errors {
+            eprintln!("warning: {e}");
+        }
     }
     ExitCode::from(if report.complete {
         EXIT_OK

@@ -667,6 +667,13 @@ impl AscApp {
             Command::GlobalSearch | Command::RunSearch => {
                 self.focus_search = true;
                 if matches!(cmd, Command::RunSearch)
+                    // One search lane. There is no engine-side
+                    // cancellation, so a second submit would leave the
+                    // first worker running to completion for nothing
+                    // (audit F09). Every submit path — the Run button,
+                    // Enter-on-lost-focus, the toolbar Enter — lands
+                    // here, so this one check bounds them all.
+                    && !self.tasks.findrefs_running()
                     && let Some(session) = &self.session
                     && let Some(query) = self.search.query()
                 {

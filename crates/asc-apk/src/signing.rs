@@ -126,11 +126,20 @@ pub fn scan(buf: &[u8]) -> SigningScan {
             out.block = BlockStatus::Malformed(format!("more than {MAX_PAIRS} pairs"));
             return out;
         }
+        // A pair header is `u64 len | u32 id | value`: 8 bytes of length
+        // plus at least 4 bytes of id. Anything shorter cannot be read
+        // and must not be subtracted against (audit F02: `pairs_end - pos
+        // - 8` underflowed when 1..7 bytes were left).
+        let Some(rem) = pairs_end.checked_sub(pos + 8) else {
+            out.block =
+                BlockStatus::Malformed(format!("pair header overruns block at offset {pos}"));
+            return out;
+        };
         let Some(len) = u64_at(buf, pos) else {
             out.block = BlockStatus::Malformed("truncated pair header".into());
             return out;
         };
-        let rem = (pairs_end - pos - 8) as u64;
+        let rem = rem as u64;
         if len < 4 || len > rem {
             out.block =
                 BlockStatus::Malformed(format!("pair length {len} invalid at offset {pos}"));
@@ -337,6 +346,44 @@ mod tests {
         b.extend(cd.to_le_bytes());
         b.extend([0u8; 2]);
         b
+    }
+
+    /// `apk()` plus `extra` junk bytes at the tail of the pairs region
+    /// (audit F02: fewer than 8 bytes left before the trailing size
+    /// field, so the next pair header cannot be read).
+    fn apk_with_pair_tail(pairs: &[(u32, Vec<u8>)], extra: usize) -> Vec<u8> {
+        let mut p = Vec::new();
+        for (id, v) in pairs {
+            p.extend(((v.len() + 4) as u64).to_le_bytes());
+            p.extend(id.to_le_bytes());
+            p.extend(v);
+        }
+        p.extend(vec![0x5au8; extra]);
+        let size = (p.len() + 24) as u64;
+        let mut b = vec![0u8; 40];
+        b.extend(size.to_le_bytes());
+        b.extend(&p);
+        b.extend(size.to_le_bytes());
+        b.extend(MAGIC);
+        let cd = b.len() as u32;
+        b.extend(0x0605_4b50u32.to_le_bytes());
+        b.extend([0u8; 12]);
+        b.extend(cd.to_le_bytes());
+        b.extend([0u8; 2]);
+        b
+    }
+
+    #[test]
+    fn pair_region_with_fewer_than_eight_bytes_left_is_malformed() {
+        for extra in 1..=7usize {
+            let buf = apk_with_pair_tail(&[(0x1234, vec![0; 4])], extra);
+            let s = scan(&buf);
+            assert!(
+                matches!(s.block, BlockStatus::Malformed(_)),
+                "tail={extra}: expected Malformed, got {:?}",
+                s.block
+            );
+        }
     }
 
     #[test]

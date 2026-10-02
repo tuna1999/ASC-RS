@@ -416,6 +416,144 @@ fn eocd_with_trailing_comment_parses() {
 }
 
 // =========================================================================
+// Forged EOCD inside the archive comment (audit F01)
+// =========================================================================
+
+/// A complete-looking EOCD record (22 bytes) that claims "0 entries,
+/// empty central directory". Placed inside the real archive comment it
+/// cannot be distinguished from a valid record by a signature-only scan.
+fn forged_eocd_record(cd_off: u32) -> Vec<u8> {
+    let mut v = 0x0605_4b50u32.to_le_bytes().to_vec();
+    common::write_u16(&mut v, 0); // disk number
+    common::write_u16(&mut v, 0); // disk with CD
+    common::write_u16(&mut v, 0); // entries on this disk
+    common::write_u16(&mut v, 0); // entries total  <-- lies
+    common::write_u32(&mut v, 0); // CD size        <-- lies
+    common::write_u32(&mut v, cd_off); // CD offset
+    common::write_u16(&mut v, 0); // comment length
+    v
+}
+
+#[test]
+fn forged_eocd_in_comment_does_not_hide_dex_entries() {
+    let mut b = ZipBuilder::new();
+    b.add_stored(
+        "classes.dex",
+        vec![0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00],
+    );
+    // Pad so the forged record sits well inside the comment window and
+    // the real EOCD is followed by enough bytes for a full record read.
+    let mut comment = vec![b'A'; 40];
+    comment.extend(forged_eocd_record(0));
+    comment.extend(vec![b'B'; 40]);
+    b.set_comment(&comment);
+    let bytes = b.build();
+
+    let view = parse_view(&bytes).expect("archive with a comment must still parse");
+    assert_eq!(
+        view.dex_entries().len(),
+        1,
+        "forged EOCD in the comment must not hide the real classes.dex"
+    );
+    assert_eq!(view.entry_count(), 1);
+}
+
+#[test]
+fn forged_eocd_in_comment_does_not_hide_zip64_dex_entries() {
+    let mut b = ZipBuilder::new();
+    b.add_stored(
+        "classes.dex",
+        vec![0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00],
+    );
+    b.force_zip64();
+    let mut comment = vec![b'A'; 40];
+    comment.extend(forged_eocd_record(0));
+    comment.extend(vec![b'B'; 40]);
+    b.set_comment(&comment);
+    let bytes = b.build();
+
+    let view = parse_view(&bytes).expect("ZIP64 archive with a comment must still parse");
+    assert_eq!(view.dex_entries().len(), 1, "ZIP64 path must be unaffected");
+}
+
+#[test]
+fn forged_eocd_in_comment_does_not_hide_signed_dex_entries() {
+    let mut b = ZipBuilder::new();
+    b.add_stored(
+        "classes.dex",
+        vec![0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00],
+    );
+    // A minimal APK Signing Block spliced between the last local entry
+    // and the central directory, as v2/v3 signing produces.
+    let cd_off = b.entries[0].data.len() as u64 + 30 + "classes.dex".len() as u64;
+    let mut pairs: Vec<u8> = Vec::new();
+    common::write_u64(&mut pairs, 8); // pair length: 4-byte id + 4 bytes value
+    common::write_u32(&mut pairs, 0x7109_871a); // v2 block id
+    common::write_u32(&mut pairs, 0);
+    let size = (pairs.len() + 24) as u64;
+    let mut sig_block = size.to_le_bytes().to_vec();
+    sig_block.extend_from_slice(&pairs);
+    sig_block.extend(size.to_le_bytes().to_vec());
+    sig_block.extend_from_slice(b"APK Sig Block 42");
+
+    let mut comment = vec![b'A'; 40];
+    comment.extend(forged_eocd_record(0));
+    comment.extend(vec![b'B'; 40]);
+    b.set_comment(&comment);
+    let bytes = b.build();
+    // Splice the signing block in at the real central-directory offset.
+    let mut archive = bytes[..cd_off as usize].to_vec();
+    archive.extend_from_slice(&sig_block);
+    archive.extend_from_slice(&bytes[cd_off as usize..]);
+    // The central-directory offset shifted by the block we just inserted.
+    // The *real* EOCD is the one the comment length pins to EOF; the
+    // forged record lives inside the comment and is not it.
+    let comment_len = 40 + 22 + 40;
+    let eocd = archive.len() - 22 - comment_len;
+    assert_eq!(
+        &archive[eocd..eocd + 4],
+        &0x0605_4b50u32.to_le_bytes(),
+        "real EOCD must sit where the comment length says"
+    );
+    let cd_field = eocd + 16;
+    let real_cd_off = u32::from_le_bytes(archive[cd_field..cd_field + 4].try_into().unwrap())
+        + sig_block.len() as u32;
+    archive[cd_field..cd_field + 4].copy_from_slice(&real_cd_off.to_le_bytes());
+
+    let view = parse_view(&archive).expect("signed archive with a comment must still parse");
+    assert_eq!(
+        view.dex_entries().len(),
+        1,
+        "forged EOCD in the comment must not hide a signed APK's classes.dex"
+    );
+    // The signing block itself must still be discoverable.
+    let scan = asc_apk::signing::scan(&archive);
+    assert!(
+        matches!(scan.block, asc_apk::signing::BlockStatus::Present { .. }),
+        "signing block must survive: {:?}",
+        scan.block
+    );
+}
+
+#[test]
+fn corrupt_real_eocd_is_reported_not_guessed() {
+    // Damage the real EOCD's entry count so no candidate validates.
+    let mut b = ZipBuilder::new();
+    b.add_stored("classes.dex", vec![1, 2, 3, 4]);
+    b.set_comment(b"tail");
+    let mut bytes = b.build();
+    let len = bytes.len();
+    let eocd = len - 4 - 22;
+    // Point the real EOCD at a central directory far past EOF.
+    bytes[eocd + 16..eocd + 20].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
+    let err = parse_view(&bytes).expect_err("damaged EOCD must be an error, not a guess");
+    assert!(
+        matches!(err, ApkError::Truncated(_) | ApkError::BadSignature { .. }),
+        "got {err:?}"
+    );
+}
+
+// =========================================================================
 // ZIP64
 // =========================================================================
 

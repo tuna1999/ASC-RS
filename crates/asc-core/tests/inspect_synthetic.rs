@@ -503,6 +503,51 @@ fn corrupted_checksum_is_reported_and_sha1_still_verifies() {
     assert_eq!(r.packer.packed, None);
 }
 
+/// A `class_def` whose `class_idx` points past the type pool. The DEX
+/// parses, but class collection fails partway — the descriptors it did
+/// collect are an unknown subset, so `inspect` must not present the
+/// manifest cross-check built on them as definite (audit F05).
+#[test]
+fn partial_class_collection_marks_the_report_incomplete() {
+    let n = 3usize;
+    let type_ids_off = STRING_IDS_OFF + n * 4;
+    let class_defs_off = type_ids_off + n * 4;
+    // The first class_def is the one we damage, so `class_count == 0`
+    // is the *observed* count; the point of the test is that a zero
+    // here can never be read as "this DEX defines no classes".
+    let mut broken = build_dex(&Spec::with(&[
+        "Lcom/example/A;",
+        "Lcom/example/B;",
+        "Lcom/example/C;",
+    ]));
+    broken[class_defs_off..class_defs_off + 4].copy_from_slice(&0xFFFFu32.to_le_bytes());
+    let path = write_apk("partial_classes", &[("classes.dex", &broken)]);
+    let r = run_inspect(&path).unwrap();
+    remove(&path);
+
+    let dex = &r.dex[0];
+    assert_eq!(dex.class_count, 0, "no class_def is readable");
+    let note = dex
+        .coverage_note
+        .as_deref()
+        .expect("partial class collection must be reported");
+    assert!(
+        note.contains("class collection incomplete"),
+        "coverage_note must name the failure, got {note:?}"
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.contains("class collection incomplete")),
+        "the aggregated error list must carry it too: {:?}",
+        r.errors
+    );
+    assert!(
+        !r.complete,
+        "a partial class list cannot be a complete survey"
+    );
+}
+
 #[test]
 fn garbage_input_never_panics() {
     let cases: Vec<(&str, Vec<u8>)> = vec![

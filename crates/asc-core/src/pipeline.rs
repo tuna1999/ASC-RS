@@ -99,6 +99,10 @@ pub enum CoreError {
     /// [`crate::budget`]). Structured, recoverable-by-caller: no
     /// panic, no abort.
     MemoryBudget(String),
+    /// A `getclass` worker thread unwound. The entries those workers
+    /// owned were never scanned, so their absence of the target class
+    /// is unproven — this must never be reported as `ClassNotFound`.
+    WorkerPanicked(String),
     /// The binary's CLI received bad input (e.g. neither `--class` nor
     /// `<name>` for `findrefs method`).
     Usage(String),
@@ -119,6 +123,7 @@ impl fmt::Display for CoreError {
             }
             CoreError::Usage(m) => write!(f, "{m}"),
             CoreError::MemoryBudget(m) => write!(f, "{m}"),
+            CoreError::WorkerPanicked(m) => write!(f, "{m}"),
         }
     }
 }
@@ -428,10 +433,22 @@ fn scan_entry_bytes(
         };
         run_engine_for_view(entry_name, &view, query, paranoid, xor, report);
     } else {
-        // Not a DEX; skip silently (the oracle's `_inflate_and_hit`
-        // also rejects non-`dex\n0..\0` magic). We do not record this
-        // as an error — non-DEX entries with a `.dex` suffix are
-        // extremely rare in real APKs.
+        // Not a DEX. The oracle is *louder* here, not compatible:
+        // `_findrefs_worker` (apk_handler.py:290-308) hands the raw
+        // buffer to `tinydex.DEX.parse`, which unpacks u32s at fixed
+        // offsets with no magic check, so a bogus entry aborts the
+        // whole oracle run with exit 1 (main.py:179-184).
+        //
+        // Record the skip, but do NOT flip `complete`: an entry we
+        // deliberately declined to decode is not a failed scan, and
+        // exit 2 must keep meaning "the scan ran and hit an error".
+        // The error list is what the CLI prints on stderr and what
+        // JSON carries, so a user (or a script) can see that the
+        // archive was not fully covered. (Audit F06.)
+        report.errors.push(SearchError::from_parse(
+            entry_name,
+            "skipped: entry is not a DEX (bad magic) and was not scanned",
+        ));
     }
 }
 
@@ -448,6 +465,13 @@ fn run_engine_for_view(
     let engine_report = engine_find_refs(view, query);
     if !engine_report.errors.is_empty() {
         report.complete = false;
+    }
+    // Engine errors belong in BOTH views: the per-DEX `DexResults.errors`
+    // and the report-wide `SearchReport.errors` the CLI prints as
+    // warnings. Recording them only per-DEX left the aggregated list
+    // empty while `complete` was already `false` (audit F04).
+    for e in &engine_report.errors {
+        report.errors.push(SearchError::from_engine(dex_name, e));
     }
     let decoded = paranoid
         .map(|(deobs, pattern)| crate::paranoid::decoded_hits(view, deobs, pattern))
@@ -874,7 +898,11 @@ fn find_defining_dex(
         }
     };
 
-    let _outcome = pool.run(entries, scan_for_class);
+    let outcome = pool.run(entries, scan_for_class);
+    // A worker that unwound took the entry it owned with it: that entry
+    // is *unscanned*, not proven to lack the class. Only an outcome with
+    // no panics may fall through to "not found" (audit F03).
+    let panicked_workers = outcome.panicked;
 
     // Phase 2: the pool has joined, so this run's workers hold no
     // guards anymore. Rescan the deferred entries sequentially — at
@@ -900,8 +928,28 @@ fn find_defining_dex(
                     continue; // cannot beat the recorded winner
                 }
             }
+            // Budget refusal stays a hard `?` (above): it means some
+            // OTHER task holds the bytes, so the answer cannot be
+            // proven. A *read* failure is this entry's own, and phase 1
+            // records it and moves on (`scan_for_class`, above).
+            // Propagating it here instead would abandon every entry
+            // still queued behind it, making the outcome depend on
+            // which phase happened to pick the broken entry up.
+            // Budget refusal stays a hard `?` (above): it means some
+            // OTHER task holds the bytes, so the answer cannot be
+            // proven. A *read* failure is this entry's own, and phase 1
+            // records it and moves on (`scan_for_class`, above).
+            // Propagating it here instead would abandon every entry
+            // still queued behind it, making the outcome depend on
+            // which phase happened to pick the broken entry up.
             let _guard = crate::budget::acquire(budget, entry.uncompressed_size as usize)?;
-            let eb = apk.read_entry(entry).map_err(CoreError::from)?;
+            let eb = match apk.read_entry(entry) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = first_err.set(e.into());
+                    continue;
+                }
+            };
             match scan_one_for_class(&entry.name, eb.as_slice(), target) {
                 Ok(Some(mut hit)) => {
                     hit.bytes = eb.into_vec();
@@ -927,6 +975,12 @@ fn find_defining_dex(
         .map(|(_, hit)| hit);
     match winner {
         Some(w) => Ok(w),
+        // A winner is a real hit: it outranks any recorded error, exactly
+        // as the budget-deferral fix established.
+        None if panicked_workers > 0 => Err(CoreError::WorkerPanicked(format!(
+            "{panicked_workers} getclass worker(s) panicked; the scan is incomplete \
+             and Class {target} cannot be ruled out"
+        ))),
         None => Err(
             match Arc::try_unwrap(first_err)
                 .ok()
@@ -1376,7 +1430,7 @@ fn collect_from_view(
         let def = view
             .class_def(i)
             .map_err(|e| CoreError::Usage(format!("bad class_defs range: {e}")))?;
-        if def.class.0 >= type_count {
+        if def.class.0 as u64 >= type_count as u64 {
             return Err(CoreError::Usage("bad class_def->type_idx".into()));
         }
         let sidx = view
@@ -1619,6 +1673,78 @@ mod tests {
         out.extend_from_slice(&cd_off.to_le_bytes());
         out.extend_from_slice(&[0, 0]);
         out
+    }
+
+    /// The phase-2 rescan of budget-deferred entries applies the same
+    /// parse-error policy as the parallel phase, and releases every
+    /// guard it takes (audit F08).
+    ///
+    /// This is a **regression guard, not a reproduction.** The
+    /// asymmetry that was real — phase 2 `?`-propagating a read error
+    /// and abandoning every entry still queued behind it — is not
+    /// reachable from the public API: `Apk::read_entry` fails only on
+    /// a CRC mismatch or an inflate error, and a *correctly declared*
+    /// `uncompressed_size` always fits inside the cap (a 320-byte cap
+    /// rejects a 400-byte entry before it is ever read, and that is
+    /// recorded as a permanent error rather than deferred). So no
+    /// fixture can make the two policies disagree observably, and this
+    /// test pins the shared outcome instead of pretending to
+    /// discriminate. Deferral here is forced, not hoped for: the test
+    /// holds one entry's worth of a two-entry cap, so the pool's
+    /// workers are refused and the broken second entry is carried by
+    /// the rescan.
+    #[test]
+    fn deferred_rescan_reports_the_broken_entry_and_releases_its_guards() {
+        // classes.dex parses; classes2.dex is unreadable (valid magic,
+        // unparseable body) and is the one the rescan has to carry.
+        let bad: &[u8] = b"dex\n035\0\0\0\0\0";
+        const DEX_LEN: usize = 0xA0;
+        let plain = {
+            let mut b = vec![0u8; DEX_LEN];
+            b[..8].copy_from_slice(b"dex\n035\0");
+            b[0x20..0x24].copy_from_slice(&(DEX_LEN as u32).to_le_bytes());
+            b[0x24..0x28].copy_from_slice(&0x70u32.to_le_bytes());
+            b[0x38..0x3C].copy_from_slice(&1u32.to_le_bytes()); // 1 string
+            b[0x40..0x44].copy_from_slice(&1u32.to_le_bytes()); // 1 type
+            b[0x60..0x64].copy_from_slice(&1u32.to_le_bytes()); // 1 class_def
+            b[0x70..0x74].copy_from_slice(&(DEX_LEN as u32).to_le_bytes());
+            b
+        };
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("asc_phase_err_{}.apk", std::process::id()));
+        std::fs::write(
+            &path,
+            stored_zip(&[("classes.dex", &plain), ("classes2.dex", bad)]),
+        )
+        .unwrap();
+        let job = GetClassJob::new(&path, "Lcom/x/Missing;");
+        let cap = DEX_LEN * 2;
+
+        // One entry's worth is held here, so the pool cannot serve the
+        // second entry and must defer it to the rescan.
+        let held = crate::budget::acquire(cap, DEX_LEN).expect("budget must start free");
+        let err = run_getclass(
+            &job,
+            &GetClassOptions {
+                threads: 4,
+                scan_budget_bytes: cap,
+                ..Default::default()
+            },
+        );
+        // Every guard the run took is back by the time it returns.
+        assert_eq!(
+            crate::budget::in_flight(),
+            DEX_LEN,
+            "getclass must not leak scan budget"
+        );
+        drop(held);
+        let _ = std::fs::remove_file(&path);
+
+        let err = err.expect_err("an unreadable DEX must be an error, not a hit");
+        assert!(
+            matches!(err, CoreError::Apk(_)),
+            "the rescan must surface the broken entry, got {err:?}"
+        );
     }
 
     #[test]

@@ -43,8 +43,13 @@ pub struct WorkerOutcome {
     /// Index of the worker that wrote the cell, or `usize::MAX` if
     /// nobody did.
     pub winner: usize,
-    /// `true` iff some worker wrote the cell.
+    /// `true` iff a worker wrote the cell.
     pub found: bool,
+    /// Number of workers that died on an unwind. A panicking worker
+    /// never pulls another item, so an entry it owned is *unscanned*,
+    /// not "proven absent" — callers must not read a `found: false`
+    /// outcome as a clean negative when this is non-zero (audit F03).
+    pub panicked: usize,
 }
 
 impl WorkerOutcome {
@@ -52,6 +57,12 @@ impl WorkerOutcome {
     #[inline]
     pub fn is_found(&self) -> bool {
         self.found
+    }
+
+    /// `true` iff no worker panicked.
+    #[inline]
+    pub fn is_clean(&self) -> bool {
+        self.panicked == 0
     }
 }
 
@@ -94,6 +105,7 @@ impl WorkerPool {
             return WorkerOutcome {
                 winner: usize::MAX,
                 found: false,
+                panicked: 0,
             };
         }
 
@@ -104,12 +116,14 @@ impl WorkerPool {
                     return WorkerOutcome {
                         winner: 0,
                         found: true,
+                        panicked: 0,
                     };
                 }
             }
             return WorkerOutcome {
                 winner: usize::MAX,
                 found: false,
+                panicked: 0,
             };
         }
 
@@ -150,13 +164,20 @@ impl WorkerPool {
             }));
         }
 
+        // A worker that unwinds takes the item it owned with it, so a
+        // dropped `join` result would silently turn "unscanned" into
+        // "absent". Count the dead instead of discarding it.
+        let mut panicked = 0usize;
         for h in handles {
-            let _ = h.join();
+            if h.join().is_err() {
+                panicked += 1;
+            }
         }
 
         WorkerOutcome {
             winner: winner_idx.load(Ordering::Acquire),
             found: found.load(Ordering::Acquire),
+            panicked,
         }
     }
 }
@@ -208,6 +229,41 @@ mod tests {
         let items: Vec<u32> = Vec::new();
         let outcome = pool.run(&items, |_, _| Some(()));
         assert!(!outcome.is_found());
+        assert!(outcome.is_clean());
+    }
+
+    /// A panicking worker never pulls another item, so `found: false`
+    /// cannot be read as "every item was checked and none matched"
+    /// (audit F03).
+    #[test]
+    fn panicking_worker_is_reported_not_silently_dropped() {
+        let pool = WorkerPool::new(4);
+        let items: Vec<u32> = (0..8).collect();
+        let outcome = pool.run(&items, |i, _| {
+            // Every worker hits a panic on its first item; the outcome
+            // must not be a clean negative.
+            assert!(i < 8);
+            panic!("worker {i} exploded");
+        });
+        assert!(!outcome.is_found());
+        assert!(!outcome.is_clean(), "dropped join result would look clean");
+        assert!(outcome.panicked >= 1);
+    }
+
+    #[test]
+    fn a_finding_worker_reports_clean_even_if_others_die() {
+        let pool = WorkerPool::new(4);
+        let items: Vec<u32> = (0..8).collect();
+        let outcome = pool.run(&items, |i, _| {
+            if i == 0 {
+                Some(())
+            } else {
+                panic!("lost the race")
+            }
+        });
+        assert!(outcome.is_found());
+        // The winner is a real hit; the race between which worker
+        // claimed which item is not under test.
     }
 
     #[test]
