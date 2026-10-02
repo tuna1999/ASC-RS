@@ -283,3 +283,52 @@ crates/asc-decompile/
     ├── smoke_test.txt                   (5 classes × warm-path timing)
     └── criterion_bench.txt              (cold + warm criterion output + comparison vs oracle)
 ```
+
+## 11. Known structurer defects (P3 investigation, 2026-10-02, Locket 1.216.0)
+
+Sample: `com.locket.Locket.apk` → `Lcom/locket/Locket/Widgets/MomentWidget;->render`.
+Both defects reproduce on the real APK and are pinned by the `getclass`
+stderr diagnostics; the DEX itself is well-formed (verified with
+`asc-rs disasm --method render`).
+
+### Shape in the DEX (ground truth)
+
+Five **disjoint, sequential** guarded ranges (`0x106..0x12f`,
+`0x146..0x1c1`, `0x1c4..0x1e2`, `0x1e4..0x1f3`, `0x1f5..0x23b`), each
+with its own tiny handler stub (`move-exception v0` + 0–4 register
+shuffles). All stubs **converge** into one shared tail at `0x24d`
+(Sentry log + Crashlytics record) which then jumps into the widget
+fallback rendering at `0x25f` — a tail the normal (non-throwing) path
+also reaches. Classic R8 output: one source-level try/catch split into
+multiple guarded ranges with merged handler code.
+
+### Defect 1 — SSA locals read but never assigned
+
+The structurer names values per block (`v0_245`, `v0_256`, …) but does
+not model the handler stubs' cross-edge `move` instructions as
+definitions of the shared tail's live registers. Result: 13 reads of
+never-assigned locals (`v0_256`, `v19_569`, `v13_325`, `v3_349`,
+`v4_332`, `v6_390`, …) in the emitted Java. Detected: the existing
+`unbound_locals` warning fires (13 names).
+
+### Defect 2 — catch bodies duplicated
+
+The structurer emits the shared fallback tail **inside each** of five
+nested `catch` blocks (≈45 duplicated lines each) instead of joining
+the converged flow. The bodies are *not* byte-identical (each copy
+carries a different SSA-name prologue), so the exact-match
+`duplicated_catch_bodies` heuristic (which catches the verbatim
+duplication variant) does **not** fire on this shape; in practice the
+defect is still surfaced by the unbound-locals warning.
+
+### Verdict / status
+
+- Root layer: `droidsaw-dex` 2.0.0's structurer (external crate; the
+  defect is not in asc-rebuild — the rebuilt minimal DEX feeding the
+  backend is byte-faithful — and not in the DEX).
+- Fixing reliably requires a structurer change (phi handling at
+  converged handler joins) upstream of our adapter; not attempted here.
+- What we shipped instead: the `duplicated_catch_bodies` heuristic
+  (exact-match only, unit-tested) plus this analysis, so the two known
+  shapes are documented and one is auto-detected. `disasm` bypasses the
+  structurer entirely and remains the ground-truth cross-check.

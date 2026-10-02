@@ -51,6 +51,7 @@ mod paranoid;
 pub mod pipeline;
 pub mod report;
 pub mod resources;
+pub mod strings;
 pub mod worker;
 
 pub use crate::budget::{DEFAULT_SCAN_BUDGET, Guard};
@@ -58,7 +59,8 @@ pub use crate::cert::{CertReport, format_cert_text, run_cert};
 pub use crate::class_name::normalize_class_name;
 pub use crate::format::{
     JsonReport, format_getclass_json, format_getclass_text, format_listclasses_json,
-    format_listclasses_text, format_search_report_json, format_search_report_text,
+    format_listclasses_json_opt, format_listclasses_text, format_listclasses_text_opt,
+    format_search_report_json, format_search_report_text,
 };
 pub use crate::inspect::{InspectReport, format_inspect_text, run_inspect};
 pub use crate::native::{NativeReport, format_native_text, run_native};
@@ -71,4 +73,4 @@ pub use crate::pipeline::{
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::resources::{ResourcesQuery, ResourcesReport, format_resources_text, run_resources};
 pub use crate::worker::{WorkerOutcome, WorkerPool};
-pub use asc_decompile::diagnose::unbound_locals;
+pub use asc_decompile::diagnose::{duplicated_catch_bodies, unbound_locals};

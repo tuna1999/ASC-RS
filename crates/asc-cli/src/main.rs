@@ -33,10 +33,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use asc_core::{
     CoreError, DisasmJob, DisasmOptions, FindRefsJob, FindRefsOptions, GetClassJob,
     GetClassOptions, ListClassesJob, ListClassesOptions, ResourcesQuery, format_cert_text,
-    format_getclass_json, format_getclass_text, format_inspect_text, format_listclasses_json,
-    format_listclasses_text, format_native_text, format_resources_text, format_search_report_json,
-    format_search_report_text, run_cert, run_disasm, run_findrefs, run_getclass, run_inspect,
-    run_listclasses, run_native, run_resources,
+    format_getclass_json, format_getclass_text, format_inspect_text, format_listclasses_json_opt,
+    format_listclasses_text_opt, format_native_text, format_resources_text,
+    format_search_report_json, format_search_report_text, run_cert, run_disasm, run_findrefs,
+    run_getclass, run_inspect, run_listclasses, run_native, run_resources,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -80,6 +80,31 @@ fn main() -> ExitCode {
             cli.shared.output.as_deref(),
             cli.shared.format,
         );
+    }
+    if let Cmd::Strings {
+        apk,
+        substring,
+        limit,
+    } = &cli.cmd
+    {
+        return run_strings_cmd(
+            apk,
+            substring.as_deref(),
+            *limit,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
+    }
+    if let Cmd::Extract {
+        apk,
+        entry,
+        verify_crc,
+    } = &cli.cmd
+    {
+        return run_extract_cmd(apk, entry, *verify_crc, cli.shared.output.as_deref());
+    }
+    if let Cmd::Axml { apk, entry } = &cli.cmd {
+        return run_axml_cmd(apk, entry, cli.shared.output.as_deref(), cli.shared.format);
     }
     match dispatch(&cli) {
         Ok(()) => ExitCode::from(EXIT_OK),
@@ -193,6 +218,10 @@ enum Cmd {
         /// Accepts `Lcom/foo`, `Lcom/foo/Bar;`, `com.foo`, `com.foo.Bar;`.
         #[arg(long = "prefix")]
         prefix: Option<String>,
+        /// Prefix each class with its defining DEX (`<dex> <descriptor>`);
+        /// JSON gains a parallel `class_dex` array.
+        #[arg(long = "with-dex")]
+        with_dex: bool,
     },
     /// Dump AndroidManifest.xml: package, SDKs, permissions, components.
     Manifest {
@@ -229,6 +258,36 @@ enum Cmd {
         /// Maximum hits printed.
         #[arg(long, default_value_t = 100)]
         limit: usize,
+    },
+    /// Dump every DEX string-pool entry (multidex + DEX-041 aware),
+    /// not just strings referenced by code.
+    Strings {
+        /// Path to the APK or raw DEX.
+        apk: PathBuf,
+        /// Case-sensitive substring filter.
+        #[arg(long)]
+        substring: Option<String>,
+        /// Maximum strings emitted.
+        #[arg(long, default_value_t = 100_000)]
+        limit: usize,
+    },
+    /// Extract one archive entry to a file.
+    Extract {
+        /// Path to the APK.
+        apk: PathBuf,
+        /// Entry name (e.g. `assets/index.android.bundle`).
+        entry: String,
+        /// Verify the stored CRC-32 while reading.
+        #[arg(long)]
+        verify_crc: bool,
+    },
+    /// Decode an arbitrary compiled binary-XML entry (e.g.
+    /// `res/xml/network_security_config.xml`) to text/JSON.
+    Axml {
+        /// Path to the APK.
+        apk: PathBuf,
+        /// Entry name inside the APK.
+        entry: String,
     },
 }
 
@@ -298,15 +357,25 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         ),
         // Handled in `main` (needs partial-result output + exit-code control).
         Cmd::Findrefs { .. } => unreachable!("handled in main"),
-        Cmd::Listclass { apk, prefix } => run_listclass_cmd(
+        Cmd::Listclass {
+            apk,
+            prefix,
+            with_dex,
+        } => run_listclass_cmd(
             apk,
             prefix.as_deref(),
+            *with_dex,
             shared.output.as_deref(),
             shared.threads,
             shared.debug,
             shared.format,
         ),
-        Cmd::Manifest { .. } | Cmd::Cert { .. } | Cmd::Resources { .. } => {
+        Cmd::Manifest { .. }
+        | Cmd::Cert { .. }
+        | Cmd::Resources { .. }
+        | Cmd::Strings { .. }
+        | Cmd::Extract { .. }
+        | Cmd::Axml { .. } => {
             unreachable!("handled in main")
         }
         Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),
@@ -346,6 +415,14 @@ fn run_getclass_cmd(
             "warning: decompiled Java may be incorrect: {} local(s) read but never assigned: {}",
             unbound.len(),
             unbound.join(", ")
+        );
+    }
+    let dup_catches = asc_core::duplicated_catch_bodies(&result.source);
+    if dup_catches >= 2 {
+        eprintln!(
+            "warning: decompiled Java may be incorrect: {dup_catches} identical catch bodies \
+             (the DEX likely encodes several guarded ranges whose handlers converge into one \
+             shared tail; the structurer copied it per catch; cross-check with `disasm`)"
         );
     }
     if debug {
@@ -505,6 +582,7 @@ fn run_findrefs_cmd(
 fn run_listclass_cmd(
     apk: &std::path::Path,
     prefix: Option<&str>,
+    with_dex: bool,
     output: Option<&std::path::Path>,
     threads: usize,
     debug: bool,
@@ -525,7 +603,7 @@ fn run_listclass_cmd(
     let result = run_listclasses(&job, &opts)?;
     let rendered = match format {
         OutputFormat::Text => {
-            let text = format_listclasses_text(&result);
+            let text = format_listclasses_text_opt(&result, with_dex);
             // `format_listclasses_text` strips the trailing newline; the CLI
             // writes one trailing newline. Empty results emit nothing
             // (matches the oracle's zero-iteration writer in
@@ -536,7 +614,7 @@ fn run_listclass_cmd(
                 text + "\n"
             }
         }
-        OutputFormat::Json => to_json(&format_listclasses_json(&result)),
+        OutputFormat::Json => to_json(&format_listclasses_json_opt(&result, with_dex)),
     };
 
     if debug {
@@ -743,6 +821,185 @@ fn run_manifest_cmd(
     ExitCode::from(EXIT_OK)
 }
 
+/// `asc-rs strings <apk>`: dump DEX string pools. Incomplete reports
+/// (per-string or per-DEX failures) still print in full and exit 2.
+fn run_strings_cmd(
+    apk: &std::path::Path,
+    substring: Option<&str>,
+    limit: usize,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let opts = asc_core::strings::StringsOptions {
+        filter: substring.map(str::to_string),
+        limit,
+    };
+    let report = match asc_core::strings::run_strings(apk, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: strings: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    for e in &report.errors {
+        eprintln!("warning: {e}");
+    }
+    let text = match format {
+        OutputFormat::Text => asc_core::strings::format_strings_text(&report),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, text.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_USER_ERROR);
+            }
+        }
+        None => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(if report.complete {
+        EXIT_OK
+    } else {
+        EXIT_INTERNAL
+    })
+}
+
+/// `asc-rs extract <apk> <entry>`: write one entry to disk. Without
+/// `-o`, the output name is the entry's sanitized basename (never a
+/// path — no ZIP-slip). `--verify-crc` fails on CRC mismatch (exit 2).
+fn run_extract_cmd(
+    apk: &std::path::Path,
+    entry: &str,
+    verify_crc: bool,
+    output: Option<&std::path::Path>,
+) -> ExitCode {
+    let a = match asc_apk::Apk::open(apk) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: open {apk:?}: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let e = match a.entry(entry) {
+        Some(e) => e,
+        None => {
+            eprintln!("Error: entry not found: {entry}");
+            return ExitCode::from(EXIT_USER_ERROR);
+        }
+    };
+    let bytes = if verify_crc {
+        a.read_entry_verified(&e)
+    } else {
+        a.read_entry(&e)
+    };
+    let bytes = match bytes {
+        Ok(b) => b,
+        Err(x) => {
+            eprintln!("Error: read {entry}: {x}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let out = match output {
+        Some(p) => p.to_path_buf(),
+        None => {
+            // Never derive a path from the entry name beyond its final
+            // component; refuse anything that could escape the cwd.
+            match std::path::Path::new(entry)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .filter(|s| {
+                    !s.is_empty()
+                        && *s != "."
+                        && *s != ".."
+                        && !s.contains('/')
+                        && !s.contains('\\')
+                        && !s.contains(':')
+                }) {
+                Some(base) => std::path::PathBuf::from(base),
+                None => {
+                    eprintln!("Error: refusing to derive an output name from {entry:?}; pass -o");
+                    return ExitCode::from(EXIT_USER_ERROR);
+                }
+            }
+        }
+    };
+    let n = bytes.as_slice().len();
+    if let Err(x) = std::fs::write(&out, bytes.as_slice()) {
+        eprintln!("Error: write {}: {x}", out.display());
+        return ExitCode::from(EXIT_INTERNAL);
+    }
+    let method = if e.method == asc_apk::Compression::Stored {
+        "stored"
+    } else {
+        "deflated"
+    };
+    println!(
+        "extracted {} -> {} ({} bytes, {}, crc {})",
+        entry,
+        out.display(),
+        n,
+        method,
+        e.crc32
+    );
+    ExitCode::from(EXIT_OK)
+}
+
+/// `asc-rs axml <apk> <entry>`: decode any compiled binary-XML entry.
+fn run_axml_cmd(
+    apk: &std::path::Path,
+    entry: &str,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let a = match asc_apk::Apk::open(apk) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error: open {apk:?}: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let e = match a.entry(entry) {
+        Some(e) => e,
+        None => {
+            eprintln!("Error: entry not found: {entry}");
+            return ExitCode::from(EXIT_USER_ERROR);
+        }
+    };
+    let bytes = match a.read_entry(&e) {
+        Ok(b) => b,
+        Err(x) => {
+            eprintln!("Error: read {entry}: {x}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let doc = match asc_manifest::axml::parse_axml(bytes.as_slice()) {
+        Ok(d) => d,
+        Err(x) => {
+            eprintln!("Error: axml: {x}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    let text = match format {
+        OutputFormat::Text => asc_manifest::axml::format_axml_text(&doc),
+        OutputFormat::Json => to_json(&doc),
+    };
+    match output {
+        Some(p) => {
+            if let Err(x) = std::fs::write(p, text.as_bytes()) {
+                eprintln!("Error: write {p:?}: {x}");
+                return ExitCode::from(EXIT_USER_ERROR);
+            }
+        }
+        None => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(EXIT_OK)
+}
 /// Pretty JSON plus a trailing newline (parse-safe for `-o` files).
 fn to_json<T: serde::Serialize>(v: &T) -> String {
     let mut s = serde_json::to_string_pretty(v).unwrap_or_default();

@@ -177,9 +177,25 @@ pub fn total_line_count(report: &SearchReport) -> usize {
 /// write is a streaming optimization and produces byte-identical
 /// output to a single pass; we use a single pass for simplicity.
 pub fn format_listclasses_text(result: &ListClassesResult) -> String {
-    let total: usize = result.names.iter().map(|n| n.len() + 1).sum();
+    format_listclasses_text_opt(result, false)
+}
+
+/// Like [`format_listclasses_text`], but with `with_dex` each line is
+/// `<dex> <descriptor>` — the defining DEX (logical name) per class.
+/// The default (`false`) stays byte-identical to the oracle.
+pub fn format_listclasses_text_opt(result: &ListClassesResult, with_dex: bool) -> String {
+    let total: usize = result.names.iter().map(|n| n.len() + 1).sum::<usize>()
+        + if with_dex {
+            result.dexes.iter().map(|d| d.len() + 1).sum()
+        } else {
+            0
+        };
     let mut out = String::with_capacity(total);
-    for name in &result.names {
+    for (i, name) in result.names.iter().enumerate() {
+        if with_dex {
+            out.push_str(result.dexes.get(i).map(String::as_str).unwrap_or("?"));
+            out.push(' ');
+        }
         out.push_str(name);
         out.push('\n');
     }
@@ -200,6 +216,10 @@ pub struct JsonListClasses {
     pub per_dex: Vec<JsonDexCount>,
     /// Descriptors, DEX-definition order.
     pub classes: Vec<String>,
+    /// Logical DEX name per class, parallel to `classes` (only when
+    /// `--with-dex` was requested; absent otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_dex: Option<Vec<String>>,
 }
 
 /// One row of [`JsonListClasses::per_dex`].
@@ -211,8 +231,9 @@ pub struct JsonDexCount {
     pub count: usize,
 }
 
-/// Build the `listclass` JSON payload.
-pub fn format_listclasses_json(result: &ListClassesResult) -> JsonListClasses {
+/// Build the `listclass` JSON payload. `with_dex` adds the parallel
+/// `class_dex` array; without it the payload is unchanged.
+pub fn format_listclasses_json_opt(result: &ListClassesResult, with_dex: bool) -> JsonListClasses {
     JsonListClasses {
         total: result.names.len(),
         per_dex: result
@@ -224,7 +245,13 @@ pub fn format_listclasses_json(result: &ListClassesResult) -> JsonListClasses {
             })
             .collect(),
         classes: result.names.clone(),
+        class_dex: with_dex.then(|| result.dexes.clone()),
     }
+}
+
+/// Backward-compatible wrapper (no `class_dex` array).
+pub fn format_listclasses_json(result: &ListClassesResult) -> JsonListClasses {
+    format_listclasses_json_opt(result, false)
 }
 
 /// `getclass --format json` payload.
@@ -255,6 +282,11 @@ mod tests {
     fn listclasses_json_shape_is_stable() {
         let r = ListClassesResult {
             names: vec!["LA;".into(), "LB;".into(), "LC;".into()],
+            dexes: vec![
+                "classes.dex".into(),
+                "classes.dex".into(),
+                "classes2.dex".into(),
+            ],
             per_dex_counts: vec![("classes.dex".into(), 2), ("classes2.dex".into(), 1)],
         };
         let v = serde_json::to_value(format_listclasses_json(&r)).unwrap();

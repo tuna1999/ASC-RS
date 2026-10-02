@@ -587,3 +587,115 @@ fn garbage_input_never_panics() {
         remove(&p);
     }
 }
+
+// ------------------------------------------------------------------ hermes
+
+/// Verified against the Meta header (`BytecodeFileFormat.h`,
+/// MAGIC = 0x1F1903C103BC1FC6 little-endian) and a real
+/// `assets/index.android.bundle`.
+const HERMES_MAGIC: [u8; 8] = [0xC6, 0x1F, 0xBC, 0x03, 0xC1, 0x03, 0x19, 0x1F];
+
+fn hermes_blob(version: u32, file_length: u32) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&HERMES_MAGIC);
+    b.extend_from_slice(&version.to_le_bytes());
+    b.extend_from_slice(&[0u8; 20]); // sourceHash
+    b.extend_from_slice(&file_length.to_le_bytes());
+    b.extend_from_slice(&[0x55u8; 128]); // body
+    b
+}
+
+#[test]
+fn hermes_entry_is_classified_and_header_fields_read() {
+    let blob = hermes_blob(96, 164);
+    let apk = write_apk("hermes_ok", &[("assets/index.android.bundle", &blob)]);
+    let r = run_inspect(&apk).expect("inspect");
+    let entry = r
+        .entries
+        .iter()
+        .find(|e| e.name == "assets/index.android.bundle")
+        .expect("entry present");
+    assert_eq!(entry.kind, "hermes");
+    let h = r.hermes.first().expect("hermes info recorded");
+    assert_eq!(h.version, 96);
+    assert_eq!(h.file_length, 164);
+    assert_eq!(h.size, 164);
+    assert!(
+        !r.anomalies.iter().any(|a| a.contains("hermes fileLength")),
+        "matching fileLength must not be an anomaly: {:?}",
+        r.anomalies
+    );
+    // No manifest in this synthetic APK: the report honestly stays
+    // incomplete (errors non-empty); completeness is not asserted.
+}
+
+#[test]
+fn hermes_file_length_mismatch_is_an_anomaly() {
+    let blob = hermes_blob(96, 4096); // declares 4096, actually 160
+    let apk = write_apk("hermes_bad", &[("assets/hbc.bundle", &blob)]);
+    let r = run_inspect(&apk).expect("inspect");
+    assert!(
+        r.anomalies
+            .iter()
+            .any(|a| a.contains("hermes fileLength 4096 != actual 164")),
+        "{:?}",
+        r.anomalies
+    );
+    remove(&apk);
+}
+
+// -------------------------------------------------- split awareness (corpus)
+
+fn corpus_locket() -> Option<PathBuf> {
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/com.locket.Locket.apk");
+    p.exists().then_some(p)
+}
+
+/// Locket is distributed as split APKs: the base requires
+/// `base__abi` + `base__density` and ships no `lib/*.so`. `inspect`
+/// must flag that absence-of-evidence trap, and `native` must note it.
+#[test]
+fn split_requirement_without_libs_is_flagged_on_locket() {
+    let Some(path) = corpus_locket() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let r = run_inspect(&path).expect("inspect");
+    let sp = r.split.as_ref().expect("split status present");
+    assert_eq!(
+        sp.required_split_types.as_deref(),
+        Some("base__abi,base__density")
+    );
+    assert!(!sp.has_native_libs, "base APK ships no native libs");
+    assert!(sp.abi_split_missing());
+    assert!(
+        r.anomalies
+            .iter()
+            .any(|a| a.contains("native code may live")),
+        "{:?}",
+        r.anomalies
+    );
+    // The hermes bundle must be inventoried with the version verified
+    // against the real file (96).
+    assert!(
+        r.hermes
+            .iter()
+            .any(|h| h.name == "assets/index.android.bundle" && h.version == 96),
+        "{:?}",
+        r.hermes
+    );
+
+    let n = crate_run_native(&path);
+    assert!(
+        n.note
+            .as_deref()
+            .is_some_and(|t| t.contains("split APKs that were not provided")),
+        "native note: {:?}",
+        n.note
+    );
+}
+
+fn crate_run_native(path: &Path) -> asc_core::NativeReport {
+    asc_core::run_native(path).expect("native")
+}

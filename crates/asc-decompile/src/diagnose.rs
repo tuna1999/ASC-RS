@@ -76,6 +76,91 @@ pub fn unbound_locals(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Size of the largest group of structurally identical `catch` bodies
+/// in `src` (whitespace-normalized), or 0 when every body is unique.
+/// Bodies under 48 chars are ignored — trivial rethrows legitimately
+/// repeat.
+///
+/// droidsaw-dex 2.0.0 can copy a *shared* handler tail (the DEX encodes
+/// several guarded ranges whose handler stubs converge into one tail
+/// that the normal path also reaches) into each emitted `catch`. The
+/// result reads as N nested catches with identical bodies. This
+/// heuristic flags exactly that shape; a `0` is not proof of absence.
+pub fn duplicated_catch_bodies(src: &str) -> usize {
+    let b = src.as_bytes();
+    let mut bodies: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        // Skip comments and string/char literals so a "catch" inside
+        // text never counts.
+        if c == b'/' && b.get(i + 1) == Some(&b'/') {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            i = src[i + 2..].find("*/").map_or(b.len(), |p| i + 2 + p + 2);
+        } else if c == b'"' || c == b'\'' {
+            let q = c;
+            i += 1;
+            while i < b.len() && b[i] != q {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if c.is_ascii_alphabetic() {
+            let s = i;
+            while i < b.len() && b[i].is_ascii_alphanumeric() {
+                i += 1;
+            }
+            if &src[s..i] == "catch"
+                && let Some(open) = src[i..].find('{')
+                && src[i..i + open].contains(')')
+            {
+                // Balanced-brace body extraction.
+                let start = i + open;
+                let mut depth = 0usize;
+                let mut j = start;
+                while j < b.len() {
+                    match b[j] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if j < b.len() {
+                    let normalized = src[start + 1..j]
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if normalized.len() >= 48 {
+                        bodies.push(normalized);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    for body in &bodies {
+        *counts.entry(body.as_str()).or_default() += 1;
+    }
+    counts
+        .values()
+        .copied()
+        .filter(|c| *c >= 2)
+        .max()
+        .unwrap_or(0)
+}
+
 fn is_local(id: &str) -> bool {
     let Some(r) = id.strip_prefix('v') else {
         return false;
@@ -115,5 +200,32 @@ mod tests {
         // Documented ceiling: every name stays bound.
         let src = "int v1_0 = 0;\nwhile (v1_0 < 3) { v1_0 = v1_0 + 1; v1_0 = v1_0 + 1; }";
         assert!(unbound_locals(src).is_empty());
+    }
+    #[test]
+    fn identical_catch_bodies_are_counted() {
+        let body = " Log.get().e(\"tag\", \"msg\", v0_1); v0_2.recordException(v0_1); int v3 = fallback(); return render(v3); ";
+        let src = format!(
+            "void f() {{ try {{ a(); }} catch (Exception e) {{{body}}} try {{ b(); }} catch (Exception e) {{{body}}} try {{ c(); }} catch (Exception e) {{{body}}} }}"
+        );
+        assert_eq!(duplicated_catch_bodies(&src), 3);
+    }
+
+    #[test]
+    fn distinct_catch_bodies_are_not_flagged() {
+        let src = "void f() { try { a(); } catch (A e) { doA(e); } catch (B e) { doB(e); } }";
+        assert_eq!(duplicated_catch_bodies(src), 0);
+    }
+
+    #[test]
+    fn catch_keyword_in_text_is_ignored() {
+        let src =
+            "String s = \"catch (Exception e) { identical identical identical }\"; char c = 'x';";
+        assert_eq!(duplicated_catch_bodies(src), 0);
+    }
+
+    #[test]
+    fn trivial_short_bodies_are_ignored() {
+        let src = "void f() { try { a(); } catch (A e) { } catch (B e) { } }";
+        assert_eq!(duplicated_catch_bodies(src), 0);
     }
 }

@@ -1448,6 +1448,11 @@ pub struct ListClassesResult {
     /// within each DEX entry. Empty when no classes matched (or when
     /// the APK contains no DEX entries).
     pub names: Vec<String>,
+    /// Logical DEX name per descriptor, parallel to `names` (e.g.
+    /// `classes.dex`, `classes.dex#1` for DEX-041 containers). Lets
+    /// consumers trace every class to its source DEX; same-length
+    /// duplicate descriptors across DEXes stay distinguishable.
+    pub dexes: Vec<String>,
     /// Per-DEX entry: `(entry_name, descriptor_count_within_this_entry)`.
     /// Used by `--debug` instrumentation. Sum across the whole list
     /// equals `names.len()`.
@@ -1495,7 +1500,7 @@ pub fn run_listclasses(
     let apk = Apk::open(&job.apk)?;
     check_raw_dex(&apk)?;
     let prefix_bytes: Option<&[u8]> = job.prefix.as_deref().map(str::as_bytes);
-    let mut names: Vec<String> = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
     let mut per_dex_counts: Vec<(String, usize)> = Vec::with_capacity(apk.dex_entries().len());
     for entry in apk.dex_entries() {
         // Borrow the inflated/borrowed bytes directly (no `.to_vec()`);
@@ -1505,18 +1510,23 @@ pub fn run_listclasses(
             Ok(b) => b,
             Err(_e) => continue, // ignore per-DEX inflate failures (matches the oracle's silent skip on non-DEX entries).
         };
-        let before = names.len();
-        collect_classes_from_bytes(bytes.as_slice(), prefix_bytes, &mut names)?;
-        per_dex_counts.push((entry.name.clone(), names.len() - before));
+        let before = pairs.len();
+        collect_classes_from_bytes(bytes.as_slice(), prefix_bytes, &entry.name, &mut pairs)?;
+        per_dex_counts.push((entry.name.clone(), pairs.len() - before));
     }
+    let names = pairs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    let dexes = pairs.iter().map(|(_, d)| d.clone()).collect::<Vec<_>>();
     Ok(ListClassesResult {
         names,
+        dexes,
         per_dex_counts,
     })
 }
 
 /// Walk one entry's bytes: detect a DEX-041 container or a single DEX,
-/// then collect descriptors into `out` (filtered by `prefix`).
+/// then collect `(descriptor, logical DEX name)` pairs into `out`
+/// (filtered by `prefix`). The logical name is `entry_name` for plain
+/// DEX entries and `entry_name#N` for DEX-041 containers.
 ///
 /// Per-class-index failures propagate (matches the oracle's
 /// `ValueError("bad class_def->type_idx")` exit-1 path); per-DEX
@@ -1525,7 +1535,8 @@ pub fn run_listclasses(
 pub(crate) fn collect_classes_from_bytes(
     bytes: &[u8],
     prefix: Option<&[u8]>,
-    out: &mut Vec<String>,
+    entry_name: &str,
+    out: &mut Vec<(String, String)>,
 ) -> Result<(), CoreError> {
     if bytes.len() < 8 || !bytes.starts_with(b"dex\n") {
         return Ok(());
@@ -1536,28 +1547,34 @@ pub(crate) fn collect_classes_from_bytes(
         let Ok(offsets) = DexView::logical_header_offsets(bytes) else {
             return Ok(());
         };
-        for off in offsets.iter() {
+        for (i, off) in offsets.iter().enumerate() {
             // The oracle skips an entire logical member on parse failure
             // (`apk_handler.list_classes:478-501`); mirror that here.
             if let Ok(view) = DexView::parse_at(bytes, *off) {
-                collect_from_view(&view, prefix, out)?;
+                collect_from_view(
+                    &view,
+                    prefix,
+                    out,
+                    &logical_dex_name(entry_name, offsets.len(), i),
+                )?;
             }
         }
         Ok(())
     } else if let Ok(view) = DexView::parse(bytes) {
-        collect_from_view(&view, prefix, out)
+        collect_from_view(&view, prefix, out, entry_name)
     } else {
         Ok(())
     }
 }
 
-/// Walk every class-def of `view` and append its descriptor to `out`.
-/// Returns `Err` on the first malformed index (matches the oracle's
-/// `ValueError("bad class_def->type_idx")` exit-1 path).
+/// Walk every class-def of `view` and append `(descriptor, dex_label)`
+/// to `out`. Returns `Err` on the first malformed index (matches the
+/// oracle's `ValueError("bad class_def->type_idx")` exit-1 path).
 fn collect_from_view(
     view: &DexView<'_>,
     prefix: Option<&[u8]>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, String)>,
+    dex_label: &str,
 ) -> Result<(), CoreError> {
     // Pre-pull counts so we can produce oracle-identical error messages
     // (`bad class_def->type_idx`, `bad type_id->string_idx`, …) instead
@@ -1594,7 +1611,7 @@ fn collect_from_view(
         // Decode the descriptor for the owned output. ASCII descriptors
         // are borrowed without allocation; non-ASCII descriptors
         // allocate via the lossy Cow fallback.
-        out.push(sref.decode_lossy().into_owned());
+        out.push((sref.decode_lossy().into_owned(), dex_label.to_string()));
     }
     Ok(())
 }
@@ -1933,7 +1950,7 @@ mod tests {
         buf[0x70..0x74].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         let view = DexView::parse(&buf).expect("parse should succeed");
         let mut out = Vec::new();
-        match collect_from_view(&view, None, &mut out) {
+        match collect_from_view(&view, None, &mut out, "classes.dex") {
             Err(CoreError::Usage(msg)) => {
                 assert_eq!(msg, "bad class_def->type_idx");
             }

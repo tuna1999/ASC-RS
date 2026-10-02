@@ -67,6 +67,10 @@ pub struct PairReport {
     pub id: String,
     pub value_len: u64,
     pub known_as: Option<&'static str>,
+    /// `signature`, `source-stamp`, `padding` or `metadata` when the
+    /// pair ID is known — keeps stamps/Play metadata from being read
+    /// as signing certificates.
+    pub kind: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -269,13 +273,26 @@ fn signer_prints(s: &SchemeReport) -> Vec<&str> {
     v
 }
 
-fn pair_name(id: u32) -> Option<&'static str> {
+/// Signing-block pair classification. Verified against AOSP
+/// `tools/apksig` (`ApkSigningBlockUtils.VERITY_PADDING_BLOCK_ID`,
+/// `SourceStampConstants.{V1,V2}_SOURCE_STAMP_BLOCK_ID`) and Google
+/// Play "frosting" documentation for `0x2146444e` (protobuf
+/// distribution metadata, not a signature).
+fn pair_kind(id: u32) -> Option<(&'static str, &'static str)> {
     match id {
-        0x7109_871a => Some("APK Signature Scheme v2"),
-        0xf053_68c0 => Some("APK Signature Scheme v3"),
-        0x1b93_ad61 => Some("APK Signature Scheme v3.1"),
+        0x7109_871a => Some(("APK Signature Scheme v2", "signature")),
+        0xf053_68c0 => Some(("APK Signature Scheme v3", "signature")),
+        0x1b93_ad61 => Some(("APK Signature Scheme v3.1", "signature")),
+        0x2b09_189e => Some(("Source Stamp v1", "source-stamp")),
+        0x6dff_800d => Some(("Source Stamp v2", "source-stamp")),
+        0x4272_6577 => Some(("Verity padding block", "padding")),
+        0x2146_444e => Some(("Google Play security metadata (\"frosting\")", "metadata")),
         _ => None,
     }
+}
+
+fn pair_name(id: u32) -> Option<&'static str> {
+    pair_kind(id).map(|(name, _)| name)
 }
 
 /// Inventory the signing material of `path` (an APK).
@@ -356,6 +373,7 @@ pub fn run_cert(path: &Path) -> Result<CertReport, CoreError> {
                 id: format!("0x{:08x}", p.id),
                 value_len: p.value_len,
                 known_as: pair_name(p.id),
+                kind: pair_kind(p.id).map(|(_, k)| k),
             })
             .collect(),
         schemes,
@@ -396,12 +414,14 @@ pub fn format_cert_text(r: &CertReport) -> String {
         }
     }
     for p in &r.pairs {
+        let kind = p.kind.unwrap_or("unknown");
         let _ = writeln!(
             s,
-            "  pair {} {} bytes ({})",
+            "  pair {} {} bytes ({} [{}])",
             p.id,
             p.value_len,
-            p.known_as.unwrap_or("not identified")
+            p.known_as.unwrap_or("not identified"),
+            kind
         );
     }
     for sc in &r.schemes {

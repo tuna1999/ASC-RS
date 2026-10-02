@@ -1376,3 +1376,76 @@ fn split_manifest_real_fixture_marks_split() {
         "expected Play derived-apk-id meta-data"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Generic AXML decoder (axml module).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn axml_decodes_tree_with_namespaces_order_and_types() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "network-security-config",
+        vec![],
+        vec![elem(
+            "base-config",
+            vec![attr(
+                Some(ANDROID_NS),
+                "cleartextTrafficPermitted",
+                Val::Bool(false),
+            )],
+            vec![elem(
+                "trust-anchors",
+                vec![],
+                vec![elem(
+                    "certificates",
+                    vec![attr(Some(ANDROID_NS), "src", Val::Reference(0x010f_000f))],
+                    vec![],
+                )],
+            )],
+        )],
+    );
+    let parsed = crate::axml::parse_axml(&axml::build(&doc)).expect("parse");
+    let root = parsed.root.as_ref().expect("root");
+    assert_eq!(root.name, "network-security-config");
+    assert_eq!(root.children.len(), 1);
+    let base = &root.children[0];
+    assert_eq!(base.name, "base-config");
+    assert_eq!(base.attrs.len(), 1);
+    let a = &base.attrs[0];
+    assert_eq!(a.name, "cleartextTrafficPermitted");
+    assert_eq!(a.value.as_deref(), Some("false"));
+    assert_eq!(a.value_type, 0x12);
+    let cert = &base.children[0].children[0];
+    assert_eq!(cert.name, "certificates");
+    // Unresolved resource references stay visible as @0x….
+    assert_eq!(cert.attrs[0].value.as_deref(), Some("@0x010f000f"));
+    assert_eq!(cert.attrs[0].value_type, 0x01);
+    // Text rendering qualifies the android namespace.
+    let text = crate::axml::format_axml_text(&parsed);
+    assert!(
+        text.contains("<base-config android:cleartextTrafficPermitted=\"false\""),
+        "{text}"
+    );
+}
+
+#[test]
+fn axml_mismatched_close_tag_errors() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "a",
+        vec![attr(Some(ANDROID_NS), "x", Val::Bool(true))],
+        vec![elem("b", vec![], vec![])],
+    );
+    let mut bytes = axml::build(&doc);
+    // Layout is deterministic: [root 8][pool][ns 24][start a][start b]
+    // [end b 24][end a 24]. Patch the inner end-element's name field
+    // (chunk start + 20) to point at pool index 0 ("a" instead of "b").
+    let end_b = bytes.len() - 48;
+    let at = end_b + 20;
+    bytes[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+    match crate::axml::parse_axml(&bytes) {
+        Err(ManifestError::BadChunk(m)) => assert!(m.contains("does not match"), "{m}"),
+        other => panic!("expected BadChunk, got {other:?}"),
+    }
+}

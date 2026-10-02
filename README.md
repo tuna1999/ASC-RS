@@ -55,7 +55,10 @@ asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
 asc-rs disasm     <apk> Lcom/foo/Bar; [--method m]    # Smali-syntax listing (annotations/debug info not emitted)
 asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
 asc-rs manifest   <apk>                             # full manifest: app attrs, meta-data, permissions, queries, deep links, aliases
-asc-rs inspect    <apk|dex>                         # inventory, DEX coverage/checksums, packer signals
+asc-rs inspect    <apk|dex>                         # inventory (incl. Hermes), DEX coverage, packer signals, split status
+asc-rs strings    <apk|dex> [--substring PAT]        # every DEX string-pool entry, with source DEX + index
+asc-rs extract    <apk> <entry> [--verify-crc]       # pull one entry out (safe basename, optional CRC check)
+asc-rs axml       <apk> <entry>                      # decode any compiled binary-XML entry (res/xml/*)
 asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match
 asc-rs cert       <apk>                             # signing certs (v1/v2/v3), fingerprints; display only, no verification
 asc-rs resources <apk> [--id ID | --strings PAT]    # resources.arsc inventory, ID lookup, key/value search

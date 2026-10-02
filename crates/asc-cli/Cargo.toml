@@ -10,6 +10,7 @@ name = "asc-rs"
 path = "src/main.rs"
 
 [dependencies]
+asc-apk.workspace = true
 asc-core.workspace = true
 asc-manifest.workspace = true
 asc-query.workspace = true
@@ -21,3 +22,4 @@ serde_json.workspace = true
 [dev-dependencies]
 asc-dex.workspace = true
 zip = { version = "0.6", default-features = false }
+crc32fast.workspace = true

@@ -383,6 +383,37 @@ pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
     } else {
         None
     };
+    // ABI splits means "native code may be missing", not "no native
+    // code". Augment the note instead of overriding it.
+    let libs_empty = libs.is_empty();
+    let mut split_note: Option<String> = None;
+    if libs_empty
+        && !apk.is_raw_dex()
+        && let Ok(m) = asc_manifest::parse_from_apk(path)
+    {
+        let requires = m
+            .required_split_types
+            .as_deref()
+            .is_some_and(|v| v.contains("abi"))
+            || m.split_types.as_deref().is_some_and(|v| v.contains("abi"))
+            || m.application.meta_data.iter().any(|md| {
+                md.name == "com.android.vending.splits.required"
+                    && md.value.as_deref() == Some("true")
+            });
+        if requires {
+            split_note = Some(
+                "no lib/*.so in this APK, but the manifest requires ABI split(s); \
+                 native libraries likely live in split APKs that were not provided"
+                    .to_string(),
+            );
+        }
+    }
+    let note = match (note, split_note) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
     Ok(NativeReport {
         input: path.display().to_string(),
         libs,

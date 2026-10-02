@@ -857,43 +857,7 @@ impl<'a> Parser<'a> {
         data: u32,
         raw_index: u32,
     ) -> Result<Option<String>, ManifestError> {
-        // The bit layout of `data_type`:
-        //   bits 0..6   → kind (TYPE_NULL=0, TYPE_STRING=3, TYPE_INT_DEC=0x10, …)
-        //   bit  7      → flag bit (rare)
-        const TYPE_NULL: u8 = 0x00;
-        const TYPE_REFERENCE: u8 = 0x01;
-        const TYPE_ATTRIBUTE: u8 = 0x02;
-        const TYPE_STRING: u8 = 0x03;
-        const TYPE_INT_DEC: u8 = 0x10;
-        const TYPE_INT_HEX: u8 = 0x11;
-        const TYPE_INT_BOOLEAN: u8 = 0x12;
-        let kind = data_type & 0x7F;
-        let result = match kind {
-            TYPE_NULL => None,
-            TYPE_STRING => {
-                // AOSP semantics: for string-typed values `data` *is* the
-                // string-pool index; `rawValue` is a convenience copy
-                // aapt sets when the source was a literal. Resolve via
-                // `rawValue` when present, else via `data`.
-                let idx = if raw_index != NO_INDEX {
-                    raw_index
-                } else {
-                    data
-                };
-                if idx == NO_INDEX {
-                    None
-                } else {
-                    self.validate_string_index(idx, "string-typed value", true)?;
-                    Some(self.strings[idx as usize].clone())
-                }
-            }
-            TYPE_REFERENCE | TYPE_ATTRIBUTE => Some(format!("@0x{data:08x}")),
-            TYPE_INT_DEC => Some(data.to_string()),
-            TYPE_INT_HEX => Some(format!("0x{data:08x}")),
-            TYPE_INT_BOOLEAN => Some(if data != 0 { "true" } else { "false" }.to_string()),
-            _ => Some(format!("0x{data:08x}")),
-        };
-        Ok(result)
+        render_typed_value_str(&self.strings, data_type, data, raw_index)
     }
 
     /// Validate a string-pool index. `allow_no_index` is false for
@@ -906,21 +870,7 @@ impl<'a> Parser<'a> {
         ctx: &str,
         allow_no_index: bool,
     ) -> Result<(), ManifestError> {
-        if idx == NO_INDEX {
-            if allow_no_index {
-                return Ok(());
-            }
-            return Err(ManifestError::BadChunk(format!(
-                "{ctx}: NO_INDEX is not a valid string index"
-            )));
-        }
-        if (idx as usize) >= self.strings.len() {
-            return Err(ManifestError::BadChunk(format!(
-                "{ctx}: string index {idx} out of range (pool has {})",
-                self.strings.len()
-            )));
-        }
-        Ok(())
+        validate_string_index_str(&self.strings, idx, ctx, allow_no_index)
     }
 
     /// Resolve `&mut ComponentEntry` for a routing slot (also covers
@@ -1406,6 +1356,84 @@ fn read_u32(bytes: &[u8], off: usize) -> Result<u32, ManifestError> {
     ]))
 }
 
+// ---------------------------------------------------------------------------
+// Free helpers shared with the generic AXML decoder (`axml` module).
+// ---------------------------------------------------------------------------
+
+/// [`Parser::validate_string_index`] as a free function over a pool.
+pub(crate) fn validate_string_index_str(
+    strings: &[String],
+    idx: u32,
+    ctx: &str,
+    allow_no_index: bool,
+) -> Result<(), ManifestError> {
+    if idx == NO_INDEX {
+        if allow_no_index {
+            return Ok(());
+        }
+        return Err(ManifestError::BadChunk(format!(
+            "{ctx}: NO_INDEX is not a valid string index"
+        )));
+    }
+    if (idx as usize) >= strings.len() {
+        return Err(ManifestError::BadChunk(format!(
+            "{ctx}: string index {idx} out of range (pool has {})",
+            strings.len()
+        )));
+    }
+    Ok(())
+}
+
+/// [`Parser::render_typed_value`] as a free function over a pool:
+/// references stay `@0x…`, strings resolve, ints/bools render.
+pub(crate) fn render_typed_value_str(
+    strings: &[String],
+    data_type: u8,
+    data: u32,
+    raw_index: u32,
+) -> Result<Option<String>, ManifestError> {
+    const TYPE_NULL: u8 = 0x00;
+    const TYPE_REFERENCE: u8 = 0x01;
+    const TYPE_ATTRIBUTE: u8 = 0x02;
+    const TYPE_STRING: u8 = 0x03;
+    const TYPE_INT_DEC: u8 = 0x10;
+    const TYPE_INT_HEX: u8 = 0x11;
+    const TYPE_INT_BOOLEAN: u8 = 0x12;
+    let kind = data_type & 0x7F;
+    let result = match kind {
+        TYPE_NULL => None,
+        TYPE_STRING => {
+            // AOSP semantics: for string-typed values `data` *is* the
+            // string-pool index; `rawValue` is a convenience copy aapt
+            // sets when the source was a literal. Resolve via
+            // `rawValue` when present, else via `data`.
+            let idx = if raw_index != NO_INDEX {
+                raw_index
+            } else {
+                data
+            };
+            if idx == NO_INDEX {
+                None
+            } else {
+                validate_string_index_str(strings, idx, "string-typed value", true)?;
+                Some(strings[idx as usize].clone())
+            }
+        }
+        TYPE_REFERENCE | TYPE_ATTRIBUTE => Some(format!("@0x{data:08x}")),
+        TYPE_INT_DEC => Some(data.to_string()),
+        TYPE_INT_HEX => Some(format!("0x{data:08x}")),
+        TYPE_INT_BOOLEAN => Some(if data != 0 { "true" } else { "false" }.to_string()),
+        _ => Some(format!("0x{data:08x}")),
+    };
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Generic binary-AXML decoder (any compiled res XML, not just the
+// manifest).
+// ---------------------------------------------------------------------------
+
+pub mod axml;
 // ---------------------------------------------------------------------------
 // Display impl for ManifestInfo — a compact one-line summary, mainly for
 // the GUI status bar / tests.

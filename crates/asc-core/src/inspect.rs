@@ -88,6 +88,55 @@ pub struct ManifestCheck {
     pub missing_examples: Vec<String>,
 }
 
+/// Hermes bytecode entry (`assets/index.android.bundle` and friends).
+/// Header fields per `hermes/BytecodeFileFormat.h`: magic u64, version
+/// u32 at 8, sourceHash[20], fileLength u32 at 32.
+#[derive(Debug, Clone, Serialize)]
+pub struct HermesInfo {
+    /// Entry name.
+    pub name: String,
+    /// Bytecode version (e.g. 96).
+    pub version: u32,
+    /// Declared `fileLength` ("until the end of the BytecodeFileFooter").
+    pub file_length: u32,
+    /// Actual uncompressed entry size.
+    pub size: u64,
+}
+
+/// Split-APK markers from the manifest, plus what this APK actually
+/// contains. Lets consumers distinguish "no native code" from "the
+/// native code lives in a split that was not provided".
+#[derive(Debug, Clone, Serialize)]
+pub struct SplitStatus {
+    /// This APK's own plain `split` attribute; `None` = base/standalone.
+    pub split: Option<String>,
+    /// `android:splitTypes` (e.g. `base__abi`).
+    pub split_types: Option<String>,
+    /// `android:requiredSplitTypes` (e.g. `base__abi,base__density`).
+    pub required_split_types: Option<String>,
+    /// meta-data `com.android.vending.splits.required == "true"`.
+    pub play_splits_required: bool,
+    /// Whether any `lib/<abi>/*.so` entry exists in this APK.
+    pub has_native_libs: bool,
+}
+
+impl SplitStatus {
+    /// True when ABI split(s) are required but no native library lives
+    /// in this APK — the usual "analyze the base APK only" trap.
+    /// Observation, not proof: the app may genuinely have no native
+    /// code, or the split may carry it.
+    pub fn abi_split_missing(&self) -> bool {
+        let requires_abi = [
+            self.required_split_types.as_deref(),
+            self.split_types.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| v.contains("abi"));
+        (requires_abi || self.play_splits_required) && !self.has_native_libs
+    }
+}
+
 /// Packer conclusion.
 #[derive(Debug, Clone, Serialize)]
 pub struct PackerVerdict {
@@ -108,6 +157,11 @@ pub struct InspectReport {
     pub entries: Vec<EntryInfo>,
     /// Root DEX analysis.
     pub dex: Vec<DexInfo>,
+    /// Manifest cross-check (APK only, when the manifest parses).
+    /// Hermes bytecode entries (header metadata only).
+    pub hermes: Vec<HermesInfo>,
+    /// Split-APK status (APK only, when the manifest parses).
+    pub split: Option<SplitStatus>,
     /// Manifest cross-check (APK only, when the manifest parses).
     pub manifest: Option<ManifestCheck>,
     /// Packer verdict.
@@ -148,10 +202,17 @@ fn kind_of(b: &[u8]) -> &'static str {
         "elf"
     } else if b.starts_with(b"PK\x03\x04") {
         "zip"
+    } else if b.starts_with(&HERMES_MAGIC) {
+        "hermes"
     } else {
         "other"
     }
 }
+
+/// `0x1F1903C103BC1FC6` little-endian (Meta
+/// `include/hermes/BCGen/HBC/BytecodeFileFormat.h`), verified against a
+/// real `assets/index.android.bundle`.
+const HERMES_MAGIC: [u8; 8] = [0xC6, 0x1F, 0xBC, 0x03, 0xC1, 0x03, 0x19, 0x1F];
 
 fn is_hex(s: &str) -> bool {
     !s.is_empty()
@@ -204,7 +265,9 @@ fn analyze_dex(name: &str, bytes: &[u8], names: &mut Vec<String>) -> DexInfo {
     // in `names` are then an unknown subset, so every downstream
     // manifest cross-check built on them is unsound. Surface it as a
     // coverage note (audit F05).
-    let collect_err = collect_classes_from_bytes(bytes, None, names).err();
+    let mut pairs = Vec::new();
+    let collect_err = collect_classes_from_bytes(bytes, None, name, &mut pairs).err();
+    names.extend(pairs.into_iter().map(|(d, _)| d));
     let mut info = DexInfo {
         name: name.to_string(),
         size: bytes.len(),
@@ -258,6 +321,8 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
 
     let mut entries = Vec::new();
     let mut names = Vec::new();
+    let mut hermes = Vec::new();
+    let mut has_native_libs = false;
     for e in apk.entries() {
         let mut info = EntryInfo {
             name: e.name.clone(),
@@ -280,8 +345,19 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
                 info.entropy = entropy(s);
                 info.sample_bytes = s.len();
                 info.sample_complete = complete;
+                if info.kind == "hermes" && s.len() >= 36 {
+                    hermes.push(HermesInfo {
+                        name: e.name.clone(),
+                        version: u32::from_le_bytes(s[8..12].try_into().expect("4 bytes")),
+                        file_length: u32::from_le_bytes(s[32..36].try_into().expect("4 bytes")),
+                        size: e.uncompressed_size,
+                    });
+                }
             }
             Err(x) => err(format!("{}: sample failed: {x}", e.name)),
+        }
+        if e.name.starts_with("lib/") && e.name.ends_with(".so") {
+            has_native_libs = true;
         }
         names.push(e.name.clone());
         entries.push(info);
@@ -321,6 +397,7 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
     }
 
     let mut manifest = None;
+    let mut split_status = None;
     if !apk.is_raw_dex() {
         match asc_manifest::parse_from_apk(path) {
             Ok(m) => {
@@ -345,6 +422,17 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
                     components_total: total,
                     components_missing_from_dex: missing.len(),
                     missing_examples: missing.iter().take(10).cloned().collect(),
+                });
+                let play_splits_required = m.application.meta_data.iter().any(|md| {
+                    md.name == "com.android.vending.splits.required"
+                        && md.value.as_deref() == Some("true")
+                });
+                split_status = Some(SplitStatus {
+                    split: m.split.clone(),
+                    split_types: m.split_types.clone(),
+                    required_split_types: m.required_split_types.clone(),
+                    play_splits_required,
+                    has_native_libs,
                 });
             }
             Err(x) => err(format!("manifest: {x}")),
@@ -394,6 +482,31 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
             ));
         }
     }
+    if let Some(sp) = &split_status
+        && sp.abi_split_missing()
+    {
+        anomalies.push(
+            "no lib/*.so in this APK, but the manifest requires split APKs \
+             (requiredSplitTypes/play splits metadata); native code may live \
+             in splits that were not provided — this is not evidence the app \
+             has no native code"
+                .to_string(),
+        );
+    }
+    for h in &hermes {
+        if u64::from(h.file_length) != h.size {
+            anomalies.push(format!(
+                "{}: hermes fileLength {} != actual {}",
+                h.name, h.file_length, h.size
+            ));
+        }
+        if h.version > 10_000 {
+            anomalies.push(format!(
+                "{}: implausible hermes version {}",
+                h.name, h.version
+            ));
+        }
+    }
     if let Some(m) = &manifest
         && m.components_total > 0
         && m.components_missing_from_dex == m.components_total
@@ -414,6 +527,8 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
         entry_count: entries.len(),
         entries,
         dex,
+        hermes,
+        split: split_status,
         manifest,
         packer,
         anomalies,
@@ -458,6 +573,30 @@ pub fn format_inspect_text(r: &InspectReport) -> String {
         if let Some(e) = d.tail_entropy {
             let _ = writeln!(s, "  tail entropy (<=1 MiB sample): {e}");
         }
+    }
+    for h in &r.hermes {
+        let _ = writeln!(
+            s,
+            "hermes {}: version {}, fileLength {}, size {} (inventoried only; bytecode not decompiled)",
+            h.name, h.version, h.file_length, h.size
+        );
+    }
+    if let Some(sp) = &r.split {
+        let mut parts = Vec::new();
+        if let Some(v) = &sp.split {
+            parts.push(format!("split={v}"));
+        }
+        if let Some(v) = &sp.split_types {
+            parts.push(format!("splitTypes={v}"));
+        }
+        if let Some(v) = &sp.required_split_types {
+            parts.push(format!("requiredSplitTypes={v}"));
+        }
+        if sp.play_splits_required {
+            parts.push("play-splits-required".into());
+        }
+        parts.push(format!("native_libs_present={}", sp.has_native_libs));
+        let _ = writeln!(s, "split: {}", parts.join(" "));
     }
     if let Some(m) = &r.manifest {
         let _ = writeln!(
