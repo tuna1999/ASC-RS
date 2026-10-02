@@ -57,7 +57,10 @@
 //! recorded, other workers stop pulling new work; their in-flight
 //! processing (a single `apk.read_entry + dex parse + class_defines`
 //! check) completes naturally. Total cost is bounded by the
-//! next-to-finish in-flight entry's processing time.
+//! next-to-finish in-flight entry's processing time. An entry whose
+//! memory-budget reservation was refused mid-race is deferred and
+//! rescanned sequentially after the pool joins (see
+//! [`find_defining_dex`]) — it is never silently treated as a miss.
 //!
 
 use std::borrow::Cow;
@@ -759,6 +762,18 @@ fn effective_budget(n: usize) -> usize {
 /// submission order. Within one DEX-041 container the first logical
 /// header wins (see [`scan_one_for_class`]).
 ///
+/// ## Memory budget
+///
+/// A worker that cannot reserve the process-wide scan budget for its
+/// entry (other workers are mid-scan holding theirs) must NOT decide
+/// that the entry lacks the class — that would let a higher-index DEX
+/// win or produce a spurious `MemoryBudget` error purely from worker
+/// scheduling. Such entries are **deferred** and rescanned
+/// sequentially after the pool joins, when at most one guard is held
+/// at a time, so same-run contention is impossible. An entry larger
+/// than the whole budget can never be scanned; that permanent failure
+/// is recorded and surfaces only when no lower DEX defines the class.
+///
 /// ## Error handling
 ///
 /// Read/parse failures are recorded and only surface when no DEX
@@ -792,11 +807,15 @@ fn find_defining_dex(
     // lower-index hit must replace a higher one recorded earlier.
     let best: Arc<std::sync::Mutex<Option<(usize, ClassHit)>>> =
         Arc::new(std::sync::Mutex::new(None));
+    // Entry indexes whose budget reservation was refused while other
+    // workers held theirs — unproven, to be rescanned after the join.
+    let deferred: Arc<std::sync::Mutex<Vec<usize>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     // First read/parse failure; only matters when nothing was found.
     let first_err: Arc<OnceLock<CoreError>> = Arc::new(OnceLock::new());
     let target_arc = Arc::new(target.to_owned());
     let apk_clone = Arc::clone(apk);
     let best_clone = Arc::clone(&best);
+    let deferred_clone = Arc::clone(&deferred);
     let err_clone = Arc::clone(&first_err);
 
     let scan_for_class = move |i: usize, entry: &DexEntry| -> Option<()> {
@@ -812,7 +831,17 @@ fn find_defining_dex(
         let _guard = match crate::budget::acquire(budget, entry.uncompressed_size as usize) {
             Ok(g) => g,
             Err(e) => {
-                let _ = err_clone.set(e);
+                // Entry bigger than the whole budget: no scheduling
+                // can ever scan it — a permanent failure. Anything
+                // else is same-pool contention: defer, never decide.
+                if entry.uncompressed_size as usize > budget {
+                    let _ = err_clone.set(e);
+                } else {
+                    deferred_clone
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(i);
+                }
                 return None;
             }
         };
@@ -846,6 +875,51 @@ fn find_defining_dex(
     };
 
     let _outcome = pool.run(entries, scan_for_class);
+
+    // Phase 2: the pool has joined, so this run's workers hold no
+    // guards anymore. Rescan the deferred entries sequentially — at
+    // most one guard at a time — in index order, stopping above the
+    // current best (a higher index cannot win). A refusal here means
+    // budget held by OTHER tasks in the process: the answer cannot be
+    // proven, so fail with the structured error instead of guessing.
+    let mut deferred = std::mem::take(
+        &mut *deferred
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if !deferred.is_empty() {
+        deferred.sort_unstable();
+        deferred.dedup();
+        for i in deferred {
+            let entry = &entries[i];
+            {
+                let g = best
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if g.as_ref().is_some_and(|(bi, _)| i >= *bi) {
+                    continue; // cannot beat the recorded winner
+                }
+            }
+            let _guard = crate::budget::acquire(budget, entry.uncompressed_size as usize)?;
+            let eb = apk.read_entry(entry).map_err(CoreError::from)?;
+            match scan_one_for_class(&entry.name, eb.as_slice(), target) {
+                Ok(Some(mut hit)) => {
+                    hit.bytes = eb.into_vec();
+                    let mut g = best
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if g.as_ref().is_none_or(|(bi, _)| i < *bi) {
+                        *g = Some((i, hit));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = first_err.set(e);
+                }
+            }
+        }
+    }
+
     let winner = best
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
