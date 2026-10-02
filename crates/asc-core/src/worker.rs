@@ -38,7 +38,7 @@ use std::thread;
 /// Outcome of [`WorkerPool::run`]: the index of the worker that wrote
 /// the cell, or `None` if no worker wrote (the work list was empty
 /// or every entry's processor returned `None`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerOutcome {
     /// Index of the worker that wrote the cell, or `usize::MAX` if
     /// nobody did.
@@ -46,10 +46,16 @@ pub struct WorkerOutcome {
     /// `true` iff a worker wrote the cell.
     pub found: bool,
     /// Number of workers that died on an unwind. A panicking worker
-    /// never pulls another item, so an entry it owned is *unscanned*,
+    /// never pulls another item, so entries it owned are *unscanned*,
     /// not "proven absent" — callers must not read a `found: false`
     /// outcome as a clean negative when this is non-zero (audit F03).
     pub panicked: usize,
+    /// Item indexes a panicking worker owned when it died (and, on the
+    /// inline path, everything behind the panicking item). These
+    /// entries are unscanned, not absent; callers that care about
+    /// index priority must rescan or fail before trusting a winner
+    /// whose index sits above any of these.
+    pub unscanned: Vec<usize>,
 }
 
 impl WorkerOutcome {
@@ -106,6 +112,7 @@ impl WorkerPool {
                 winner: usize::MAX,
                 found: false,
                 panicked: 0,
+                unscanned: Vec::new(),
             };
         }
 
@@ -125,16 +132,18 @@ impl WorkerPool {
                             winner: 0,
                             found: true,
                             panicked: 0,
+                            unscanned: Vec::new(),
                         };
                     }
                     Ok(None) => {}
                     Err(_) => {
-                        // This worker owned `items[i]`; everything it
-                        // had not yet pulled stays unscanned.
+                        // This worker owned `items[i]` and stops
+                        // here: everything from `i` on is unscanned.
                         return WorkerOutcome {
                             winner: usize::MAX,
                             found: false,
                             panicked: 1,
+                            unscanned: (i..items.len()).collect(),
                         };
                     }
                 }
@@ -143,6 +152,7 @@ impl WorkerPool {
                 winner: usize::MAX,
                 found: false,
                 panicked: 0,
+                unscanned: Vec::new(),
             };
         }
 
@@ -155,12 +165,20 @@ impl WorkerPool {
         let next = Arc::new(AtomicUsize::new(0));
         let found = Arc::new(AtomicBool::new(false));
         let winner_idx = Arc::new(AtomicUsize::new(usize::MAX));
+        // Per-worker "item I currently own" slot. A worker that
+        // unwinds dies with its slot still holding that index, so the
+        // join below can attribute the gap to a specific entry
+        // instead of a bare panic count.
+        let slots: Vec<Arc<AtomicUsize>> = (0..n_workers)
+            .map(|_| Arc::new(AtomicUsize::new(usize::MAX)))
+            .collect();
 
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
-        for worker_id in 0..n_workers {
+        for (worker_id, slot) in (0..n_workers).zip(slots.iter()) {
             let next = Arc::clone(&next);
             let found = Arc::clone(&found);
             let winner_idx = Arc::clone(&winner_idx);
+            let slot = Arc::clone(slot);
             let worker = worker.clone();
             let items = Arc::clone(&items_arc);
             handles.push(thread::spawn(move || {
@@ -172,9 +190,12 @@ impl WorkerPool {
                     if i >= items.len() {
                         break;
                     }
+                    slot.store(i, Ordering::Relaxed);
                     // `i < items.len()` is checked; `&items[i]` is safe.
                     let item = &items[i];
-                    if worker(i, item).is_some() {
+                    let hit = worker(i, item).is_some();
+                    slot.store(usize::MAX, Ordering::Relaxed);
+                    if hit {
                         winner_idx.store(worker_id, Ordering::Release);
                         found.store(true, Ordering::Release);
                         break;
@@ -185,11 +206,16 @@ impl WorkerPool {
 
         // A worker that unwinds takes the item it owned with it, so a
         // dropped `join` result would silently turn "unscanned" into
-        // "absent". Count the dead instead of discarding it.
+        // "absent". Count the dead and keep the indexes they owned.
         let mut panicked = 0usize;
-        for h in handles {
+        let mut unscanned = Vec::new();
+        for (h, slot) in handles.into_iter().zip(slots.iter()) {
             if h.join().is_err() {
                 panicked += 1;
+                let i = slot.load(Ordering::Acquire);
+                if i != usize::MAX {
+                    unscanned.push(i);
+                }
             }
         }
 
@@ -197,6 +223,7 @@ impl WorkerPool {
             winner: winner_idx.load(Ordering::Acquire),
             found: found.load(Ordering::Acquire),
             panicked,
+            unscanned,
         }
     }
 }

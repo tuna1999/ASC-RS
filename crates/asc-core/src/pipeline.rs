@@ -843,6 +843,8 @@ fn find_defining_dex(
     let err_clone = Arc::clone(&first_err);
 
     let scan_for_class = move |i: usize, entry: &DexEntry| -> Option<()> {
+        #[cfg(test)]
+        test_faults::pool_gate(i);
         // Deliberately NO `found` check here: an entry that was already
         // pulled must run to completion, or a lower-index winner could
         // be skipped because a higher-index worker finished first.
@@ -900,25 +902,32 @@ fn find_defining_dex(
 
     let outcome = pool.run(entries, scan_for_class);
     // A worker that unwound took the entry it owned with it: that entry
-    // is *unscanned*, not proven to lack the class. Only an outcome with
-    // no panics may fall through to "not found" (audit F03).
+    // is *unscanned*, not proven to lack the class. Its index is now
+    // known (`WorkerOutcome::unscanned`), so instead of a blanket
+    // panic veto we rescan those entries in phase 2 like budget-deferred
+    // ones; only entries that stay unscannable (panic again on the
+    // sequential rescan) can still invalidate the winner.
     let panicked_workers = outcome.panicked;
-
     // Phase 2: the pool has joined, so this run's workers hold no
-    // guards anymore. Rescan the deferred entries sequentially — at
-    // most one guard at a time — in index order, stopping above the
-    // current best (a higher index cannot win). A refusal here means
-    // budget held by OTHER tasks in the process: the answer cannot be
-    // proven, so fail with the structured error instead of guessing.
-    let mut deferred = std::mem::take(
+    // guards anymore. Rescan the budget-deferred AND panic-orphaned
+    // entries sequentially — at most one guard at a time — in index
+    // order, stopping above the current best (a higher index cannot
+    // win). A budget refusal here means budget held by OTHER tasks in
+    // the process: the answer cannot be proven, so fail with the
+    // structured error instead of guessing.
+    let mut requeue = std::mem::take(
         &mut *deferred
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    if !deferred.is_empty() {
-        deferred.sort_unstable();
-        deferred.dedup();
-        for i in deferred {
+    requeue.extend(outcome.unscanned.iter().copied());
+    // Entries that panicked again during the sequential rescan: their
+    // content stays unproven, so they may still invalidate a winner.
+    let mut panic_pending: Vec<usize> = Vec::new();
+    if !requeue.is_empty() {
+        requeue.sort_unstable();
+        requeue.dedup();
+        for i in requeue {
             let entry = &entries[i];
             {
                 let g = best
@@ -950,8 +959,17 @@ fn find_defining_dex(
                     continue;
                 }
             };
-            match scan_one_for_class(&entry.name, eb.as_slice(), target) {
-                Ok(Some(mut hit)) => {
+            // catch_unwind: a panic on the rescan path must surface as
+            // `WorkerPanicked`, not unwind out of the API. The budget
+            // guard above is released by unwinding (Drop) — no leak.
+            let scanned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(test)]
+                test_faults::rescan_gate(i);
+                scan_one_for_class(&entry.name, eb.as_slice(), target)
+            }));
+            match scanned {
+                Err(_) => panic_pending.push(i),
+                Ok(Ok(Some(mut hit))) => {
                     hit.bytes = eb.into_vec();
                     let mut g = best
                         .lock()
@@ -960,27 +978,43 @@ fn find_defining_dex(
                         *g = Some((i, hit));
                     }
                 }
-                Ok(None) => {}
-                Err(e) => {
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
                     let _ = first_err.set(e);
                 }
             }
         }
     }
 
+    // Only still-unproven entries BELOW the winner (or all of them when
+    // there is no winner) can change the answer: an unscanned index
+    // above the winner could never have won anyway (the pool stops
+    // pulling entries above a hit by design).
+    let best_idx = best
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|(bi, _)| *bi);
+    panic_pending.retain(|&i| best_idx.is_none_or(|b| i < b));
+
     let winner = best
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .map(|(_, hit)| hit);
+    if !panic_pending.is_empty() || (winner.is_none() && panicked_workers > 0) {
+        return Err(CoreError::WorkerPanicked(format!(
+            "{panicked_workers} getclass worker(s) panicked (unproven entries \
+             {panic_pending:?}); the scan is incomplete and Class {target} \
+             cannot be ruled out"
+        )));
+    }
     match winner {
+        // A winner is a real hit and every entry below it is proven
+        // (scanned, or rescanned clean): it outranks any recorded
+        // error, exactly as the budget-deferral fix established.
+        // A panic above the winner never invalidates it.
         Some(w) => Ok(w),
-        // A winner is a real hit: it outranks any recorded error, exactly
-        // as the budget-deferral fix established.
-        None if panicked_workers > 0 => Err(CoreError::WorkerPanicked(format!(
-            "{panicked_workers} getclass worker(s) panicked; the scan is incomplete \
-             and Class {target} cannot be ruled out"
-        ))),
         None => Err(
             match Arc::try_unwrap(first_err)
                 .ok()
@@ -993,9 +1027,52 @@ fn find_defining_dex(
     }
 }
 
+/// Test-only fault injection for the panic-provenance path of
+/// [`find_defining_dex`]. Both gates are `usize::MAX` (off) outside a
+/// test that sets them; [`test_faults::ALL`] panics on every entry.
+#[cfg(test)]
+mod test_faults {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub const ALL: usize = usize::MAX - 1;
+    pub static POOL_PANIC_AT: AtomicUsize = AtomicUsize::new(usize::MAX);
+    pub static RESCAN_PANIC_AT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    pub fn pool_gate(i: usize) {
+        let v = POOL_PANIC_AT.load(Ordering::Relaxed);
+        if v == ALL || v == i {
+            panic!("injected worker panic at entry {i}");
+        }
+    }
+
+    pub fn rescan_gate(i: usize) {
+        let v = RESCAN_PANIC_AT.load(Ordering::Relaxed);
+        if v == ALL || v == i {
+            panic!("injected rescan panic at entry {i}");
+        }
+    }
+
+    /// Resets both gates when dropped, so a failing assertion cannot
+    /// poison later tests in the same binary.
+    pub struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            POOL_PANIC_AT.store(usize::MAX, Ordering::Relaxed);
+            RESCAN_PANIC_AT.store(usize::MAX, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set(pool: usize, rescan: usize) -> Reset {
+        POOL_PANIC_AT.store(pool, Ordering::Relaxed);
+        RESCAN_PANIC_AT.store(rescan, Ordering::Relaxed);
+        Reset
+    }
+}
+
 /// A class-defining DEX found by `getclass`: the display name, the entry
 /// bytes (whole container for DEX-041), and the logical header offset.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ClassHit {
     name: String,
     /// The resolved class descriptor, so the disassembler can be handed
@@ -1695,6 +1772,7 @@ mod tests {
     /// refused and the broken second entry is carried by the rescan.
     #[test]
     fn deferred_rescan_reports_the_broken_entry_and_releases_its_guards() {
+        let _lock = fault_lock();
         // classes.dex parses; classes2.dex is unreadable (valid magic,
         // unparseable body) and is the one the rescan has to carry.
         let bad: &[u8] = b"dex\n035\0\0\0\0\0";
@@ -1749,6 +1827,7 @@ mod tests {
 
     #[test]
     fn getclass_reports_corrupt_dex_on_single_and_multi_paths() {
+        let _lock = fault_lock();
         // Header bytes only: magic OK, but far too short to parse.
         let bad: &[u8] = b"dex\n035\0\0\0\0\0";
         let dir = std::env::temp_dir();
@@ -1797,6 +1876,205 @@ mod tests {
                 assert_eq!(msg, "bad class_def->type_idx");
             }
             other => panic!("expected Usage(bad class_def->type_idx), got {other:?}"),
+        }
+    }
+
+    // ---- panic provenance in find_defining_dex (winner masking) ----
+    //
+    // The pool reports which entry indexes a panicking worker owned
+    // (`WorkerOutcome::unscanned`); phase 2 rescans them sequentially
+    // like budget-deferred entries. A winner may only be returned when
+    // every entry BELOW it is proven (scanned or rescanned clean). The
+    // gates in `test_faults` inject panics at a fixed ENTRY index, so
+    // every scenario below is deterministic without sleeps: whoever
+    // owns the gated entry dies, the other entries are always scanned.
+    #[path = "../../../tests/common/mod.rs"]
+    mod common;
+
+    /// Fault-gate and budget tests in this module serialize on this
+    /// lock: the gates are process-wide statics and `in_flight` is
+    /// process-wide, while cargo runs tests in parallel threads.
+    static FAULT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn fault_lock() -> std::sync::MutexGuard<'static, ()> {
+        FAULT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn defining_dex_buf(class: &str) -> Vec<u8> {
+        common::Dex::new(
+            &[common::OBJECT, class],
+            vec![],
+            vec![],
+            &[common::u(common::OBJECT), common::u(class)],
+        )
+        .finish(&[(class, vec![], vec![])])
+    }
+
+    fn scan_fixture(tag: &str, classes: &[Option<&str>]) -> (std::sync::Arc<Apk>, Vec<DexEntry>) {
+        let bufs: Vec<(String, Vec<u8>)> = classes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let name = if i == 0 {
+                    "classes.dex".to_string()
+                } else {
+                    format!("classes{}.dex", i + 1)
+                };
+                let bytes = match c {
+                    Some(cls) => defining_dex_buf(cls),
+                    // No class_defs: cannot define anything.
+                    None => common::Dex::new(
+                        &[common::OBJECT],
+                        vec![],
+                        vec![],
+                        &[common::u(common::OBJECT)],
+                    )
+                    .finish(&[]),
+                };
+                (name, bytes)
+            })
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> =
+            bufs.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
+        let path = common::write_apk(tag, &refs);
+        let apk = std::sync::Arc::new(Apk::open(&path).unwrap());
+        let list = apk.dex_entries();
+        (apk, list)
+    }
+
+    const A: &str = "Lp/A;";
+    const B: &str = "Lp/B;";
+
+    /// TEST-01: the entry-0 worker dies before proving anything; the
+    /// hit in entry 1 is only trustworthy after entry 0 is rescanned
+    /// clean. The rescan must actually run (pre-fix code returned the
+    /// entry-1 hit with entry 0 unproven).
+    #[test]
+    fn panic_in_higher_priority_dex_rescans_before_trusting_the_winner() {
+        let _lock = fault_lock();
+        let _g = test_faults::set(0, usize::MAX);
+        let (apk, entries) = scan_fixture("panic01", &[None, Some(A)]);
+        for _ in 0..5 {
+            let hit = find_defining_dex(&apk, &entries, 2, A, 0)
+                .expect("rescan of entry 0 must clear it");
+            assert_eq!(hit.name, "classes2.dex");
+        }
+    }
+
+    /// TEST-01b (the pre-fix failure mode): entry 0 cannot be proven
+    /// (panics on the pool AND on the rescan), so the entry-1 hit MUST
+    /// NOT be returned as a certain winner — pre-fix code did exactly
+    /// that, silently masking the interrupted scan of `classes.dex`.
+    #[test]
+    fn unprovable_higher_priority_dex_is_a_structured_error_not_a_hit() {
+        let _lock = fault_lock();
+        let _g = test_faults::set(0, 0);
+        let (apk, entries) = scan_fixture("panic01b", &[None, Some(A)]);
+        for _ in 0..5 {
+            let r = find_defining_dex(&apk, &entries, 2, A, 0);
+            assert!(
+                matches!(r, Err(CoreError::WorkerPanicked(_))),
+                "masked winner must be a structured error, got {r:?}"
+            );
+        }
+    }
+
+    /// TEST-02: entry 0 finds the class; a panic in entry 1 (above the
+    /// winner) can never change the answer and must not veto the hit.
+    #[test]
+    fn panic_below_the_winner_does_not_veto_it() {
+        let _lock = fault_lock();
+        let _g = test_faults::set(1, usize::MAX);
+        let (apk, entries) = scan_fixture("panic02", &[Some(A), Some(B)]);
+        for threads in [2usize, 4] {
+            let hit = find_defining_dex(&apk, &entries, threads, A, 0)
+                .expect("winner at index 0 is proven");
+            assert_eq!(hit.name, "classes.dex");
+        }
+    }
+
+    /// TEST-03: with every entry unscannable in both phases, neither a
+    /// hit nor `ClassNotFound` may be reported.
+    #[test]
+    fn all_workers_panicking_is_not_class_not_found() {
+        let _lock = fault_lock();
+        let _g = test_faults::set(test_faults::ALL, test_faults::ALL);
+        let (apk, entries) = scan_fixture("panic03", &[None, None]);
+        for threads in [1usize, 2, 4] {
+            let r = find_defining_dex(&apk, &entries, threads, A, 0);
+            assert!(
+                matches!(r, Err(CoreError::WorkerPanicked(_))),
+                "threads={threads}: got {r:?}"
+            );
+        }
+    }
+
+    /// TEST-04: inline path (`--threads 1`). The panic is caught, and
+    /// the entries behind it are still rescanned; a rescan panic
+    /// surfaces as the same structured error, never an unwind.
+    #[test]
+    fn inline_panic_becomes_a_result_not_an_unwind() {
+        let _lock = fault_lock();
+        let _g = test_faults::set(0, usize::MAX);
+        let (apk, entries) = scan_fixture("panic04a", &[None, Some(A)]);
+        let hit = find_defining_dex(&apk, &entries, 1, A, 0).expect("inline panic is caught");
+        assert_eq!(hit.name, "classes2.dex");
+        drop(_g);
+
+        // Rescan also panics -> structured error, no unwind out of the API.
+        let _g = test_faults::set(0, 0);
+        let (apk, entries) = scan_fixture("panic04b", &[None, Some(A)]);
+        assert!(matches!(
+            find_defining_dex(&apk, &entries, 1, A, 0),
+            Err(CoreError::WorkerPanicked(_))
+        ));
+    }
+
+    /// TEST-05: no panics — priority and determinism are unchanged.
+    #[test]
+    fn no_panic_keeps_dex_priority_and_not_found() {
+        let _lock = fault_lock();
+        let (apk, entries) = scan_fixture("panic05", &[Some(A), Some(A)]);
+        for threads in [1usize, 2, 4, 8] {
+            let hit = find_defining_dex(&apk, &entries, threads, A, 0).unwrap();
+            assert_eq!(hit.name, "classes.dex", "threads={threads}");
+        }
+        assert!(matches!(
+            find_defining_dex(&apk, &entries, 4, "Lp/Nope;", 0),
+            Err(CoreError::ClassNotFound(_))
+        ));
+    }
+
+    /// TEST-06: budget deferral + a panicking worker + a hit elsewhere.
+    /// The cap fits two of the three entries, so one defers (whichever
+    /// loses the race); the panic orphans its entry. Both funnel into
+    /// the sequential phase-2 rescan, so the answer must be identical
+    /// on every iteration regardless of scheduling — and no guard leaks.
+    #[test]
+    fn panic_with_budget_contention_is_schedule_independent() {
+        let _lock = fault_lock();
+        let entry_len = defining_dex_buf(A).len();
+        let cap = entry_len * 2;
+
+        let _g = test_faults::set(1, usize::MAX);
+        let (apk, entries) = scan_fixture("panic06a", &[None, None, Some(B)]);
+        for _ in 0..10 {
+            let hit = find_defining_dex(&apk, &entries, 3, B, cap)
+                .expect("every entry is proven by scan or rescan");
+            assert_eq!(hit.name, "classes3.dex");
+            assert_eq!(crate::budget::in_flight(), 0, "guard leaked");
+        }
+        drop(_g);
+
+        // Winner at index 0 with the panic and any deferral above it.
+        let _g = test_faults::set(2, usize::MAX);
+        let (apk, entries) = scan_fixture("panic06b", &[Some(A), None, None]);
+        for _ in 0..10 {
+            let hit = find_defining_dex(&apk, &entries, 3, A, cap).unwrap();
+            assert_eq!(hit.name, "classes.dex");
+            assert_eq!(crate::budget::in_flight(), 0, "guard leaked");
         }
     }
 }
