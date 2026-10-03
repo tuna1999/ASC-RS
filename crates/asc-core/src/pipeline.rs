@@ -1538,32 +1538,70 @@ pub(crate) fn collect_classes_from_bytes(
     entry_name: &str,
     out: &mut Vec<(String, String)>,
 ) -> Result<(), CoreError> {
+    match collect_classes_coverage(bytes, prefix, entry_name, out) {
+        ClassCoverage::Partial(e) => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Outcome of a class-collection pass over one DEX entry. `Unknown` covers
+/// every path that historically returned `Ok(())` with zero classes
+/// (non-DEX magic, unparseable header, failed container walk); `Partial`
+/// is a mid-walk index error (the descriptors collected so far are an
+/// unknown subset). Inspect uses this to qualify its manifest
+/// cross-check; `collect_classes_from_bytes` keeps the oracle-compatible
+/// Result shape for the other callers.
+pub(crate) enum ClassCoverage {
+    Complete,
+    Partial(CoreError),
+    Unknown(String),
+}
+
+pub(crate) fn collect_classes_coverage(
+    bytes: &[u8],
+    prefix: Option<&[u8]>,
+    entry_name: &str,
+    out: &mut Vec<(String, String)>,
+) -> ClassCoverage {
     if bytes.len() < 8 || !bytes.starts_with(b"dex\n") {
-        return Ok(());
+        return ClassCoverage::Unknown("entry does not start with the DEX magic".into());
     }
     if bytes.starts_with(b"dex\n041\0") {
         // DEX-041 container: walk logical headers (mirrors
         // `scan_entry_bytes` in the findrefs pipeline above).
         let Ok(offsets) = DexView::logical_header_offsets(bytes) else {
-            return Ok(());
+            return ClassCoverage::Unknown("DEX-041 logical header walk failed".into());
         };
+        let mut coverage = ClassCoverage::Complete;
         for (i, off) in offsets.iter().enumerate() {
             // The oracle skips an entire logical member on parse failure
-            // (`apk_handler.list_classes:478-501`); mirror that here.
-            if let Ok(view) = DexView::parse_at(bytes, *off) {
-                collect_from_view(
-                    &view,
-                    prefix,
-                    out,
-                    &logical_dex_name(entry_name, offsets.len(), i),
-                )?;
+            // (`apk_handler.list_classes:478-501`); mirror that here, but
+            // remember it so inspect can qualify downstream conclusions.
+            match DexView::parse_at(bytes, *off) {
+                Ok(view) => {
+                    if let Err(e) = collect_from_view(
+                        &view,
+                        prefix,
+                        out,
+                        &logical_dex_name(entry_name, offsets.len(), i),
+                    ) {
+                        return ClassCoverage::Partial(e);
+                    }
+                }
+                Err(_) => {
+                    coverage =
+                        ClassCoverage::Unknown(format!("logical member {i} failed to parse"));
+                }
             }
         }
-        Ok(())
+        coverage
     } else if let Ok(view) = DexView::parse(bytes) {
-        collect_from_view(&view, prefix, out, entry_name)
+        match collect_from_view(&view, prefix, out, entry_name) {
+            Ok(()) => ClassCoverage::Complete,
+            Err(e) => ClassCoverage::Partial(e),
+        }
     } else {
-        Ok(())
+        ClassCoverage::Unknown("DEX header did not parse".into())
     }
 }
 

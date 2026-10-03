@@ -69,7 +69,7 @@ jobs:
       - name: Build workload.apk from frozen oracle
         # workload.apk is a deterministic synthetic ZIP that wraps the
         # classes.dex extracted from MG1937/asc @ ccc6bae (oracle freeze).
-        # See corpus/MANIFEST.md and reference/FREEZE.md.
+        # See docs/CORPUS.md and reference/FREEZE.md.
         shell: bash
         env:
           WORKLOAD_SRC: ${{ runner.temp }}/oracle
@@ -117,6 +117,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test (debug)
+        env:
+          # CI recreated these fixtures above; a test that cannot find
+          # one must FAIL, not silently skip (docs/CORPUS.md).
+          ASC_REQUIRE_CORPUS: aurora,fdroid,workload
         run: cargo test --workspace
 
       - name: Build (release)

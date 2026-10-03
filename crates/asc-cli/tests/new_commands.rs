@@ -81,10 +81,30 @@ fn run_cli(args: &[&str]) -> std::process::Output {
     Command::new(BIN).args(args).output().expect("spawn asc-rs")
 }
 
+/// `true` when the fixture basename matches an entry of the
+/// comma-separated `ASC_REQUIRE_CORPUS` list (CI sets it after
+/// recreating the corpus fixtures it guarantees; a listed fixture that
+/// is still missing must fail, not silently skip).
+fn require_corpus(var: &str, p: &std::path::Path) -> bool {
+    std::env::var(var).is_ok_and(|req| {
+        req.split(',').any(|f| {
+            let f = f.trim();
+            !f.is_empty()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(f))
+        })
+    })
+}
 fn corpus(name: &str) -> Option<PathBuf> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus")
         .join(name);
+    if !p.exists() && require_corpus("ASC_REQUIRE_CORPUS", &p) {
+        panic!(
+            "ASC_REQUIRE_CORPUS is set but fixture missing: {}",
+            p.display()
+        );
+    }
     p.exists().then_some(p)
 }
 

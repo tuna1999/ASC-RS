@@ -1090,11 +1090,22 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
 
     let _ = writeln!(s, "permissions ({}):", m.permissions.len());
     for p in &m.permissions {
-        let max = p
-            .max_sdk
-            .map(|v| format!(" (maxSdk={v})"))
-            .unwrap_or_default();
-        let _ = writeln!(s, "  {}{}", p.name, max);
+        let mut note = String::new();
+        match p.decl {
+            "declares" => {
+                note.push_str(" [declared");
+                if let Some(pl) = &p.protection_level {
+                    note.push_str(&format!(", protectionLevel={pl}"));
+                }
+                note.push(']');
+            }
+            "uses-sdk-23" => note.push_str(" [sdk-23]"),
+            _ => {}
+        }
+        if let Some(v) = p.max_sdk {
+            note.push_str(&format!(" (maxSdk={v})"));
+        }
+        let _ = writeln!(s, "  {}{}", p.name, note);
     }
 
     if !m.uses_features.is_empty() {

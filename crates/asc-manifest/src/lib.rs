@@ -129,6 +129,10 @@ pub enum ManifestError {
 pub struct PermissionEntry {
     /// The permission name (e.g. `android.permission.INTERNET`).
     pub name: String,
+    /// Declaration type: `uses` (`<uses-permission>`), `uses-sdk-23`
+    /// (`<uses-permission-sdk-23>`/`-sdk-m>` — requested only on M+),
+    /// or `declares` (`<permission>` — the app *defines* it).
+    pub decl: &'static str,
     /// `protectionLevel` attribute (e.g. `"normal"`, `"dangerous"`); `None`
     /// for `<uses-permission>` declarations which never carry one.
     pub protection_level: Option<String>,
@@ -1055,26 +1059,11 @@ impl<'a> Parser<'a> {
                     self.info.target_sdk = Some(v);
                 }
             }
-            "uses-permission" => {
-                if let Some(p) = attr(attrs, "name") {
-                    self.info.permissions.push(PermissionEntry {
-                        name: p.to_string(),
-                        protection_level: None,
-                        label: None,
-                        max_sdk: int_attr(attrs, "maxSdkVersion"),
-                    });
-                }
+            "uses-permission" => push_permission(&mut self.info, "uses", attrs),
+            "uses-permission-sdk-23" | "uses-permission-sdk-m" => {
+                push_permission(&mut self.info, "uses-sdk-23", attrs);
             }
-            "permission" => {
-                if let Some(p) = attr(attrs, "name") {
-                    self.info.permissions.push(PermissionEntry {
-                        name: p.to_string(),
-                        protection_level: attr(attrs, "protectionLevel").map(str::to_string),
-                        label: attr(attrs, "label").map(str::to_string),
-                        max_sdk: None,
-                    });
-                }
-            }
+            "permission" => push_permission(&mut self.info, "declares", attrs),
             "application" => {
                 read_application_attrs(&mut self.info, attrs);
             }
@@ -1102,26 +1091,11 @@ impl<'a> Parser<'a> {
                     self.info.target_sdk = Some(v);
                 }
             }
-            "uses-permission" => {
-                if let Some(p) = attr(attrs, "name") {
-                    self.info.permissions.push(PermissionEntry {
-                        name: p.to_string(),
-                        protection_level: None,
-                        label: None,
-                        max_sdk: int_attr(attrs, "maxSdkVersion"),
-                    });
-                }
+            "uses-permission" => push_permission(&mut self.info, "uses", attrs),
+            "uses-permission-sdk-23" | "uses-permission-sdk-m" => {
+                push_permission(&mut self.info, "uses-sdk-23", attrs);
             }
-            "permission" => {
-                if let Some(p) = attr(attrs, "name") {
-                    self.info.permissions.push(PermissionEntry {
-                        name: p.to_string(),
-                        protection_level: attr(attrs, "protectionLevel").map(str::to_string),
-                        label: attr(attrs, "label").map(str::to_string),
-                        max_sdk: None,
-                    });
-                }
-            }
+            "permission" => push_permission(&mut self.info, "declares", attrs),
             "uses-feature" => {
                 self.info.uses_features.push(FeatureEntry {
                     name: attr(attrs, "name").map(str::to_string),
@@ -1296,6 +1270,22 @@ fn data_spec_from_attrs(attrs: &[XmlAttr]) -> DataSpec {
         path_suffix: attr(attrs, "pathSuffix").map(str::to_string),
         mime_type: attr(attrs, "mimeType").map(str::to_string),
     }
+}
+
+/// Append one permission entry of the given declaration type. Shared by
+/// the manifest-child and degenerate root-level arms.
+fn push_permission(info: &mut ManifestInfo, decl: &'static str, attrs: &[XmlAttr]) {
+    let Some(p) = attr(attrs, "name") else { return };
+    info.permissions.push(PermissionEntry {
+        name: p.to_string(),
+        decl,
+        protection_level: (decl == "declares")
+            .then(|| attr(attrs, "protectionLevel"))
+            .flatten()
+            .map(str::to_string),
+        label: attr(attrs, "label").map(str::to_string),
+        max_sdk: int_attr(attrs, "maxSdkVersion"),
+    });
 }
 
 // ---------------------------------------------------------------------------

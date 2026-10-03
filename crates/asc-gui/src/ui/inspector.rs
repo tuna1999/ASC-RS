@@ -374,12 +374,14 @@ mod tests {
             permissions: vec![
                 PermissionEntry {
                     name: "android.permission.INTERNET".into(),
+                    decl: "uses",
                     protection_level: None,
                     label: None,
                     max_sdk: None,
                 },
                 PermissionEntry {
                     name: "android.permission.ACCESS_NETWORK_STATE".into(),
+                    decl: "uses",
                     protection_level: None,
                     label: None,
                     max_sdk: None,
@@ -490,6 +492,7 @@ mod tests {
             version_name: Some("1.0".into()),
             permissions: vec![PermissionEntry {
                 name: "android.permission.INTERNET".into(),
+                decl: "uses",
                 protection_level: None,
                 label: None,
                 max_sdk: None,

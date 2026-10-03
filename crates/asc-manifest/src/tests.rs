@@ -11,10 +11,30 @@
 
 use super::*;
 
+/// `true` when the fixture basename matches an entry of the
+/// comma-separated `ASC_REQUIRE_CORPUS` list (CI sets it after
+/// recreating the corpus fixtures it guarantees; a listed fixture that
+/// is still missing must fail, not silently skip).
+fn require_corpus(var: &str, p: &std::path::Path) -> bool {
+    std::env::var(var).is_ok_and(|req| {
+        req.split(',').any(|f| {
+            let f = f.trim();
+            !f.is_empty()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(f))
+        })
+    })
+}
 fn corpus(name: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/apk")
         .join(name);
+    if !p.exists() && require_corpus("ASC_REQUIRE_CORPUS", &p) {
+        panic!(
+            "ASC_REQUIRE_CORPUS is set but fixture missing: {}",
+            p.display()
+        );
+    }
     p.exists().then_some(p)
 }
 
@@ -853,7 +873,7 @@ fn element_with_attr(attr_ns: u32, attr_name: u32, attr_raw: u32, ty: u8, data: 
     bytes.extend_from_slice(&1u16.to_le_bytes()); // len 1
     bytes.extend_from_slice(&0x31u16.to_le_bytes()); // '1'
     bytes.extend_from_slice(&0u16.to_le_bytes()); // NUL
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(0);
     }
     let sp_size = (bytes.len() - sp_start) as u32;
@@ -1425,15 +1445,15 @@ fn axml_decodes_tree_with_namespaces_order_and_types() {
     let parsed = crate::axml::parse_axml(&axml::build(&doc)).expect("parse");
     let root = parsed.root.as_ref().expect("root");
     assert_eq!(root.name, "network-security-config");
-    assert_eq!(root.children.len(), 1);
-    let base = &root.children[0];
+    assert_eq!(root.elements().count(), 1);
+    let base = root.elements().next().unwrap();
     assert_eq!(base.name, "base-config");
     assert_eq!(base.attrs.len(), 1);
     let a = &base.attrs[0];
     assert_eq!(a.name, "cleartextTrafficPermitted");
     assert_eq!(a.value.as_deref(), Some("false"));
     assert_eq!(a.value_type, 0x12);
-    let cert = &base.children[0].children[0];
+    let cert = base.elements().next().unwrap().elements().next().unwrap();
     assert_eq!(cert.name, "certificates");
     // Unresolved resource references stay visible as @0x….
     assert_eq!(cert.attrs[0].value.as_deref(), Some("@0x010f000f"));
@@ -1490,7 +1510,7 @@ fn cdata_chunks_are_skipped_not_rejected() {
 
     let parsed = crate::axml::parse_axml(&bytes).expect("CDATA must be skipped, not rejected");
     assert_eq!(
-        parsed.root.as_ref().unwrap().children.len(),
+        parsed.root.as_ref().unwrap().elements().count(),
         1,
         "b survives"
     );
@@ -1516,4 +1536,229 @@ fn axml_element_nesting_is_capped_for_recursion_safety() {
         Err(ManifestError::BadChunk(m)) => assert!(m.contains("nesting"), "{m}"),
         other => panic!("expected BadChunk for deep nesting, got {other:?}"),
     }
+}
+
+/// CDATA text nodes must be preserved, in document order, escaped — the
+/// F-Droid APK's `res/4u.xml` (network-security-config) carries every
+/// `<domain>` name as CDATA (audit F01: they used to vanish).
+#[test]
+fn cdata_text_is_preserved_in_order() {
+    // Hand-rolled bytes: pool ["a","b","example.com"]; <a> TEXT0 <b/>
+    // TEXT1 </a> — text before and after the child element.
+    let strings = ["a", "b", "example.com"];
+    let mut data: Vec<u8> = Vec::new();
+    let mut offs = Vec::new();
+    for s in &strings {
+        offs.push(data.len() as u32);
+        let u: Vec<u16> = s.encode_utf16().collect();
+        data.extend_from_slice(&(u.len() as u16).to_le_bytes());
+        data.extend(u.iter().flat_map(|x| x.to_le_bytes()));
+        data.extend_from_slice(&0u16.to_le_bytes());
+    }
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let strings_start = 28 + strings.len() * 4;
+    let mut pool = Vec::new();
+    pool.extend_from_slice(&0x0001u16.to_le_bytes());
+    pool.extend_from_slice(&28u16.to_le_bytes());
+    pool.extend_from_slice(&((strings_start + data.len()) as u32).to_le_bytes());
+    pool.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+    pool.extend_from_slice(&0u32.to_le_bytes()); // UTF-16
+    pool.extend_from_slice(&(strings_start as u32).to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+    for o in offs {
+        pool.extend_from_slice(&o.to_le_bytes());
+    }
+    pool.extend_from_slice(&data);
+
+    let start = |name: u32| -> Vec<u8> {
+        let mut v = vec![0x02, 0x01, 16, 0];
+        v.extend_from_slice(&36u32.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes()); // line
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // comment
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // ns
+        v.extend_from_slice(&name.to_le_bytes());
+        v.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // attr ext, 0 attrs
+        v
+    };
+    let end = |name: u32| -> Vec<u8> {
+        let mut v = vec![0x03, 0x01, 16, 0];
+        v.extend_from_slice(&24u32.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        v.extend_from_slice(&name.to_le_bytes());
+        v
+    };
+    let cdata = |sidx: u32| -> Vec<u8> {
+        let mut v = vec![0x04, 0x01, 16, 0];
+        v.extend_from_slice(&20u32.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes()); // line
+        v.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // comment
+        v.extend_from_slice(&sidx.to_le_bytes()); // data
+        v
+    };
+
+    let chunks = [start(0), cdata(2), start(1), end(1), cdata(2), end(0)];
+    let body: usize = pool.len() + chunks.iter().map(Vec::len).sum::<usize>();
+    let mut bytes = vec![0x03, 0x00, 8, 0];
+    bytes.extend_from_slice(&((8 + body) as u32).to_le_bytes());
+    bytes.extend_from_slice(&pool);
+    for c in chunks {
+        bytes.extend_from_slice(&c);
+    }
+
+    let parsed = crate::axml::parse_axml(&bytes).expect("mixed content parses");
+    let root = parsed.root.as_ref().unwrap();
+    use crate::axml::AxmlNode;
+    let kinds: Vec<&str> = root
+        .children
+        .iter()
+        .map(|c| match c {
+            AxmlNode::Element(_) => "element",
+            AxmlNode::Text { .. } => "text",
+        })
+        .collect();
+    assert_eq!(kinds, ["text", "element", "text"], "order is kept");
+    assert_eq!(root.elements().next().unwrap().name, "b");
+    let text = crate::axml::format_axml_text(&parsed);
+    assert!(text.contains("example.com\n"), "text nodes render: {text}");
+}
+
+/// Text bodies are XML-escaped on render.
+#[test]
+fn cdata_text_is_escaped() {
+    let escaped = "a &amp; b &lt;tag&gt;";
+    // Reuse the builder above by inlining the minimum: single element
+    // with one CDATA "a & b <tag>".
+    let raw = "a & b <tag>";
+    let strings = ["a", raw];
+    let mut data: Vec<u8> = Vec::new();
+    let mut offs = Vec::new();
+    for s in &strings {
+        offs.push(data.len() as u32);
+        let u: Vec<u16> = s.encode_utf16().collect();
+        data.extend_from_slice(&(u.len() as u16).to_le_bytes());
+        data.extend(u.iter().flat_map(|x| x.to_le_bytes()));
+        data.extend_from_slice(&0u16.to_le_bytes());
+    }
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let strings_start = 28 + strings.len() * 4;
+    let mut pool = Vec::new();
+    pool.extend_from_slice(&0x0001u16.to_le_bytes());
+    pool.extend_from_slice(&28u16.to_le_bytes());
+    pool.extend_from_slice(&((strings_start + data.len()) as u32).to_le_bytes());
+    pool.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes());
+    pool.extend_from_slice(&(strings_start as u32).to_le_bytes());
+    pool.extend_from_slice(&0u32.to_le_bytes());
+    for o in offs {
+        pool.extend_from_slice(&o.to_le_bytes());
+    }
+    pool.extend_from_slice(&data);
+    let mut start = vec![0x02, 0x01, 16, 0];
+    start.extend_from_slice(&36u32.to_le_bytes());
+    start.extend_from_slice(&1u32.to_le_bytes());
+    start.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    start.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    start.extend_from_slice(&0u32.to_le_bytes());
+    start.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mut cdata = vec![0x04, 0x01, 16, 0];
+    cdata.extend_from_slice(&20u32.to_le_bytes());
+    cdata.extend_from_slice(&1u32.to_le_bytes());
+    cdata.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    cdata.extend_from_slice(&1u32.to_le_bytes());
+    let mut end = vec![0x03, 0x01, 16, 0];
+    end.extend_from_slice(&24u32.to_le_bytes());
+    end.extend_from_slice(&1u32.to_le_bytes());
+    end.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    end.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    end.extend_from_slice(&0u32.to_le_bytes());
+    let chunks = [start, cdata, end];
+    let body: usize = pool.len() + chunks.iter().map(Vec::len).sum::<usize>();
+    let mut bytes = vec![0x03, 0x00, 8, 0];
+    bytes.extend_from_slice(&((8 + body) as u32).to_le_bytes());
+    bytes.extend_from_slice(&pool);
+    for c in chunks {
+        bytes.extend_from_slice(&c);
+    }
+    let parsed = crate::axml::parse_axml(&bytes).expect("parse");
+    let text = crate::axml::format_axml_text(&parsed);
+    assert!(text.contains(escaped), "escaped body must render: {text}");
+}
+
+/// Declaration types are kept apart: `<uses-permission>`,
+/// `<uses-permission-sdk-23>` (and its `-sdk-m` alias) and a custom
+/// `<permission>` with `protectionLevel` (audit F04: they used to merge
+/// into one indistinguishable list, and the sdk-23 variant vanished).
+#[test]
+fn permission_declaration_types_are_kept_apart() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "manifest",
+        vec![attr(None, "package", Val::Str("com.example.app"))],
+        vec![
+            elem(
+                "uses-permission",
+                vec![attr(
+                    Some(ANDROID_NS),
+                    "name",
+                    Val::Str("android.permission.INTERNET"),
+                )],
+                vec![],
+            ),
+            elem(
+                "uses-permission-sdk-23",
+                vec![attr(
+                    Some(ANDROID_NS),
+                    "name",
+                    Val::Str("android.permission.ACCESS_COARSE_LOCATION"),
+                )],
+                vec![],
+            ),
+            elem(
+                "uses-permission-sdk-m",
+                vec![attr(
+                    Some(ANDROID_NS),
+                    "name",
+                    Val::Str("android.permission.BODY_SENSORS"),
+                )],
+                vec![],
+            ),
+            elem(
+                "permission",
+                vec![
+                    attr(Some(ANDROID_NS), "name", Val::Str("com.example.app.CUSTOM")),
+                    attr(Some(ANDROID_NS), "protectionLevel", Val::Str("dangerous")),
+                ],
+                vec![],
+            ),
+        ],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+    let perms: Vec<(&str, &str, Option<&str>)> = info
+        .permissions
+        .iter()
+        .map(|p| (p.decl, p.name.as_str(), p.protection_level.as_deref()))
+        .collect();
+    assert_eq!(
+        perms,
+        [
+            ("uses", "android.permission.INTERNET", None),
+            (
+                "uses-sdk-23",
+                "android.permission.ACCESS_COARSE_LOCATION",
+                None
+            ),
+            ("uses-sdk-23", "android.permission.BODY_SENSORS", None),
+            ("declares", "com.example.app.CUSTOM", Some("dangerous")),
+        ],
+        "all four declarations survive with their types: {:?}",
+        perms
+    );
 }

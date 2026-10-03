@@ -3,8 +3,28 @@
 
 use super::*;
 
+/// `true` when the fixture basename matches an entry of the
+/// comma-separated `ASC_REQUIRE_CORPUS` list (CI sets it after
+/// recreating the corpus fixtures it guarantees; a listed fixture that
+/// is still missing must fail, not silently skip).
+fn require_corpus(var: &str, p: &std::path::Path) -> bool {
+    std::env::var(var).is_ok_and(|req| {
+        req.split(',').any(|f| {
+            let f = f.trim();
+            !f.is_empty()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(f))
+        })
+    })
+}
 fn corpus() -> Option<PathBuf> {
     let apk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    if !apk.exists() && require_corpus("ASC_REQUIRE_CORPUS", &apk) {
+        panic!(
+            "ASC_REQUIRE_CORPUS is set but fixture missing: {}",
+            apk.display()
+        );
+    }
     apk.exists().then_some(apk)
 }
 

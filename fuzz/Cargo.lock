@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "asc-apk"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "asc-bytecode"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "asc-dex",
  "thiserror",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "asc-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "adler2",
  "asc-apk",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "asc-decompile"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "crc32fast",
  "droidsaw-dex",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "asc-dex"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "thiserror",
 ]
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "asc-manifest"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "asc-apk",
  "serde",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "asc-paranoid"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "asc-bytecode",
  "asc-dex",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "asc-query"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "asc-bytecode",
  "asc-dex",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "asc-rebuild"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "adler2",
  "asc-bytecode",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "asc-resources"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "asc-apk",
 ]

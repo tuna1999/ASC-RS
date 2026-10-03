@@ -40,7 +40,34 @@ pub struct AxmlElement {
     pub ns: Option<String>,
     pub name: String,
     pub attrs: Vec<AxmlAttr>,
-    pub children: Vec<AxmlElement>,
+    /// Children in document order: nested elements and CDATA text nodes
+    /// (mixed content keeps its position).
+    pub children: Vec<AxmlNode>,
+}
+
+/// One child of an element. Text comes from `ResXMLTree_cdataExt.data`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AxmlNode {
+    Element(AxmlElement),
+    Text { text: String },
+}
+
+impl AxmlNode {
+    /// The element, if this child is one.
+    pub fn as_element(&self) -> Option<&AxmlElement> {
+        match self {
+            AxmlNode::Element(e) => Some(e),
+            AxmlNode::Text { .. } => None,
+        }
+    }
+}
+
+impl AxmlElement {
+    /// Child elements in order (text nodes skipped).
+    pub fn elements(&self) -> impl Iterator<Item = &AxmlElement> {
+        self.children.iter().filter_map(AxmlNode::as_element)
+    }
 }
 
 /// A decoded document: the namespace prefix bindings declared in the
@@ -64,8 +91,9 @@ impl AxmlDocument {
 
 /// Parse a compiled binary XML file into a tree. Strict like the
 /// manifest parser: every chunk is bounds-checked and malformed input
-/// is an error, never a panic. CDATA chunks (`0x0104`) are skipped
-/// (vanishingly rare in compiled resources).
+/// is an error, never a panic. CDATA chunks (`0x0104`) carry element
+/// text (`domain` names in a network-security-config, e.g.) and are
+/// kept as [`AxmlNode::Text`] children in document order.
 pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
     if bytes.len() < 8 {
         return Err(ManifestError::NotAXml);
@@ -195,7 +223,7 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
                 }
                 let element = stack.pop().expect("checked non-empty above");
                 match stack.last_mut() {
-                    Some(parent) => parent.children.push(element),
+                    Some(parent) => parent.children.push(AxmlNode::Element(element)),
                     None => {
                         if doc.root.replace(element).is_some() {
                             return Err(ManifestError::BadChunk("multiple root elements".into()));
@@ -203,9 +231,28 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
                     }
                 }
             }
-            // Text nodes are dropped (tree holds elements/attrs only);
-            // extent was validated by the chunk_end check above.
-            RES_XML_CDATA_TYPE => {}
+            // CDATA text node: `data` is a string-pool index (Android
+            // stores element text there). `NO_INDEX` (no text) is
+            // skipped; a text outside any open element is malformed.
+            RES_XML_CDATA_TYPE => {
+                let body = cursor + XML_TREE_BODY_OFF;
+                if body + 4 > chunk_end {
+                    return Err(ManifestError::Truncated("cdata body".into()));
+                }
+                let data = read_u32(bytes, body)?;
+                if data != NO_INDEX {
+                    validate_string_index_str(&strings, data, "cdata data", false)?;
+                    let text = strings[data as usize].clone();
+                    match stack.last_mut() {
+                        Some(open) => open.children.push(AxmlNode::Text { text }),
+                        None => {
+                            return Err(ManifestError::BadChunk(
+                                "cdata chunk outside any element".into(),
+                            ));
+                        }
+                    }
+                }
+            }
             _ => {
                 return Err(ManifestError::Unsupported(format!(
                     "chunk type 0x{chunk_type:04x} not handled"
@@ -335,7 +382,12 @@ fn render_element(out: &mut String, doc: &AxmlDocument, e: &AxmlElement, depth: 
     }
     let _ = writeln!(out, ">");
     for c in &e.children {
-        render_element(out, doc, c, depth + 1);
+        match c {
+            AxmlNode::Element(el) => render_element(out, doc, el, depth + 1),
+            AxmlNode::Text { text } => {
+                let _ = writeln!(out, "{}{}", "  ".repeat(depth + 1), escape_text(text));
+            }
+        }
     }
     let _ = writeln!(out, "{indent}</{name}>");
 }
@@ -349,4 +401,11 @@ fn qualify(doc: &AxmlDocument, ns: Option<&str>, name: &str) -> String {
             None => format!("{{{uri}}}{name}"),
         },
     }
+}
+
+/// XML-escape a text node body (`<`, `>`, `&`).
+fn escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

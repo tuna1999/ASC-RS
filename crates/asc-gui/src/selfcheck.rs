@@ -32,7 +32,7 @@ pub struct SelfcheckReport {
 
 /// Class name the workload corpus's manifest-package expects — the
 /// `<application android:name>` value is `com.example.ReferenceApp`
-/// per `reference/BEHAVIOR.md` and `corpus/MANIFEST.md`. We decompile
+/// per `reference/BEHAVIOR.md` and `docs/CORPUS.md`. We decompile
 /// the Google material `ClockFaceView` that ships inside `workload.apk`
 /// (verified to exist by `asc-cli`).
 const DEFAULT_TARGET_CLASS: &str = "Lcom/google/android/material/timepicker/ClockFaceView;";

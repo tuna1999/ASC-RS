@@ -16,7 +16,7 @@ use asc_dex::map::DataEnd;
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 
-use crate::pipeline::{CoreError, collect_classes_from_bytes};
+use crate::pipeline::{ClassCoverage, CoreError, collect_classes_coverage};
 
 /// Prefix sampled per entry for entropy / magic.
 const SAMPLE_CAP: usize = 1 << 20;
@@ -67,6 +67,17 @@ pub struct DexInfo {
     pub class_count: usize,
     /// Offset where declared content ends, when exactly known.
     pub data_end: Option<usize>,
+    /// Class-collection outcome: `complete` | `partial` | `unknown`.
+    /// `partial`/`unknown` mean `class_count` is a lower bound and the
+    /// manifest cross-check is not conclusive.
+    pub coverage: &'static str,
+    /// Logical member count for a DEX-041 container entry (`None` for a
+    /// plain single-DEX file).
+    pub container_members: Option<usize>,
+    /// Sum of the logical `file_size` fields of a container's members —
+    /// the physical bytes the members themselves declare (`None` for a
+    /// plain DEX). `size` is always the whole physical entry.
+    pub container_size: Option<usize>,
     /// Why `data_end` is unknown.
     pub coverage_note: Option<String>,
     /// Bytes past `data_end`; `None` when coverage is unknown.
@@ -86,6 +97,11 @@ pub struct ManifestCheck {
     pub components_missing_from_dex: usize,
     /// Up to 10 missing class names.
     pub missing_examples: Vec<String>,
+    /// Whether every DEX entry was fully collected when the cross-check
+    /// ran. When `false`, `components_missing_from_dex` counts components
+    /// absent from a *partially scanned* DEX set — not proof they are
+    /// missing from the APK.
+    pub conclusive: bool,
 }
 
 /// Hermes bytecode entry (`assets/index.android.bundle` and friends).
@@ -263,10 +279,10 @@ fn analyze_dex(name: &str, bytes: &[u8], names: &mut Vec<String>) -> DexInfo {
     let before = names.len();
     // A class-collection failure is not cosmetic: the descriptors left
     // in `names` are then an unknown subset, so every downstream
-    // manifest cross-check built on them is unsound. Surface it as a
-    // coverage note (audit F05).
+    // manifest cross-check built on them is unsound. Record the coverage
+    // outcome so the cross-check can qualify its conclusions (audit F02).
     let mut pairs = Vec::new();
-    let collect_err = collect_classes_from_bytes(bytes, None, name, &mut pairs).err();
+    let coverage = collect_classes_coverage(bytes, None, name, &mut pairs);
     names.extend(pairs.into_iter().map(|(d, _)| d));
     let mut info = DexInfo {
         name: name.to_string(),
@@ -276,22 +292,70 @@ fn analyze_dex(name: &str, bytes: &[u8], names: &mut Vec<String>) -> DexInfo {
         sha1_ok: None,
         class_count: names.len() - before,
         data_end: None,
-        coverage_note: collect_err.map(|e| format!("class collection incomplete: {e}")),
+        coverage: match &coverage {
+            ClassCoverage::Complete => "complete",
+            ClassCoverage::Partial(_) => "partial",
+            ClassCoverage::Unknown(_) => "unknown",
+        },
+        container_members: None,
+        container_size: None,
+        coverage_note: match &coverage {
+            ClassCoverage::Complete => None,
+            ClassCoverage::Partial(e) => Some(format!("class collection incomplete: {e}")),
+            ClassCoverage::Unknown(why) => Some(why.clone()),
+        },
         tail_bytes: None,
         tail_entropy: None,
     };
     let Ok(view) = DexView::parse(bytes) else {
-        info.coverage_note = Some("header did not parse".into());
+        info.coverage_note
+            .get_or_insert_with(|| "header did not parse".into());
         return info;
     };
     let h = view.header();
     info.header_file_size = Some(h.file_size);
-    let fs = h.file_size as usize;
-    if (0x20..=bytes.len()).contains(&fs) {
-        let sum = adler2::adler32(&bytes[0x0C..fs]).unwrap_or(0);
-        info.checksum_ok = Some(sum == h.checksum);
-        let sig: [u8; 20] = Sha1::digest(&bytes[0x20..fs]).into();
-        info.sha1_ok = Some(sig == h.signature);
+    if bytes.starts_with(b"dex\n041\0") {
+        // DEX-041 container: checksums are per logical member, and the
+        // size statement compares the members' declared sum against the
+        // physical entry — never member 0's `file_size` alone (audit F03).
+        let offsets = DexView::logical_header_offsets(bytes).unwrap_or_default();
+        if !offsets.is_empty() {
+            let mut declared = 0usize;
+            let mut adler_ok = true;
+            let mut sha1_ok = true;
+            for &off in &offsets {
+                let fs = u32::from_le_bytes(
+                    bytes[off + 0x20..off + 0x24]
+                        .try_into()
+                        .expect("walk validated extent"),
+                ) as usize;
+                let end = off + fs;
+                if end > bytes.len() {
+                    declared = usize::MAX; // marker: a member overruns the entry
+                    break;
+                }
+                declared += fs;
+                let want =
+                    u32::from_le_bytes(bytes[off + 0x08..off + 0x0C].try_into().expect("4 bytes"));
+                adler_ok &= adler2::adler32(&bytes[off + 0x0C..end]).unwrap_or(0) == want;
+                let sig: [u8; 20] = Sha1::digest(&bytes[off + 0x20..end]).into();
+                sha1_ok &= sig.as_slice() == &bytes[off + 0x0C..off + 0x20];
+            }
+            info.container_members = Some(offsets.len());
+            if declared != usize::MAX {
+                info.container_size = Some(declared);
+                info.checksum_ok = Some(adler_ok);
+                info.sha1_ok = Some(sha1_ok);
+            }
+        }
+    } else {
+        let fs = h.file_size as usize;
+        if (0x20..=bytes.len()).contains(&fs) {
+            let sum = adler2::adler32(&bytes[0x0C..fs]).unwrap_or(0);
+            info.checksum_ok = Some(sum == h.checksum);
+            let sig: [u8; 20] = Sha1::digest(&bytes[0x20..fs]).into();
+            info.sha1_ok = Some(sig == h.signature);
+        }
     }
     match view.data_end() {
         DataEnd::Known(end) => {
@@ -364,34 +428,38 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
     }
 
     let mut dex = Vec::new();
+    let mut dex_skipped = 0usize;
     let mut descriptors: Vec<String> = Vec::new();
     let mut virbox_string = false;
     let cap = InflateLimits::with_max_output(DEX_CAP);
     for e in apk.dex_entries() {
         if e.uncompressed_size as usize > DEX_CAP {
             err(format!("{}: exceeds {} MiB DEX cap", e.name, DEX_CAP >> 20));
+            dex_skipped += 1;
             continue;
         }
         let bytes = match apk.read_entry_with_limits(&e, cap.unwrap_or_default()) {
             Ok(b) => b,
             Err(x) => {
                 err(format!("{}: read failed: {x}", e.name));
+                dex_skipped += 1;
                 continue;
             }
         };
         let b = bytes.as_slice();
         virbox_string |= b.windows(6).any(|w| w == b"Virbox");
         let info = analyze_dex(&e.name, b, &mut descriptors);
-        // A partial class collection is a hard error for this report:
+        // Any non-complete coverage is a hard error for this report:
         // `complete` must not stay true and the manifest cross-check
         // must not present an unknown subset as a definite "missing
-        // component" (audit F05).
-        if let Some(note) = info
-            .coverage_note
-            .as_deref()
-            .filter(|n| n.starts_with("class collection incomplete: "))
-        {
-            err(format!("{}: {note}", e.name));
+        // component" (audit F02).
+        if info.coverage != "complete" {
+            err(format!(
+                "{}: class collection {}: {}",
+                e.name,
+                info.coverage,
+                info.coverage_note.as_deref().unwrap_or("unexplained")
+            ));
         }
         dex.push(info);
     }
@@ -411,6 +479,9 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
                     .chain(m.providers.iter().map(|c| &c.name));
                 let mut total = 0;
                 let mut missing = Vec::new();
+                // The cross-check is only conclusive when every DEX entry
+                // was read and fully collected (audit F02).
+                let conclusive = dex_skipped == 0 && dex.iter().all(|d| d.coverage == "complete");
                 for n in comps {
                     total += 1;
                     if !have.contains(component_descriptor(m.package.as_deref(), n).as_str()) {
@@ -422,6 +493,7 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
                     components_total: total,
                     components_missing_from_dex: missing.len(),
                     missing_examples: missing.iter().take(10).cloned().collect(),
+                    conclusive,
                 });
                 let play_splits_required = m.application.meta_data.iter().any(|md| {
                     md.name == "com.android.vending.splits.required"
@@ -473,7 +545,17 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
                 d.name, d.checksum_ok, d.sha1_ok
             ));
         }
-        if d.header_file_size.is_some_and(|f| f as usize != d.size) {
+        if let Some(decl) = d.container_size {
+            // DEX-041 container: the members' declared sum, not member
+            // 0's file_size, is what the physical entry must match
+            // (audit F03).
+            if decl != d.size {
+                anomalies.push(format!(
+                    "{}: DEX-041 container members sum to {decl} bytes != actual {}",
+                    d.name, d.size
+                ));
+            }
+        } else if d.header_file_size.is_some_and(|f| f as usize != d.size) {
             anomalies.push(format!(
                 "{}: header file_size {} != actual {}",
                 d.name,
@@ -511,10 +593,18 @@ pub fn run_inspect(path: &Path) -> Result<InspectReport, CoreError> {
         && m.components_total > 0
         && m.components_missing_from_dex == m.components_total
     {
-        anomalies.push(format!(
-            "0/{} manifest components have a class in the DEX",
-            m.components_total
-        ));
+        anomalies.push(if m.conclusive {
+            format!(
+                "0/{} manifest components have a class in the DEX",
+                m.components_total
+            )
+        } else {
+            format!(
+                "0/{} manifest components have a class in the scanned DEX \
+                 (class collection incomplete — not conclusive)",
+                m.components_total
+            )
+        });
     }
 
     let complete = errors.is_empty()
@@ -601,10 +691,15 @@ pub fn format_inspect_text(r: &InspectReport) -> String {
     if let Some(m) = &r.manifest {
         let _ = writeln!(
             s,
-            "manifest: package {}, {}/{} components missing from DEX",
+            "manifest: package {}, {}/{} components missing from DEX{}",
             m.package.as_deref().unwrap_or("-"),
             m.components_missing_from_dex,
-            m.components_total
+            m.components_total,
+            if m.conclusive {
+                ""
+            } else {
+                " (inconclusive: DEX coverage partial)"
+            }
         );
         for n in &m.missing_examples {
             let _ = writeln!(s, "  missing: {n}");

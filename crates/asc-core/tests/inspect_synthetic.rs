@@ -699,3 +699,241 @@ fn split_requirement_without_libs_is_flagged_on_locket() {
 fn crate_run_native(path: &Path) -> asc_core::NativeReport {
     asc_core::run_native(path).expect("native")
 }
+
+// ------------------------------------------- manifest cross-check (audit F02)
+//
+// A minimal binary AndroidManifest.xml builder: string pool + nested
+// <manifest package=…><application><activity android-free name=…>.
+
+fn vp16(v: &mut Vec<u8>, x: u16) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn vp32(v: &mut Vec<u8>, x: u32) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+
+fn build_manifest(package: &str, activity: &str) -> Vec<u8> {
+    let strings = [
+        "manifest",
+        "application",
+        "activity",
+        package,
+        activity,
+        "name",
+    ];
+    let mut data: Vec<u8> = Vec::new();
+    let mut offs = Vec::new();
+    for s in &strings {
+        offs.push(data.len() as u32);
+        let units: Vec<u16> = s.encode_utf16().collect();
+        vp16(&mut data, units.len() as u16);
+        for u in &units {
+            vp16(&mut data, *u);
+        }
+        vp16(&mut data, 0);
+    }
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let strings_start = 28 + strings.len() * 4;
+    let mut pool = Vec::new();
+    vp16(&mut pool, 0x0001);
+    vp16(&mut pool, 28);
+    vp32(&mut pool, (strings_start + data.len()) as u32);
+    vp32(&mut pool, strings.len() as u32);
+    vp32(&mut pool, 0); // styleCount
+    vp32(&mut pool, 0x0000); // UTF-16
+    vp32(&mut pool, strings_start as u32);
+    vp32(&mut pool, 0); // stylesStart
+    for o in offs {
+        vp32(&mut pool, o);
+    }
+    pool.extend_from_slice(&data);
+
+    let start = |name: u32, attrs: &[(u32, u32)]| -> Vec<u8> {
+        let mut v = Vec::new();
+        vp16(&mut v, 0x0102);
+        vp16(&mut v, 16);
+        vp32(&mut v, (36 + attrs.len() * 20) as u32);
+        vp32(&mut v, 1); // lineNumber
+        vp32(&mut v, 0xFFFF_FFFF); // comment
+        vp32(&mut v, 0xFFFF_FFFF); // ns
+        vp32(&mut v, name);
+        v.extend_from_slice(&[20, 0, 20, 0]); // attrStart/attrSize
+        v.extend_from_slice(&(attrs.len() as u16).to_le_bytes());
+        v.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // id/class/style idx
+        for (an, aval) in attrs {
+            vp32(&mut v, 0xFFFF_FFFF); // attr ns
+            vp32(&mut v, *an);
+            vp32(&mut v, *aval); // rawValue -> string idx
+            v.extend_from_slice(&[8, 0, 0, 3]); // typedValue: size/res0/STRING
+            vp32(&mut v, *aval);
+        }
+        v
+    };
+    let end = |name: u32| -> Vec<u8> {
+        let mut v = Vec::new();
+        vp16(&mut v, 0x0103);
+        vp16(&mut v, 16);
+        vp32(&mut v, 24);
+        vp32(&mut v, 1);
+        vp32(&mut v, 0xFFFF_FFFF);
+        vp32(&mut v, 0xFFFF_FFFF);
+        vp32(&mut v, name);
+        v
+    };
+
+    // manifest(package) > application > activity(name)
+    let chunks = [
+        start(0, &[(5, 3)]),
+        start(1, &[]),
+        start(2, &[(5, 4)]),
+        end(2),
+        end(1),
+        end(0),
+    ];
+    let body: usize = pool.len() + chunks.iter().map(Vec::len).sum::<usize>();
+    let mut root = Vec::new();
+    vp16(&mut root, 0x0003);
+    vp16(&mut root, 8);
+    vp32(&mut root, (8 + body) as u32);
+    root.extend_from_slice(&pool);
+    for c in chunks {
+        root.extend_from_slice(&c);
+    }
+    root
+}
+
+/// Class_defs[0].class_idx out of range: collection errors mid-walk, so
+/// the valid class_defs[1] never reaches the descriptor list. The
+/// manifest cross-check must not present the activity as definitively
+/// missing (audit F02).
+#[test]
+fn partial_collection_makes_missing_components_inconclusive() {
+    // Two classes; corrupt the first class_def's class_idx so the walk
+    // errors before reaching the second (valid) one.
+    let mut spec = Spec::with(&["Lcom/example/Bogus;", "Lcom/example/Missing;"]);
+    spec.checksum = None;
+    let mut dex = build_dex(&spec);
+    // class_defs_off = STRING_IDS_OFF(0x70) + n*4 + n*4 = 0x80 for n=2;
+    // corrupt class_defs[0].class_idx so the walk errors immediately.
+    p32(&mut dex, 0x80, 0xFFFF_0000);
+    // The stored checksum no longer matches the corrupted bytes; that is
+    // fine, this test only cares about class coverage.
+    let manifest = build_manifest("com.example", ".Missing");
+    let path = write_apk(
+        "f02a",
+        &[("AndroidManifest.xml", &manifest), ("classes.dex", &dex)],
+    );
+    let r = run_inspect(&path).unwrap();
+    let m = r.manifest.as_ref().expect("manifest check runs");
+    assert_eq!(m.components_total, 1);
+    assert_eq!(m.components_missing_from_dex, 1);
+    assert!(
+        !m.conclusive,
+        "cross-check must be marked inconclusive on partial collection"
+    );
+    assert_eq!(r.dex[0].coverage, "partial");
+    assert!(
+        r.anomalies.iter().any(|a| a.contains("not conclusive")),
+        "{:?}",
+        r.anomalies
+    );
+    let text = asc_core::format_inspect_text(&r);
+    assert!(
+        text.contains("inconclusive: DEX coverage partial"),
+        "{text}"
+    );
+    remove(&path);
+}
+
+/// An unparseable DEX header is the historically silent zero-class path:
+/// coverage must surface as `unknown`, not as "0 classes, all fine".
+#[test]
+fn unparseable_dex_header_is_unknown_coverage() {
+    let mut dex = build_dex(&Spec::one("Lcom/example/A;"));
+    dex[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // break magic
+    let manifest = build_manifest("com.example", ".Only");
+    let path = write_apk(
+        "f02b",
+        &[("AndroidManifest.xml", &manifest), ("classes.dex", &dex)],
+    );
+    let r = run_inspect(&path).unwrap();
+    assert_eq!(r.dex[0].coverage, "unknown");
+    assert_eq!(r.dex[0].class_count, 0);
+    assert!(
+        !r.manifest.as_ref().expect("manifest").conclusive,
+        "unknown coverage must not yield a conclusive cross-check"
+    );
+    assert!(!r.complete);
+    remove(&path);
+}
+
+// ------------------------------------------- DEX-041 containers (audit F03)
+
+/// Two valid 041 members back to back: a legal container. inspect must
+/// not raise the plain-DEX "header file_size != actual" anomaly against
+/// it, must checksum every member, and must report both members.
+#[test]
+fn valid_041_container_has_no_false_size_anomaly() {
+    let mut d1 = build_dex(&Spec::one("Lcom/example/A;"));
+    d1[..8].copy_from_slice(b"dex\n041\0"); // magic is outside both checksum ranges
+    let mut d2 = build_dex(&Spec::one("Lcom/example/B;"));
+    d2[..8].copy_from_slice(b"dex\n041\0");
+    let mut container = d1.clone();
+    container.extend_from_slice(&d2);
+    let path = write_apk("f03ok", &[("classes.dex", &container)]);
+    let r = run_inspect(&path).unwrap();
+    let d = &r.dex[0];
+    assert_eq!(d.size, container.len());
+    assert_eq!(d.container_members, Some(2));
+    assert_eq!(d.container_size, Some(container.len()));
+    assert_eq!(d.class_count, 2, "both logical members are collected");
+    assert_eq!(d.checksum_ok, Some(true));
+    assert_eq!(d.sha1_ok, Some(true));
+    assert!(
+        !r.anomalies.iter().any(|a| a.contains("file_size")),
+        "valid container must not raise a size anomaly: {:?}",
+        r.anomalies
+    );
+    assert_eq!(
+        d.coverage, "complete",
+        "both members fully collected; data_end stays unknown via note"
+    );
+    assert!(
+        d.coverage_note
+            .as_deref()
+            .is_some_and(|n| n.contains("shared sections")),
+        "{:?}",
+        d.coverage_note
+    );
+    remove(&path);
+}
+
+/// A container truncated mid-member: the walk stops at the intact
+/// member, so the declared sum no longer matches the physical bytes —
+/// that mismatch must surface as an anomaly.
+#[test]
+fn truncated_041_container_reports_member_sum_mismatch() {
+    let mut d1 = build_dex(&Spec::one("Lcom/example/A;"));
+    d1[..8].copy_from_slice(b"dex\n041\0");
+    let mut d2 = build_dex(&Spec::one("Lcom/example/B;"));
+    d2[..8].copy_from_slice(b"dex\n041\0");
+    let mut container = d1.clone();
+    container.extend_from_slice(&d2);
+    let cut = container.len() - 4;
+    container.truncate(cut);
+    let path = write_apk("f03cut", &[("classes.dex", &container)]);
+    let r = run_inspect(&path).unwrap();
+    let d = &r.dex[0];
+    assert_eq!(d.container_members, Some(1), "member 2 is truncated away");
+    assert_eq!(d.container_size, Some(d1.len()));
+    assert!(
+        r.anomalies
+            .iter()
+            .any(|a| a.contains("members sum to") && a.contains("!= actual")),
+        "{:?}",
+        r.anomalies
+    );
+    remove(&path);
+}
