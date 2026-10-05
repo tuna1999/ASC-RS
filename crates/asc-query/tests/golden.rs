@@ -6,7 +6,8 @@
 //! matches exactly (as a SET — order-insensitive).
 //!
 //! Tests skip gracefully when the corpus fixture or the counts file is
-//! missing.
+//! missing — except that a fixture named in `ASC_REQUIRE_CORPUS` must
+//! fail instead of skipping (docs/CORPUS.md; CI sets the variable).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -16,7 +17,7 @@ use asc_query::{ClassConstraint, Query, find_refs};
 
 mod common;
 
-use common::parse_corpus_dex;
+use common::{fail_if_required_corpus_missing, parse_corpus_dex};
 
 /// Path to the golden counts files.
 fn counts_path(name: &str) -> std::path::PathBuf {
@@ -140,11 +141,15 @@ fn assert_oracle_subset(actual: &BTreeSet<String>, expected: &[String], case: &s
     }
 }
 /// Macro: load a corpus DEX into `bytes_buf` and run `find_refs` with
-/// the given query. Skips the test if the corpus is missing.
+/// the given query. Skips the test if the corpus is missing — unless
+/// `ASC_REQUIRE_CORPUS` names that fixture, in which case a missing file
+/// is a hard failure (docs/CORPUS.md; CI sets the variable for exactly
+/// the fixtures it recreates).
 macro_rules! run_against_corpus {
     ($bytes:ident, $view:ident, $name:literal) => {
         let mut $bytes = Vec::new();
         let Some($view) = parse_corpus_dex($name, &mut $bytes) else {
+            fail_if_required_corpus_missing($name);
             eprintln!("{} missing; skipping", $name);
             return;
         };

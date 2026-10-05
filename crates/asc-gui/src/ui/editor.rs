@@ -55,6 +55,7 @@ impl AscApp {
         let mut clicked: Option<String> = None;
         let mut closed: Option<String> = None;
         let mut pinned: Option<String> = None;
+        let mut bulk: Option<Command> = None;
         let active = self.tabs.active_descriptor().map(str::to_string);
         let bookmarks: Vec<String> = self
             .tabs
@@ -158,6 +159,22 @@ impl AscApp {
                             })
                             .response
                             .interact(egui::Sense::click());
+                        // Right-click a tab: the bulk operations that
+                        // have no other surface (JADX-GUI-005/011).
+                        tab_resp.context_menu(|ui| {
+                            if ui.button("Close others").clicked() {
+                                ui.close();
+                                bulk = Some(Command::CloseOthers);
+                            }
+                            if ui.button("Close all").clicked() {
+                                ui.close();
+                                bulk = Some(Command::CloseAll);
+                            }
+                            if ui.button("Pin all").clicked() {
+                                ui.close();
+                                bulk = Some(Command::PinAll);
+                            }
+                        });
                         let _ = tab_resp;
 
                         // Active-tab accent underline (design §3).
@@ -190,6 +207,9 @@ impl AscApp {
         }
         if let Some(d) = closed {
             self.close_tab(&d);
+        }
+        if let Some(c) = bulk {
+            self.queue(c);
         }
     }
 
@@ -460,14 +480,7 @@ impl AscApp {
                 let empty: Vec<crate::highlight::Span> = Vec::new();
                 let spans = doc.spans.get(idx).unwrap_or(&empty);
                 // Line-local slices of the symbol occurrence ranges.
-                let sym_local: Vec<(usize, usize)> = sym_occ
-                    .iter()
-                    .filter_map(|&(s, e)| {
-                        let a = s.max(line_abs) - line_abs;
-                        let b = e.min(line_end) - line_abs;
-                        (a < b).then_some((a, b))
-                    })
-                    .collect();
+                let sym_local = clip_ranges_to_line(&sym_occ, line_abs, line_end);
                 let is_target = scroll_target == Some(idx);
                 let is_find_match = self.show_find && self.find_matches.contains(&idx);
                 let is_current = is_target && self.show_find;
@@ -530,6 +543,29 @@ impl AscApp {
     }
 }
 
+/// Line-local slices of `ranges`, clipped to `line_abs..line_end`.
+///
+/// `ranges` are the selected symbol's occurrences across the whole
+/// enclosing method, but every rendered line is tested against all of
+/// them — so a range can lie entirely *before* this line (`e <
+/// line_abs`). The end must therefore saturate: a wrapping subtract
+/// would publish a bogus span that tints the whole row in release
+/// builds, and panic outright wherever overflow checks are on.
+fn clip_ranges_to_line(
+    ranges: &[(usize, usize)],
+    line_abs: usize,
+    line_end: usize,
+) -> Vec<(usize, usize)> {
+    ranges
+        .iter()
+        .filter_map(|&(s, e)| {
+            let a = s.max(line_abs) - line_abs;
+            let b = e.min(line_end).saturating_sub(line_abs);
+            (a < b).then_some((a, b))
+        })
+        .collect()
+}
+
 /// Selection model for the identifier at `byte` (F24): token,
 /// enclosing-method byte range, code-state occurrences.
 pub(crate) fn symbol_selection_for(
@@ -576,5 +612,32 @@ class A {
             assert_eq!(&src[*s..*e], "foo");
         }
         assert!(!sel.occurrences.is_empty(), "at least one occurrence");
+    }
+
+    /// A range that ends *before* the rendered line starts must clip to
+    /// nothing rather than underflow. `sym_occ` holds the whole enclosing
+    /// method's occurrences while every line is tested against all of
+    /// them, so this is the ordinary case for any line after the first
+    /// occurrence — a wrapping subtract either panicked (overflow checks
+    /// on) or published a bogus span that tinted the entire row (release).
+    #[test]
+    fn clip_ranges_handles_ranges_before_the_line() {
+        // Occurrences of the identifier live at bytes 10..13 and 20..23.
+        let ranges = [(10, 13), (20, 23)];
+
+        // Line starts after both ranges end: the regression case.
+        assert_eq!(clip_ranges_to_line(&ranges, 30, 40), Vec::new());
+
+        // Line starts exactly where the first range ends.
+        assert_eq!(clip_ranges_to_line(&ranges, 13, 19), Vec::new());
+
+        // Line lying wholly between the two occurrences.
+        assert_eq!(clip_ranges_to_line(&ranges, 14, 19), Vec::new());
+
+        // Line straddling the second occurrence's start.
+        assert_eq!(clip_ranges_to_line(&ranges, 21, 40), vec![(0, 2)]);
+
+        // Line containing the first occurrence entirely.
+        assert_eq!(clip_ranges_to_line(&ranges, 5, 15), vec![(5, 8)]);
     }
 }

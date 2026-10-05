@@ -33,7 +33,7 @@ preprocessing, no global xref graphs, no fully-materialized object graphs.
 | `crates/asc-resources` | Bounded `resources.arsc` reader |
 | `crates/asc-core` | Orchestration: getclass/findrefs/listclass pipelines, bounded parallelism, cancellation |
 | `crates/asc-cli` | CLI parity frontend |
-| `crates/asc-gui` | eframe/egui desktop UI (behind feature, ships later) |
+| `crates/asc-gui` | eframe/egui desktop UI (shipped as `asc-gui` by `cargo build --release`) |
 | `reference/asc` | Frozen Python oracle (commit `ccc6bae`) — read-only, not a runtime dep |
 | `tests/fixtures` | Golden outputs captured from the oracle |
 | `corpus/` | Test APK/DEX corpus |

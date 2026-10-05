@@ -65,6 +65,19 @@ fn push_repl(out: &mut Vec<u8>) {
     out.extend_from_slice("\u{FFFD}".as_bytes());
 }
 
+/// Output-buffer sizing hint for [`decode_lossy`].
+///
+/// `utf16_len_hint` is read straight from the DEX `string_data_item` and is
+/// never checked against the payload, so it is attacker-controlled: a
+/// two-byte string may declare `u32::MAX` units. Trusting it would reserve
+/// gigabytes per decoded string and break the "bounded memory" contract, so
+/// it is capped by what the input could actually produce — every input byte
+/// expands to at most 3 output bytes (a U+FFFD replacement).
+#[inline]
+fn capacity_hint(bytes_len: usize, utf16_len_hint: u32) -> usize {
+    (utf16_len_hint as usize).min(bytes_len.saturating_mul(3))
+}
+
 /// Decodes a MUTF-8 byte slice into UTF-8 text, replacing invalid sequences
 /// with U+FFFD. The returned `Cow` borrows the original slice when no
 /// replacements were needed (the common ASCII case), and allocates a fresh
@@ -72,7 +85,8 @@ fn push_repl(out: &mut Vec<u8>) {
 ///
 /// `utf16_len_hint` is informational only — DEX stores the UTF-16 code unit
 /// length, but we use it as a sizing hint for the output buffer rather than
-/// for verification.
+/// for verification. It is *not* validated by the caller, so it is bounded
+/// by [`capacity_hint`] before it reaches the allocator.
 pub fn decode_lossy<'a>(bytes: &'a [u8], utf16_len_hint: u32) -> Cow<'a, str> {
     // Fast path: pure ASCII (no leading zero anywhere, all bytes < 0x80).
     let mut all_ascii = true;
@@ -90,7 +104,7 @@ pub fn decode_lossy<'a>(bytes: &'a [u8], utf16_len_hint: u32) -> Cow<'a, str> {
         // Should be unreachable; fall through to the slow path.
     }
 
-    let mut out: Vec<u8> = Vec::with_capacity(utf16_len_hint as usize);
+    let mut out: Vec<u8> = Vec::with_capacity(capacity_hint(bytes.len(), utf16_len_hint));
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
@@ -298,5 +312,28 @@ mod tests {
         assert_eq!(&enc[..2], &[0xC0, 0x80]);
         assert!(!enc.contains(&0));
         assert_eq!(to_utf16(&enc), units);
+    }
+
+    /// A hostile `utf16_len` cannot size the output buffer: it is read
+    /// straight from the file and never validated against the payload, so
+    /// the reservation is capped by what the input could expand to. Before
+    /// the clamp this asked the allocator for `u32::MAX` bytes for a
+    /// two-byte string.
+    #[test]
+    fn capacity_hint_is_bounded_by_the_payload() {
+        // Two input bytes → at most 6 output bytes, whatever the hint says.
+        assert_eq!(capacity_hint(2, u32::MAX), 6);
+        assert_eq!(capacity_hint(0, u32::MAX), 0);
+        // A plausible, smaller hint is still honoured as the tighter bound.
+        assert_eq!(capacity_hint(64, 8), 8);
+        // Saturating: a huge payload cannot overflow the multiply.
+        assert_eq!(capacity_hint(usize::MAX, u32::MAX), u32::MAX as usize);
+    }
+
+    /// The clamp changes only the reservation, never the decoded text.
+    #[test]
+    fn hostile_utf16_len_decodes_normally() {
+        let s = decode_lossy(&[0xC3, 0xA9], u32::MAX);
+        assert_eq!(s.as_ref(), "é");
     }
 }

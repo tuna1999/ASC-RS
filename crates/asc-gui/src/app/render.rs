@@ -204,6 +204,10 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ToggleTheme);
                     }
+                    if ui.button("Settings…").clicked() {
+                        ui.close();
+                        self.queue(Command::OpenSettings);
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("ASC Instant Workbench");
@@ -366,6 +370,7 @@ impl eframe::App for AscApp {
                                 self.show_bottom = true;
                                 self.bottom_tab = BottomTab::Results;
                                 self.focus_search = true;
+                                self.pin_bottom_focus();
                             }
                             if toggle(
                                 ui,
@@ -375,6 +380,7 @@ impl eframe::App for AscApp {
                             ) {
                                 self.show_bottom = true;
                                 self.bottom_tab = BottomTab::Tasks;
+                                self.pin_bottom_focus();
                             }
                         },
                     );

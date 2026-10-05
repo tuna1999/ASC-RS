@@ -269,6 +269,205 @@ fn search_results_retained_and_navigable() {
     assert!(matches!(app.bottom_tab, BottomTab::Results));
 }
 
+/// A result landing after the user has taken manual control of the
+/// bottom panel stores its data but must not move the panel or the tab.
+/// `bottom_focus_pinned` is set by the panel's own tab buttons, the
+/// activity-bar toggles and Ctrl+3. (The unpinned case is covered by the
+/// test above, where `bottom_tab` flips to Results.)
+#[test]
+fn late_result_does_not_steal_bottom_focus() {
+    let mut app = empty_app();
+    let mut report = asc_core::SearchReport::empty();
+    report.results.push(asc_core::DexResults {
+        dex_name: "classes.dex".into(),
+        matches: vec![asc_core::RenderedMatch {
+            caller: "Lcom/foo/Bar;->onCreate".into(),
+            matched: vec!["Lcom/foo/Bar;".into()],
+            first_line: Some(3),
+        }],
+        errors: Vec::new(),
+        complete: true,
+    });
+    app.show_bottom = false;
+    app.bottom_tab = BottomTab::Tasks;
+    app.pin_bottom_focus();
+
+    app.apply_task(CompletedTask {
+        id: crate::task::TaskId(11),
+        generation: crate::task::SessionGeneration::INITIAL,
+        kind: TaskKind::FindRefsClass,
+        label: "refs Lcom/foo/Bar;".into(),
+        outcome: TaskOutcome::Search(report),
+        elapsed: std::time::Duration::from_millis(2),
+        stale: false,
+    });
+
+    // The data landed...
+    assert!(app.references.is_some(), "references stored regardless");
+    // ...but the user's tab choice and the closed panel were respected.
+    assert!(
+        matches!(app.bottom_tab, BottomTab::Tasks),
+        "pinned tab choice kept"
+    );
+    assert!(!app.show_bottom, "closed panel stays closed");
+}
+
+/// `reveal_bottom_tab` opens the panel only while the user has not taken
+/// control; `focus_bottom_tab` never opens it, and both leave the tab
+/// alone once pinned. Covers the "a late result cannot steal focus"
+/// guarantee for the references/callees kinds (it was only tested for
+/// `DecompileClass`).
+#[test]
+fn bottom_focus_helpers_respect_the_pin() {
+    let mut app = empty_app();
+    app.show_bottom = false;
+    app.bottom_tab = BottomTab::Tasks;
+
+    // Unpinned: results may reveal the panel and select their tab.
+    app.reveal_bottom_tab(BottomTab::References);
+    assert!(app.show_bottom, "unpinned result opens the panel");
+    assert!(matches!(app.bottom_tab, BottomTab::References));
+
+    // Pinned: neither helper may touch the panel or the tab.
+    app.show_bottom = false;
+    app.pin_bottom_focus();
+    app.reveal_bottom_tab(BottomTab::Results);
+    app.focus_bottom_tab(BottomTab::Results);
+    assert!(!app.show_bottom, "pinned: panel stays closed");
+    assert!(
+        matches!(app.bottom_tab, BottomTab::References),
+        "pinned: tab untouched"
+    );
+
+    // A new request unpins, so the next result may focus again.
+    app.unpin_bottom_focus();
+    app.focus_bottom_tab(BottomTab::Results);
+    assert!(
+        matches!(app.bottom_tab, BottomTab::Results),
+        "unpinned again: follows results"
+    );
+}
+
+/// One injected key event, as a frame's `RawInput`.
+///
+/// `RawInput` carries no `modifiers` field in egui 0.36, and
+/// `InputState::modifiers` is updated only by `Event::ModifiersChanged`
+/// (not by the key event's own `modifiers` field) — so both events are
+/// needed for a modified shortcut to be seen.
+fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::RawInput {
+    egui::RawInput {
+        events: vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+/// Drive one key through `frame_shortcuts` and assert it queued the
+/// expected command.
+fn assert_shortcut(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+    matches_want: impl Fn(&Command) -> bool,
+    what: &str,
+) {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    AscApp::run_ui_with_input(&ctx, key_event(key, modifiers), |ui| {
+        app.frame_shortcuts(ui.ctx());
+    });
+    assert!(
+        app.commands.iter().any(matches_want),
+        "{what} queued {:?}",
+        app.commands
+    );
+}
+
+/// Before this, **no** test injected a key event, so the entire
+/// `frame_shortcuts` table was unverified. These are the bindings that
+/// were missing entirely (JADX-GUI-003/006/015/020, JADX-GUI-014).
+#[test]
+fn frame_shortcuts_wires_the_previously_dead_bindings() {
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Default::default()
+    };
+    let alt = egui::Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+
+    assert_shortcut(
+        egui::Key::G,
+        ctrl,
+        |c| matches!(c, Command::GotoLine),
+        "Ctrl+G",
+    );
+    assert_shortcut(
+        egui::Key::D,
+        ctrl,
+        |c| matches!(c, Command::GoToDeclaration),
+        "Ctrl+D",
+    );
+    assert_shortcut(
+        egui::Key::C,
+        ctrl,
+        |c| matches!(c, Command::CopyDescriptor),
+        "Ctrl+C",
+    );
+    assert_shortcut(
+        egui::Key::C,
+        ctrl_shift,
+        |c| matches!(c, Command::CopyFqn),
+        "Ctrl+Shift+C",
+    );
+    // Alt, not Ctrl: Ctrl+1/2/3 are the panel toggles.
+    assert_shortcut(
+        egui::Key::Num2,
+        alt,
+        |c| matches!(c, Command::QuickSwitch { n: 2 }),
+        "Alt+2",
+    );
+}
+
+/// `X` over the code surface finds usages of the clicked identifier
+/// (JADX-GUI-002's click affordance); it stays inert without a document.
+#[test]
+fn bare_x_finds_usages_of_the_clicked_identifier() {
+    let mut app = empty_app();
+    app.code_hovered = true;
+    app.active_doc = Some(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A {}".into(),
+    )));
+    let ctx = egui::Context::default();
+    AscApp::run_ui_with_input(
+        &ctx,
+        key_event(egui::Key::X, egui::Modifiers::default()),
+        |ui| app.frame_shortcuts(ui.ctx()),
+    );
+    assert!(
+        app.commands
+            .iter()
+            .any(|c| matches!(c, Command::FindUsagesOfClicked)),
+        "queued {:?}",
+        app.commands
+    );
+}
+
 /// Full-render smoke: load the corpus artifact, open a class,
 /// run a search, then drive every panel draw function inside a
 /// headless `egui::Context::run` — catches render-path panics

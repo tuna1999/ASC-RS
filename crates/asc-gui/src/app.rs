@@ -91,6 +91,13 @@ pub struct AscApp {
     /// Pointer over the code surface this frame (bare-key scope).
     pub(crate) code_hovered: bool,
     pub(crate) bottom_tab: BottomTab,
+    /// True once the user has taken manual control of the bottom panel
+    /// since the current search/references request was issued.
+    ///
+    /// Results must not steal that choice (AGENTS.md "GUI flow"): a
+    /// result still stores its data, it just does not move the panel or
+    /// select a tab. Reset when a new request is issued.
+    pub(crate) bottom_focus_pinned: bool,
     pub(crate) focus_search: bool,
     pub(crate) palette: Option<PaletteMode>,
     pub(crate) focus_palette: bool,
@@ -169,6 +176,7 @@ impl AscApp {
             symbol_sel: None,
             code_hovered: false,
             bottom_tab: BottomTab::Results,
+            bottom_focus_pinned: false,
             focus_search: false,
             palette: None,
             focus_palette: false,
@@ -262,6 +270,7 @@ impl AscApp {
         self.nav = NavigationHistory::default();
         self.search.clear_results();
         self.references = None;
+        self.bottom_focus_pinned = false;
         self.selected_class = None;
         self.active_doc = None;
         self.pending_scroll = None;
@@ -483,6 +492,35 @@ impl AscApp {
         }
     }
 
+    /// Select the bottom tab for an arriving result, unless the user has
+    /// taken manual control of the bottom panel since the request was
+    /// issued. The data is always stored; only the focus moves.
+    fn focus_bottom_tab(&mut self, tab: BottomTab) {
+        if !self.bottom_focus_pinned {
+            self.bottom_tab = tab;
+        }
+    }
+
+    /// As [`Self::focus_bottom_tab`], and also open the panel.
+    fn reveal_bottom_tab(&mut self, tab: BottomTab) {
+        if !self.bottom_focus_pinned {
+            self.show_bottom = true;
+            self.bottom_tab = tab;
+        }
+    }
+
+    /// The user has just chosen the bottom panel's tab or visibility
+    /// themselves; results of any request already in flight must leave it
+    /// alone.
+    pub(crate) fn pin_bottom_focus(&mut self) {
+        self.bottom_focus_pinned = true;
+    }
+
+    /// A new request is being issued: results may move the panel again.
+    fn unpin_bottom_focus(&mut self) {
+        self.bottom_focus_pinned = false;
+    }
+
     fn apply_task(&mut self, task: CompletedTask) {
         if task.stale {
             return;
@@ -564,15 +602,14 @@ impl AscApp {
                     complete: true,
                     errors: Vec::new(),
                 });
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::References;
+                self.reveal_bottom_tab(BottomTab::References);
                 self.set_status("callees ready", true);
             }
             (TaskKind::Callees, TaskOutcome::Failed(e)) => {
                 self.last_error = Some(format!("callees: {e}"));
                 self.set_status(format!("callees failed: {e}"), false);
                 self.references = Some(SearchResults::from_error(task.label, e));
-                self.bottom_tab = BottomTab::References;
+                self.focus_bottom_tab(BottomTab::References);
             }
             (TaskKind::Disasm, TaskOutcome::Failed(e)) => {
                 self.tabs.set_failed(&task.label, e.clone());
@@ -584,7 +621,7 @@ impl AscApp {
                 let summary_ok = results.complete && results.errors.is_empty();
                 let hits = results.rows.len();
                 self.search.set_results(results);
-                self.bottom_tab = BottomTab::Results;
+                self.focus_bottom_tab(BottomTab::Results);
                 self.set_status(
                     if summary_ok {
                         format!("findrefs: {hits} hits")
@@ -599,14 +636,14 @@ impl AscApp {
                 self.set_status(format!("findrefs failed: {e}"), false);
                 self.search
                     .set_results(SearchResults::from_error(task.label, e));
-                self.bottom_tab = BottomTab::Results;
+                self.focus_bottom_tab(BottomTab::Results);
             }
             (TaskKind::FindRefsClass, TaskOutcome::Search(report)) => {
                 let results = SearchResults::from_report(task.label, &report);
                 let hits = results.rows.len();
                 let ok = results.complete && results.errors.is_empty();
                 self.references = Some(results);
-                self.bottom_tab = BottomTab::References;
+                self.focus_bottom_tab(BottomTab::References);
                 self.set_status(
                     if ok {
                         format!("references: {hits} callers")
@@ -620,7 +657,7 @@ impl AscApp {
                 self.last_error = Some(format!("references: {e}"));
                 self.set_status(format!("references failed: {e}"), false);
                 self.references = Some(SearchResults::from_error(task.label, e));
-                self.bottom_tab = BottomTab::References;
+                self.focus_bottom_tab(BottomTab::References);
             }
             // Payload/kind mismatches cannot occur (engine contract);
             // surfaced instead of silently dropped.
@@ -684,6 +721,7 @@ impl AscApp {
                     let label = self.search.label();
                     self.tasks
                         .spawn_findrefs(&apk, query, label, self.paranoid, ctx);
+                    self.unpin_bottom_focus();
                     // Record this query for the history dropdown
                     // (JADX-GUI-013 / ASC-GUI-036). GlobalSearch only
                     // focuses the input; it never submits a query.
@@ -703,6 +741,7 @@ impl AscApp {
                 if let (Some(session), Some(descriptor)) = (&self.session, descriptor) {
                     let apk = session.path().to_path_buf();
                     self.tasks.spawn_findrefs_class(&apk, &descriptor, ctx);
+                    self.unpin_bottom_focus();
                     self.show_bottom = true;
                     self.bottom_tab = BottomTab::References;
                     self.set_status(format!("references: {descriptor}"), true);
@@ -769,6 +808,7 @@ impl AscApp {
                 let apk = session.path().to_path_buf();
                 if matches!(cmd, Command::ShowCallees) {
                     self.tasks.spawn_callees(&apk, &descriptor, &method, ctx);
+                    self.unpin_bottom_focus();
                     self.show_bottom = true;
                     self.bottom_tab = BottomTab::References;
                     self.set_status(format!("callees: {descriptor}->{method}"), true);
@@ -917,7 +957,10 @@ impl AscApp {
             Command::PreviousTab => self.tabs.cycle(false),
             Command::ToggleExplorer => self.show_explorer = !self.show_explorer,
             Command::ToggleInspector => self.show_inspector = !self.show_inspector,
-            Command::ToggleBottomPanel => self.show_bottom = !self.show_bottom,
+            Command::ToggleBottomPanel => {
+                self.show_bottom = !self.show_bottom;
+                self.pin_bottom_focus();
+            }
             Command::ToggleTheme => {
                 let next = match design::theme() {
                     design::Theme::Dark => design::Theme::Light,
@@ -1126,6 +1169,14 @@ impl AscApp {
             self.queue(Command::ToggleInspector);
         } else if pressed(ctx, m, egui::Key::Num3) {
             self.queue(Command::ToggleBottomPanel);
+        } else if pressed(ctx, ms, egui::Key::C) {
+            self.queue(Command::CopyFqn);
+        } else if pressed(ctx, m, egui::Key::C) {
+            self.queue(Command::CopyDescriptor);
+        } else if pressed(ctx, m, egui::Key::D) {
+            self.queue(Command::GoToDeclaration);
+        } else if pressed(ctx, m, egui::Key::G) {
+            self.queue(Command::GotoLine);
         } else if pressed(ctx, alt, egui::Key::ArrowLeft) {
             self.queue(Command::NavigateBack);
         } else if pressed(ctx, m, egui::Key::B) {
@@ -1137,12 +1188,34 @@ impl AscApp {
         } else if pressed(ctx, alt, egui::Key::ArrowRight) {
             self.queue(Command::NavigateForward);
         }
+        // Quick switch: Alt+1..9 selects the n-th tab. The Ctrl+digit
+        // lane is already the panel toggles (Ctrl+1/2/3), so this uses
+        // Alt rather than the JADX Ctrl+1..9 convention.
+        const QUICK_SWITCH_KEYS: [egui::Key; 9] = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
+        for (i, key) in QUICK_SWITCH_KEYS.iter().enumerate() {
+            if pressed(ctx, alt, *key) {
+                self.queue(Command::QuickSwitch { n: (i + 1) as u8 });
+                break;
+            }
+        }
         // Source-edit keys (oracle `n` / `;`): only when the code
         // surface is hovered, a document is open, and no text input
         // owns the keyboard.
         if self.code_hovered && self.active_doc.is_some() && !ctx.egui_wants_keyboard_input() {
             if pressed(ctx, egui::Modifiers::default(), egui::Key::N) {
                 self.queue(Command::BeginRenameSymbol);
+            } else if pressed(ctx, egui::Modifiers::default(), egui::Key::X) {
+                self.queue(Command::FindUsagesOfClicked);
             } else if ctx.input(|i| {
                 i.events
                     .iter()
@@ -1170,6 +1243,17 @@ impl AscApp {
     pub(crate) fn run_ui(ctx: &egui::Context, f: impl FnMut(&mut egui::Ui)) {
         ctx.run_ui(Default::default(), f)
             .drop_without_applying_deltas();
+    }
+
+    /// As [`Self::run_ui`], but with an explicit `RawInput` so tests can
+    /// inject key events and exercise `frame_shortcuts` end to end.
+    #[cfg(test)]
+    pub(crate) fn run_ui_with_input(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        f: impl FnMut(&mut egui::Ui),
+    ) {
+        ctx.run_ui(input, f).drop_without_applying_deltas();
     }
 }
 

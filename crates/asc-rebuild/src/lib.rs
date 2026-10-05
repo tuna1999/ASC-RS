@@ -41,7 +41,7 @@
 //! entries (those pools don't exist before 038). The output is **never**
 //! a 041 multi-DEX container — `rebuild` operates on one `DexView`.
 
-#![doc(html_root_url = "https://docs.rs/asc-rebuild/0.2.0")]
+#![doc(html_root_url = "https://docs.rs/asc-rebuild/0.13.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod error;

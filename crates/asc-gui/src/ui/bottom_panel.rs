@@ -50,6 +50,7 @@ impl AscApp {
                     .color(if selected { T.text } else { T.text_secondary });
                 if ui.selectable_label(selected, label).clicked() {
                     self.bottom_tab = tab;
+                    self.pin_bottom_focus();
                 }
                 ui.add_space(4.0);
             }

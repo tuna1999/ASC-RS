@@ -121,6 +121,10 @@ jobs:
           # CI recreated these fixtures above; a test that cannot find
           # one must FAIL, not silently skip (docs/CORPUS.md).
           ASC_REQUIRE_CORPUS: aurora,fdroid,workload
+          # Enable the render/glyph assertions, which self-skip without
+          # this. The Linux leg installs lavapipe for exactly these
+          # tests; without the variable that dependency buys nothing.
+          ASC_GUI_SHOTS: "1"
         run: cargo test --workspace
 
       - name: Build (release)

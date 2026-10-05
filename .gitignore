@@ -21,6 +21,9 @@ benches/raw_runs.json
 benches/raw_runs.txt
 bench-out.txt
 
+# --- generated differential report (rewritten by tests/differential/run_differential.py) ---
+tests/differential/report.md
+
 # --- one-off evaluation outputs (verdicts live in BACKENDS.md) ---
 crates/asc-decompile/eval/
 
@@ -37,3 +40,12 @@ rebuilt-*.dex
 *.heap
 probe*.rs
 .tmp_*.py
+
+# --- IDA Pro database artifacts (writing these next to a fixture must
+#     never make the tree dirty; fuzz/regress/ is tracked) ---
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.i64

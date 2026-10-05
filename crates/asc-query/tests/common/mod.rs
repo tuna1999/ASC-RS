@@ -41,6 +41,31 @@ pub fn read_corpus_dex(name: &str) -> Option<Vec<u8>> {
     std::fs::read(&path).ok()
 }
 
+/// Fails loudly when `ASC_REQUIRE_CORPUS` names `name` (prefix match on
+/// the fixture basename, e.g. `workload` matches
+/// `workload_classes.dex`) but the fixture is absent.
+///
+/// CI sets that variable after recreating the fixtures it guarantees, so
+/// a listed fixture that is *still* missing must fail the suite instead
+/// of skipping. Skipping is correct only for dev-only fixtures. Call
+/// this on the skip path, right before returning.
+pub fn fail_if_required_corpus_missing(name: &str) {
+    let required = std::env::var("ASC_REQUIRE_CORPUS").is_ok_and(|req| {
+        req.split(',').any(|f| {
+            let f = f.trim();
+            !f.is_empty() && name.starts_with(f)
+        })
+    });
+    if !required {
+        return;
+    }
+    let present = corpus_dex_dir().is_some_and(|d| d.join(name).is_file());
+    assert!(
+        present,
+        "ASC_REQUIRE_CORPUS is set but fixture missing: {name}"
+    );
+}
+
 /// Reads one corpus DEX into `buf` and parses it. Returns a view that
 /// borrows from `buf`. The caller MUST keep `buf` alive for the
 /// lifetime of the returned view.

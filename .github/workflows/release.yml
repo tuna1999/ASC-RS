@@ -116,6 +116,14 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
+        env:
+          # The corpus is recreated above; a fixture listed here that is
+          # still missing must FAIL rather than silently skip
+          # (docs/CORPUS.md).
+          ASC_REQUIRE_CORPUS: aurora,fdroid,workload
+          # The render/glyph assertions self-skip without this; the Linux
+          # leg installs lavapipe precisely to support them.
+          ASC_GUI_SHOTS: "1"
         run: cargo test --workspace
 
       - name: Build (release)

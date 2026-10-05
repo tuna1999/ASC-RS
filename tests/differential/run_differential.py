@@ -14,7 +14,8 @@ The harness is intended to be run by CI or a developer after a build::
 Exit code: 0 if every case matched, 1 if any case differed.
 
 A Markdown report is written to ``tests/differential/report.md`` regardless
-of outcome.
+of outcome. That file is a generated artifact and is gitignored, so running
+the harness never dirties the working tree.
 
 The harness accepts an executable that takes the same arguments as the
 Python oracle::
@@ -417,6 +418,10 @@ def _run_selftest(strict_whitespace: bool) -> tuple[int, list[CaseResult]]:
 # ---- report ---------------------------------------------------------------
 
 def _render_report(bin_path: str, results: list[CaseResult], mode: str) -> str:
+    # Normalise the path spelling: the same run on Windows vs Linux would
+    # otherwise produce different bytes for an artifact that is written
+    # on every invocation.
+    bin_display = bin_path.replace("\\", "/")
     by_status: dict[str, list[CaseResult]] = {}
     for r in results:
         by_status.setdefault(r.status, []).append(r)
@@ -429,7 +434,7 @@ def _render_report(bin_path: str, results: list[CaseResult], mode: str) -> str:
     lines.append("# Differential report")
     lines.append("")
     lines.append(f"- mode: `{mode}`")
-    lines.append(f"- binary: `{bin_path}`")
+    lines.append(f"- binary: `{bin_display}`")
     lines.append(f"- golden corpus: `tests/fixtures/golden/`")
     lines.append(f"- cases run: {total}")
     lines.append("")

@@ -324,23 +324,26 @@ impl TaskManager {
         )
     }
 
-    /// Spawn a `run_findrefs` for references to one class (Analysis
-    /// menu). Supersedes only previous `FindRefsClass` tasks; global
-    /// searches are independent.
+    /// Spawn a `run_findrefs` for references to one class (Analysis menu).
+    ///
+    /// Supersedes every live task that also publishes into the shared
+    /// references surface ([`Self::discard_references_surface`]); global
+    /// searches are independent. An identical request that is already
+    /// live is reused rather than queued twice, so repeated clicks cannot
+    /// fan out into repeated whole-artifact scans.
     pub fn spawn_findrefs_class(
         &mut self,
         apk: &Path,
         descriptor: &str,
         ctx: &egui::Context,
     ) -> TaskId {
-        for t in &mut self.in_flight {
-            if t.kind == TaskKind::FindRefsClass {
-                t.discarded.store(true, Ordering::Release);
-            }
+        let label = format!("refs {descriptor}");
+        if let Some(existing) = self.references_surface_live(&label) {
+            return existing;
         }
+        self.discard_references_surface();
         let apk: PathBuf = apk.to_path_buf();
         let query = Query::type_(descriptor);
-        let label = format!("refs {descriptor}");
         self.submit(
             TaskKind::FindRefsClass,
             label,
@@ -364,7 +367,9 @@ impl TaskManager {
         if let Some(existing) = self
             .in_flight
             .iter()
-            .find(|t| t.kind == TaskKind::Disasm && t.label == key)
+            .find(|t| {
+                t.kind == TaskKind::Disasm && t.label == key && !t.discarded.load(Ordering::Acquire)
+            })
             .map(|t| t.id)
         {
             return existing;
@@ -390,7 +395,11 @@ impl TaskManager {
     }
 
     /// Spawn a one-hop callee scan for `descriptor::method`
-    /// (ASC-RS-GUI-001). Supersedes previous `Callees` tasks.
+    /// (ASC-RS-GUI-001).
+    ///
+    /// Shares the references surface with
+    /// [`Self::spawn_findrefs_class`], so the two supersede each other and
+    /// an identical live request is reused.
     pub fn spawn_callees(
         &mut self,
         apk: &Path,
@@ -398,17 +407,17 @@ impl TaskManager {
         method: &str,
         ctx: &egui::Context,
     ) -> TaskId {
-        for t in &mut self.in_flight {
-            if t.kind == TaskKind::Callees {
-                t.discarded.store(true, Ordering::Release);
-            }
+        let label = format!("{descriptor}->{method}");
+        if let Some(existing) = self.references_surface_live(&label) {
+            return existing;
         }
+        self.discard_references_surface();
         let apk: PathBuf = apk.to_path_buf();
         let target = descriptor.to_string();
         let method = method.to_string();
         self.submit(
             TaskKind::Callees,
-            format!("{target}->{method}"),
+            label,
             move || run_callees_job(&apk, &target, &method),
             ctx,
         )
@@ -422,10 +431,21 @@ impl TaskManager {
     }
 
     /// The in-flight decompile task for `descriptor`, if any.
+    ///
+    /// A superseded or cancelled task does not count (same reasoning as
+    /// [`Self::findrefs_live`]): its result is discarded on arrival, so
+    /// deduplicating onto it would silently swallow the replacement
+    /// request and leave the class permanently unloaded. This is also
+    /// the gate `editor`'s automatic retry uses, so a discarded task
+    /// must not block a fresh spawn either.
     pub fn decompile_in_flight(&self, descriptor: &str) -> Option<TaskId> {
         self.in_flight
             .iter()
-            .find(|t| t.kind == TaskKind::DecompileClass && t.label == descriptor)
+            .find(|t| {
+                t.kind == TaskKind::DecompileClass
+                    && t.label == descriptor
+                    && !t.discarded.load(Ordering::Acquire)
+            })
             .map(|t| t.id)
     }
 
@@ -461,6 +481,38 @@ impl TaskManager {
         self.in_flight
             .iter()
             .any(|t| t.kind == TaskKind::FindRefs && !t.discarded.load(Ordering::Acquire))
+    }
+
+    /// The live task publishing `label` into the shared references
+    /// surface, if any.
+    ///
+    /// `FindRefsClass` ("references to class X") and `Callees` (one-hop
+    /// fan-out) both render into `AscApp::references` and both select the
+    /// REFERENCES tab, so they share one lane. A superseded task does not
+    /// count — its result is discarded on arrival.
+    pub fn references_surface_live(&self, label: &str) -> Option<TaskId> {
+        self.in_flight
+            .iter()
+            .find(|t| {
+                matches!(t.kind, TaskKind::FindRefsClass | TaskKind::Callees)
+                    && t.label == label
+                    && !t.discarded.load(Ordering::Acquire)
+            })
+            .map(|t| t.id)
+    }
+
+    /// Supersede every live references-surface task.
+    ///
+    /// Without this, a late `Callees` result overwrites a newer "find
+    /// references" result (both write `AscApp::references`), and each
+    /// superseded worker still runs a full artifact scan to completion,
+    /// since supersede is discard-on-arrival rather than cancellation.
+    fn discard_references_surface(&mut self) {
+        for t in &mut self.in_flight {
+            if matches!(t.kind, TaskKind::FindRefsClass | TaskKind::Callees) {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
     }
 
     /// Recent completed tasks (Tasks view), newest first.
@@ -690,6 +742,81 @@ mod tests {
             "classes.dex".into(),
             format!("class {name} {{}}"),
         )))
+    }
+
+    /// A superseded/cancelled decompile must not be reused by the dedup.
+    ///
+    /// `Command::ToggleParanoid` cancels the in-flight decompile, clears
+    /// the document cache and immediately re-spawns for the active
+    /// descriptor. If the dedup matched the discarded task, that result
+    /// would be thrown away as stale (the cache is already gone) and the
+    /// class would never load. The same guard gates `editor`'s automatic
+    /// retry, so a discarded task must not block a fresh spawn either.
+    #[test]
+    fn spawn_decompile_ignores_discarded_task() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = std::path::Path::new("does-not-exist.apk");
+
+        let first = mgr.spawn_decompile(apk, "Lcom/foo/Bar;", false, &ctx);
+        // While live, an identical request still dedups.
+        assert_eq!(
+            mgr.spawn_decompile(apk, "Lcom/foo/Bar;", false, &ctx),
+            first,
+            "live task is reused"
+        );
+        assert!(mgr.decompile_in_flight("Lcom/foo/Bar;").is_some());
+
+        // Supersede it, exactly as ToggleParanoid does.
+        mgr.cancel_kind(TaskKind::DecompileClass);
+        assert!(
+            mgr.decompile_in_flight("Lcom/foo/Bar;").is_none(),
+            "a discarded task does not count as in flight"
+        );
+
+        // The replacement must be a new task, not the dead one.
+        let second = mgr.spawn_decompile(apk, "Lcom/foo/Bar;", true, &ctx);
+        assert_ne!(
+            second, first,
+            "replacement spawned instead of deduping onto the discarded task"
+        );
+    }
+
+    /// `FindRefsClass` and `Callees` both publish into the shared
+    /// references surface (`AscApp::references`, REFERENCES tab), so
+    /// spawning one must supersede the other. Otherwise a late result of
+    /// the older kind overwrites the newer result, and every superseded
+    /// worker still runs a whole-artifact scan to completion.
+    #[test]
+    fn references_surface_kinds_supersede_each_other() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = std::path::Path::new("does-not-exist.apk");
+
+        let refs = mgr.spawn_findrefs_class(apk, "Lcom/foo/Bar;", &ctx);
+        // An identical live request is reused, not queued twice.
+        assert_eq!(
+            mgr.spawn_findrefs_class(apk, "Lcom/foo/Bar;", &ctx),
+            refs,
+            "identical request reuses the live task"
+        );
+
+        // A callee scan is a different request on the same surface: it
+        // supersedes the class-references scan.
+        let callees = mgr.spawn_callees(apk, "Lcom/foo/Bar;", "m", &ctx);
+        assert_ne!(callees, refs);
+        assert!(
+            mgr.in_flight
+                .iter()
+                .any(|t| t.id == refs && t.discarded.load(Ordering::Acquire)),
+            "the older surface task is discarded, so its result arrives stale"
+        );
+        assert_eq!(
+            mgr.references_surface_live("Lcom/foo/Bar;->m"),
+            Some(callees),
+            "only the newest request is live"
+        );
+        assert_eq!(mgr.references_surface_live("refs Lcom/foo/Bar;"), None);
     }
 
     #[test]

@@ -310,7 +310,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "ASC frozen: settings.py:5-39",
-      "notes": "Theme toggle via ToggleTheme command wired + test `theme_toggle_via_view_menu` passes."
+      "notes": "Reachable: View > Settings… opens the dialog that hosts the theme picker; the theme is also switchable straight from the View menu."
     },
     {
       "id": "ASC-GUI-026",
@@ -568,7 +568,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX Find Usages",
-      "notes": "Member-scoped find from click wired (Command::FindUsagesOfClicked prefills search). Acceptance test `find_usages_method_query_via_click` passes."
+      "notes": "Reachable: bare `X` over the code surface queues Command::FindUsagesOfClicked, pre-filling the member-scoped search (the bottom panel is also usable by hand). Trigger covered by `bare_x_finds_usages_of_the_clicked_identifier`."
     },
     {
       "id": "JADX-GUI-003",
@@ -581,7 +581,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
       "reference": "JADX click on identifier",
-      "notes": "Go to declaration wired (Command::GoToDeclaration). Acceptance test `go_to_declaration_jumps_to_owner` passes."
+      "notes": "Reachable: Ctrl+D queues Command::GoToDeclaration. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
     },
     {
       "id": "JADX-GUI-004",
@@ -601,13 +601,13 @@
       "feature": "Close others / close all / close right",
       "priority": "P1",
       "weight": 5,
-      "status": "COMPLETE",
+      "status": "PARTIAL",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::close_others_close_all",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX tab context",
-      "notes": "Close-others + close-all commands + close_others_close_all test pass."
+      "notes": "PARTIAL: 'close others' and 'close all' are now reachable from the tab right-click context menu, but there is no 'close right' command at all — that half of the feature name is unimplemented."
     },
     {
       "id": "JADX-GUI-006",
@@ -620,7 +620,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX standard action",
-      "notes": "CopyDescriptor command writes last_clipboard + egui::Context::copy_text. Test `copy_descriptor_writes_clipboard` passes."
+      "notes": "Reachable: Ctrl+C queues Command::CopyDescriptor. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
     },
     {
       "id": "JADX-GUI-007",
@@ -659,7 +659,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX Preferences",
-      "notes": "Command::OpenSettings toggles show_settings dialog. Test settings_dialog_opens_and_lists_themes passes."
+      "notes": "Reachable: View > Settings… queues Command::OpenSettings and the strip renders."
     },
     {
       "id": "JADX-GUI-010",
@@ -685,7 +685,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX right-click context",
-      "notes": "TabController::pin_all + Command::PinAll. Test pin_all_promotes_previews passes."
+      "notes": "Reachable: per-tab rename via `n`, and Pin all via the tab right-click context menu (Close others / Close all / Pin all)."
     },
     {
       "id": "JADX-GUI-012",
@@ -715,7 +715,7 @@
     },
     {
       "id": "JADX-GUI-014",
-      "feature": "Quick switch between recent tabs (Ctrl+1..9)",
+      "feature": "Quick switch between recent tabs (Alt+1..9)",
       "priority": "P1",
       "weight": 5,
       "status": "COMPLETE",
@@ -724,7 +724,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX common",
-      "notes": "Quick switch via Command::QuickSwitch { n }; test `quick_switch_activates_nth_tab` passes."
+      "notes": "Reachable: Alt+1..9 queues Command::QuickSwitch (covered by `frame_shortcuts_wires_the_previously_dead_bindings`). Alt rather than the JADX Ctrl+1..9 because Ctrl+1/2/3 are the panel toggles."
     },
     {
       "id": "JADX-GUI-015",
@@ -737,7 +737,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX right-click Copy",
-      "notes": "CopyFqn command writes last_clipboard (Java form). Test `copy_fqn_writes_clipboard` passes."
+      "notes": "Reachable: Ctrl+Shift+C queues Command::CopyFqn. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
     },
     {
       "id": "JADX-GUI-016",
@@ -798,7 +798,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX goto line",
-      "notes": "Goto-line: Command::GotoLine + apply_goto_line. Tests `goto_line_jumps_to_zero_indexed` + `goto_line_input_opens_via_command` pass."
+      "notes": "Reachable: Ctrl+G queues Command::GotoLine, which opens the goto bar (Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`)."
     },
     {
       "id": "ASC-RS-GUI-001",
@@ -817,13 +817,13 @@
       "feature": "Used by class X inline button",
       "priority": "P2",
       "weight": 3,
-      "status": "COMPLETE",
+      "status": "PARTIAL",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::used_by_class_button_routes_to_findrefs_class",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "derived",
-      "notes": "Command::UsedByClass routes to FindReferences. Test used_by_class_button_routes_to_findrefs_class passes."
+      "notes": "PARTIAL: the capability is reachable via Analysis > Find references, but the advertised inline button does not exist — `Command::UsedByClass` has no trigger and is dispatched only by its acceptance test."
     },
     {
       "id": "ASC-RS-GUI-003",
