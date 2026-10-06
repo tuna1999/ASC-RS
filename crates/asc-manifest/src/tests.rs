@@ -1692,6 +1692,25 @@ fn cdata_text_is_escaped() {
     assert!(text.contains(escaped), "escaped body must render: {text}");
 }
 
+/// Attribute values must be escaped well-formed XML: `&`, `<` and
+/// `"` (previously only `"` was escaped, so `&`/`<` produced invalid
+/// XML in `axml --format text` output).
+#[test]
+fn attribute_values_are_escaped() {
+    use axml::{ANDROID_NS, Val, attr, build, elem};
+
+    let doc = elem(
+        "manifest",
+        vec![attr(Some(ANDROID_NS), "name", Val::Str("a & b < c \" d"))],
+        vec![],
+    );
+    let text = crate::axml::format_axml_text(&crate::axml::parse_axml(&build(&doc)).unwrap());
+    assert!(
+        text.contains(r#"android:name="a &amp; b &lt; c &quot; d""#),
+        "attribute value must be escaped: {text}"
+    );
+}
+
 /// Declaration types are kept apart: `<uses-permission>`,
 /// `<uses-permission-sdk-23>` (and its `-sdk-m` alias) and a custom
 /// `<permission>` with `protectionLevel` (audit F04: they used to merge

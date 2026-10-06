@@ -369,7 +369,7 @@ fn render_element(out: &mut String, doc: &AxmlDocument, e: &AxmlElement, depth: 
         let an = qualify(doc, a.ns.as_deref(), &a.name);
         match &a.value {
             Some(v) => {
-                let _ = write!(out, " {an}=\"{}\"", v.replace('"', "&quot;"));
+                let _ = write!(out, " {an}=\"{}\"", escape_attr(v));
             }
             None => {
                 let _ = write!(out, " {an}=(null)");
@@ -408,4 +408,11 @@ fn escape_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// XML-escape a double-quoted attribute value (`&`, `<`, `"`).
+fn escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
 }
