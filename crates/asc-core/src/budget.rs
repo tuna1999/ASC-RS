@@ -26,12 +26,13 @@
 //! (known limitation — many concurrent GUI `inspect` tasks can still
 //! multiply one entry each).
 //!
-//! The budget is advisory in one direction only: a lying ZIP header can
-//! under-declare an inflated entry, and the actual `Vec` may exceed
-//! the reservation; that side stays bounded by the per-entry inflate
-//! cap (`asc-apk`, 1 GiB). The one DEX a getclass/disasm keeps as its
-//! winner briefly outlives its guard and is likewise bounded by that
-//! per-entry cap.
+//! A lying ZIP header can no longer under-declare an inflated entry by
+//! much: `inflate_into_vec` fails with `SizeMismatch` as soon as the
+//! stream produces more than the declared size, so the actual `Vec`
+//! exceeds the reservation by at most one inflate chunk (64 KiB) before
+//! it is dropped. The one DEX a getclass/disasm keeps as its winner
+//! briefly outlives its guard and is likewise bounded by the per-entry
+//! inflate cap (`asc-apk`, 1 GiB).
 //!
 //! The default cap is generous (2 GiB) so legitimate scans — dozens of
 //! concurrently-held corpus DEXes — never hit it; it exists to convert

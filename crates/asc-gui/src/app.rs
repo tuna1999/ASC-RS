@@ -604,11 +604,19 @@ impl AscApp {
                 self.references = Some(crate::state::SearchResults {
                     label,
                     rows,
-                    complete: true,
-                    errors: Vec::new(),
+                    complete: result.complete,
+                    errors: result.errors.iter().map(|e| e.to_string()).collect(),
                 });
                 self.reveal_bottom_tab(BottomTab::References);
-                self.set_status("callees ready", true);
+                let ok = result.complete && result.errors.is_empty();
+                self.set_status(
+                    if ok {
+                        format!("callees ready: {} rows", result.callees.len())
+                    } else {
+                        format!("callees incomplete: {} rows", result.callees.len())
+                    },
+                    ok,
+                );
             }
             (TaskKind::Callees, TaskOutcome::Failed(e)) => {
                 self.last_error = Some(format!("callees: {e}"));
@@ -634,11 +642,19 @@ impl AscApp {
                 self.references = Some(crate::state::SearchResults {
                     label,
                     rows,
-                    complete: true,
-                    errors: Vec::new(),
+                    complete: result.complete,
+                    errors: result.errors.iter().map(|e| e.to_string()).collect(),
                 });
                 self.reveal_bottom_tab(BottomTab::References);
-                self.set_status("class strings ready", true);
+                let ok = result.complete && result.errors.is_empty();
+                self.set_status(
+                    if ok {
+                        format!("class strings ready: {} strings", result.strings.len())
+                    } else {
+                        format!("class strings incomplete: {} strings", result.strings.len())
+                    },
+                    ok,
+                );
             }
             (TaskKind::ClassStrings, TaskOutcome::Failed(e)) => {
                 self.last_error = Some(format!("class strings: {e}"));
@@ -791,8 +807,8 @@ impl AscApp {
                 let descriptor = self
                     .tabs
                     .active_descriptor()
-                    .or(self.selected_class.as_deref())
                     .filter(|d| !d.contains("#smali"))
+                    .or(self.selected_class.as_deref())
                     .map(str::to_string);
                 let Some(descriptor) = descriptor else {
                     self.set_status("open a class first", false);
@@ -823,10 +839,16 @@ impl AscApp {
                     .map(|s| s.descriptor.clone())
                     .filter(|d| !d.is_empty())
                     .or_else(|| {
+                        // Prefer the active tab's class, but never a
+                        // `#smali` view key: filter the active descriptor
+                        // BEFORE falling back to the tree selection, so a
+                        // smali tab active over a selected class still
+                        // resolves the class (`.or(..).filter(..)` would
+                        // pick the smali key, then drop it to `None`).
                         self.tabs
                             .active_descriptor()
-                            .or(self.selected_class.as_deref())
                             .filter(|d| !d.contains("#smali"))
+                            .or(self.selected_class.as_deref())
                             .map(str::to_string)
                     });
                 let method = self.symbol_sel.as_ref().map(|s| s.token.clone());
@@ -870,10 +892,16 @@ impl AscApp {
                     .map(|s| s.descriptor.clone())
                     .filter(|d| !d.is_empty())
                     .or_else(|| {
+                        // Prefer the active tab's class, but never a
+                        // `#smali` view key: filter the active descriptor
+                        // BEFORE falling back to the tree selection, so a
+                        // smali tab active over a selected class still
+                        // resolves the class (`.or(..).filter(..)` would
+                        // pick the smali key, then drop it to `None`).
                         self.tabs
                             .active_descriptor()
-                            .or(self.selected_class.as_deref())
                             .filter(|d| !d.contains("#smali"))
+                            .or(self.selected_class.as_deref())
                             .map(str::to_string)
                     });
                 let Some(descriptor) = descriptor else {

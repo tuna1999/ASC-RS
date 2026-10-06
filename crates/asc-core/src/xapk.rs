@@ -200,6 +200,11 @@ pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
 /// Same, with a caller-chosen aggregate work budget (uncompressed
 /// member bytes analyzed). The budget bounds total inflate work, not
 /// resident memory: each member buffer is dropped after analysis.
+///
+/// The budget is charged from the central-directory declared size
+/// *before* each read and is never refunded, so a member that fails to
+/// inflate still consumes its share — a container of malformed members
+/// cannot bypass the bound by failing.
 pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkReport, CoreError> {
     let apk = Apk::open(path)?;
     let mut report = XapkReport {
@@ -224,7 +229,7 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
         if budget_left < e.uncompressed_size as usize {
             report.errors.push(format!(
                 "aggregate budget exceeded ({} MiB) before {}; {} of {} members analyzed",
-                TOTAL_BUDGET >> 20,
+                total_budget >> 20,
                 e.name,
                 report.members.len(),
                 apk.entries().filter(|x| x.name.ends_with(".apk")).count()
@@ -232,6 +237,12 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
             report.complete = false;
             break;
         }
+        // Charge the work budget BEFORE reading. A member that fails to
+        // inflate still cost the inflater real work, and a failed attempt
+        // must not be refundable: otherwise a container full of broken
+        // members makes the inflater churn with the aggregate counter
+        // barely moving.
+        budget_left -= e.uncompressed_size as usize;
         let bytes = match apk.read_entry_with_limits(&e, cap.unwrap_or_default()) {
             Ok(b) => b,
             Err(x) => {
@@ -240,7 +251,6 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
                 continue;
             }
         };
-        budget_left -= e.uncompressed_size as usize;
         let member = analyze_member(
             &e.name,
             e.compressed_size,

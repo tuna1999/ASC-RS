@@ -18,17 +18,22 @@ fn callees_of_init_lists_super_calls() {
         eprintln!("corpus fixture missing; skipping");
         return;
     };
-    let callees = callees_of(
+    let report = callees_of(
         &view,
         "Lcom/google/android/material/timepicker/ClockFaceView;",
         "<init>",
-    )
-    .unwrap();
+    );
+    assert!(
+        report.complete,
+        "clean DEX must scan fully: {:?}",
+        report.errors
+    );
+    let callees = &report.callees;
     assert!(
         !callees.is_empty(),
         "a real constructor must invoke something"
     );
-    for c in &callees {
+    for c in callees {
         assert!(
             c.target.starts_with('L') && c.target.contains("->"),
             "{}",
@@ -43,8 +48,8 @@ fn callees_of_init_lists_super_calls() {
     );
 }
 
-/// Degenerate cases: codeless overload → empty; unknown class →
-/// `Locator` error.
+/// Degenerate cases: codeless overload → empty + complete; unknown
+/// class → incomplete with a `Locator` error.
 #[test]
 fn callees_of_degrades_cleanly() {
     let mut bytes = Vec::new();
@@ -54,8 +59,22 @@ fn callees_of_degrades_cleanly() {
     };
     let cls = "Lcom/google/android/material/timepicker/ClockFaceView;";
     // A name with no code-bearing overload in that class.
-    let none = callees_of(&view, cls, "definitely_not_a_method_xyz").unwrap();
-    assert!(none.is_empty());
+    let none = callees_of(&view, cls, "definitely_not_a_method_xyz");
+    assert!(none.callees.is_empty());
+    assert!(none.complete, "no matching overload is not a failed scan");
     // Undefined class descriptor.
-    assert!(callees_of(&view, "Lno/such/Clazz;", "<init>").is_err());
+    let missing = callees_of(&view, "Lno/such/Clazz;", "<init>");
+    assert!(!missing.complete);
+    assert!(missing.callees.is_empty());
+    assert!(
+        missing.errors.iter().any(|e| matches!(
+            e,
+            asc_query::SearchError::Locator {
+                pool: "class_defs",
+                ..
+            }
+        )),
+        "got: {:?}",
+        missing.errors
+    );
 }

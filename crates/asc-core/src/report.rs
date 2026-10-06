@@ -145,11 +145,20 @@ impl SearchError {
 
 /// Aggregated findrefs report across every DEX in the APK.
 ///
-/// `complete` is `false` iff at least one per-DEX scan or one DEX parse
-/// failed. `errors` carries every recorded failure with its owning
-/// `dex_name`. The JSON consumer uses `complete` to decide whether to
-/// trust the hits; the text consumer prints hits regardless and leaves
-/// diagnostics to stderr.
+/// ## `complete` vs coverage
+///
+/// `complete` is `false` iff at least one per-DEX *scan* failed or one
+/// DEX *parse* failed — i.e. the engine ran and hit an error. It is
+/// **not** a claim that every `classes*.dex` entry was analysed: an
+/// entry the engine deliberately declined to decode (a `classes*.dex`
+/// whose bytes are not a DEX) is recorded in `errors` with a `skipped:`
+/// message but does **not** flip `complete`. Declining is not failing,
+/// and exit 2 keeps meaning "the scan ran and hit an error" (audit F06).
+///
+/// A consumer that needs full artifact coverage must treat a non-empty
+/// `errors` list — every entry names its owning `dex_name` — as "some
+/// entries were not scanned", never rely on `complete` alone. The text
+/// consumer prints hits regardless and leaves diagnostics to stderr.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchReport {
     /// Per-DEX results in central-directory offset order.

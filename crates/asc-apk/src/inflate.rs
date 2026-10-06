@@ -16,9 +16,9 @@ use std::io::Read;
 /// preventing a hostile archive from forcing a multi-gigabyte allocation.
 pub const DEFAULT_MAX_OUTPUT: usize = 1 << 30;
 
-/// Chunk size used for streaming inflation. Smaller than the cap so that
-/// `TooLarge` is detected promptly (within at most one extra chunk worth
-/// of memory growth past the cap).
+/// Chunk size used for streaming inflation. Smaller than the caps so an
+/// over-long stream is rejected promptly: within at most one extra chunk
+/// of growth past the declared uncompressed size.
 pub const INFLATE_CHUNK: usize = 64 * 1024;
 
 /// Limits that govern inflate output size.
@@ -80,8 +80,14 @@ pub(crate) fn inflate_into_vec(
     let mut out: Vec<u8> = Vec::with_capacity(expected_len);
     let mut decoder = flate2::read::DeflateDecoder::new(compressed);
 
-    // Cap-aware loop: read up to INFLATE_CHUNK bytes at a time and stop as
-    // soon as the buffer exceeds `max_output`.
+    // Chunked loop that fails the moment the stream produces more than
+    // the central directory declared. `expected_len <= limits.max_output`
+    // was checked above, so this is the tighter bound: a lying
+    // `uncompressed_size` (e.g. 1 byte declared, hundreds of MiB actual)
+    // now stops within one chunk instead of inflating the whole payload
+    // — which is what kept the declared-size reservation in
+    // `asc_core::budget` honest. `SizeMismatch.produced` is the count
+    // observed at the stop point, not the full stream length.
     let mut chunk = vec![0u8; INFLATE_CHUNK];
     loop {
         let cap = INFLATE_CHUNK.min(chunk.len());
@@ -92,10 +98,14 @@ pub(crate) fn inflate_into_vec(
         if n == 0 {
             break;
         }
-        if out.len() + n > limits.max_output {
-            return Err(crate::ApkError::TooLarge {
-                produced: (out.len() + n) as u64,
-                cap: limits.max_output as u64,
+        // Cannot overflow in practice (`out.len() <= expected_len`), but
+        // saturating so a future caller passing a bogus cap stays a clean
+        // error rather than a debug-overflow panic on untrusted input.
+        let produced = out.len().saturating_add(n);
+        if produced > expected_len {
+            return Err(crate::ApkError::SizeMismatch {
+                declared: expected_len as u64,
+                produced: produced as u64,
             });
         }
         out.extend_from_slice(&chunk[..n]);

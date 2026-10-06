@@ -59,4 +59,21 @@ pub enum SearchError {
         #[source]
         source: asc_bytecode::BytecodeError,
     },
+
+    /// A `DexRef::String` decoded by the walker could not be resolved
+    /// against `string_ids` (`view.string` failed). The scan keeps the
+    /// strings already collected and marks the report incomplete.
+    #[error(
+        "string ref #{index} unresolvable at code_off 0x{code_off:x} insn offset 0x{insn_offset:x}: {source}"
+    )]
+    StringRef {
+        /// The `code_off` of the body containing the reference.
+        code_off: u32,
+        /// Code-unit offset of the referencing instruction.
+        insn_offset: u32,
+        /// The unresolvable `string_ids` index.
+        index: u32,
+        #[source]
+        source: asc_dex::error::DexError,
+    },
 }

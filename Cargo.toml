@@ -17,7 +17,7 @@ members = [
 exclude = ["fuzz", "reference/asc"]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 rust-version = "1.93"
 

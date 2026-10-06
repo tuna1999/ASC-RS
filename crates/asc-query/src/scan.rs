@@ -277,8 +277,10 @@ pub fn find_refs(view: &DexView, query: &Query) -> DexSearchReport {
 /// Extracts the code-unit offset out of a [`BytecodeError`].
 ///
 /// Every `BytecodeError` variant carries `offset` as the first field;
-/// matching keeps the call site readable.
-fn insn_offset_of(e: &BytecodeError) -> u32 {
+/// matching keeps the call site readable. Shared by `find_refs` and the
+/// class-scoped scans (`strings_of`, `callees`) so a walker failure is
+/// reported identically everywhere.
+pub(crate) fn insn_offset_of(e: &BytecodeError) -> u32 {
     match *e {
         BytecodeError::LengthMismatch { offset, .. } => offset,
         BytecodeError::TruncatedInstruction { offset, .. } => offset,

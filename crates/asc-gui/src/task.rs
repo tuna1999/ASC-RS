@@ -23,6 +23,11 @@
 //! - Duplicate decompiles of the same descriptor are deduplicated:
 //!   spawning returns the in-flight task's id instead of fanning out
 //!   more threads (audit F10).
+//! - Burst protection: at most [`MAX_TASK_THREADS`] worker threads run
+//!   at once; overflow jobs wait in a FIFO queue and start as slots
+//!   free. Supersede stays discard-on-arrival (the engine has no
+//!   cancellation hook), so an already-started superseded job still
+//!   runs to completion — the cap bounds thread creation, not CPU.
 //!
 //! Job execution runs inside `catch_unwind`: the engine is panic-free
 //! by invariant, but a panicking worker must degrade into a failed
@@ -31,7 +36,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Instant;
 
@@ -92,6 +97,24 @@ impl TaskKind {
             TaskKind::Callees => "callees",
             TaskKind::ClassStrings => "class strings",
         }
+    }
+
+    /// Whether a task of this kind publishes into the shared references
+    /// surface (`AscApp::references`, the REFERENCES bottom tab).
+    ///
+    /// Class references, one-hop callees and class-scoped strings all
+    /// write the same surface, so they supersede and dedup each other.
+    /// This is the single source of truth for that membership: dedup
+    /// ([`TaskManager::references_surface_live`]), supersede
+    /// ([`TaskManager::discard_references_surface`]) and every future
+    /// lane rule must route through here (audit P1: `ClassStrings` was
+    /// missing from both matches, so a late class-strings result could
+    /// overwrite a newer references/callees result).
+    pub fn uses_references_surface(self) -> bool {
+        matches!(
+            self,
+            TaskKind::FindRefsClass | TaskKind::Callees | TaskKind::ClassStrings
+        )
     }
 }
 
@@ -177,6 +200,21 @@ pub struct TaskLogEntry {
     pub elapsed_ms: u64,
 }
 
+/// Upper bound on concurrently-running GUI worker threads.
+///
+/// Superseded/duplicate work is already deduplicated per lane; this is
+/// the backstop that keeps a burst of DISTINCT requests — each `submit`
+/// used to spawn its own OS thread — from growing threads without limit.
+/// Overflow jobs wait in [`TaskManager::pending`] and start as slots
+/// free (each worker drops its slot on completion; the next `poll` picks
+/// the queued job up).
+///
+/// ponytail: one coarse global cap, not per-lane admission (load ≤ 1,
+/// search ≤ 1, decompile pool). Per-lane lanes plus cooperative
+/// cancellation are the follow-up the audit allows; this bounds the
+/// fan-out without touching the scheduling model.
+pub const MAX_TASK_THREADS: usize = 32;
+
 /// Owns all background tasks. Poll it once per frame from the eframe
 /// `update` callback; it never blocks.
 pub struct TaskManager {
@@ -184,6 +222,12 @@ pub struct TaskManager {
     generation: SessionGeneration,
     in_flight: Vec<InFlight>,
     log: std::collections::VecDeque<TaskLogEntry>,
+    /// Jobs admitted but not yet started (over the [`MAX_TASK_THREADS`]
+    /// cap); FIFO so the oldest request runs first.
+    pending: std::collections::VecDeque<Box<dyn FnOnce() + Send + 'static>>,
+    /// Live worker-thread count. Shared with each worker so it can drop
+    /// its own slot on exit; `pump` reads it to admit more work.
+    active: Arc<AtomicUsize>,
 }
 
 impl Default for TaskManager {
@@ -198,6 +242,8 @@ impl TaskManager {
             generation: SessionGeneration::INITIAL,
             in_flight: Vec::new(),
             log: std::collections::VecDeque::new(),
+            pending: std::collections::VecDeque::new(),
+            active: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -239,7 +285,9 @@ impl TaskManager {
         let (tx, rx) = channel::<TaskEnvelope>();
         let discarded = Arc::new(AtomicBool::new(false));
         let ctx2 = ctx.clone();
-        std::thread::spawn(move || {
+        // The whole worker body is boxed so overflow work can wait in
+        // `pending` instead of spawning one OS thread per request.
+        let job: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
             let outcome = match catch_unwind(AssertUnwindSafe(run)) {
                 Ok(outcome) => outcome,
                 Err(panic) => TaskOutcome::Failed(panic_message(&panic)),
@@ -261,7 +309,34 @@ impl TaskManager {
             receiver: rx,
             discarded,
         });
+        self.pending.push_back(job);
+        self.pump();
         id
+    }
+
+    /// Start queued jobs while the live-worker count is under
+    /// [`MAX_TASK_THREADS`]. Called from [`Self::submit`] (fast path: the
+    /// queue is empty and the job starts immediately) and at the top of
+    /// [`Self::poll`], so a slot freed by a finishing worker admits the
+    /// next queued job on the following frame.
+    fn pump(&mut self) {
+        while !self.pending.is_empty() {
+            if self.active.load(Ordering::Acquire) >= MAX_TASK_THREADS {
+                break;
+            }
+            let job = self.pending.pop_front().expect("checked non-empty");
+            self.active.fetch_add(1, Ordering::AcqRel);
+            let active = Arc::clone(&self.active);
+            std::thread::spawn(move || {
+                job();
+                active.fetch_sub(1, Ordering::AcqRel);
+            });
+        }
+    }
+
+    /// Jobs admitted but queued behind [`MAX_TASK_THREADS`] (tests / UI).
+    pub fn queued_count(&self) -> usize {
+        self.pending.len()
     }
 
     /// Spawn a `run_getclass` task for `descriptor` (`paranoid`: decode
@@ -518,15 +593,17 @@ impl TaskManager {
     /// The live task publishing `label` into the shared references
     /// surface, if any.
     ///
-    /// `FindRefsClass` ("references to class X") and `Callees` (one-hop
-    /// fan-out) both render into `AscApp::references` and both select the
-    /// REFERENCES tab, so they share one lane. A superseded task does not
-    /// count — its result is discarded on arrival.
+    /// [`TaskKind::FindRefsClass`] ("references to class X"),
+    /// [`TaskKind::Callees`] (one-hop fan-out) and
+    /// [`TaskKind::ClassStrings`] all render into `AscApp::references`
+    /// and select the REFERENCES tab, so they share one lane
+    /// ([`TaskKind::uses_references_surface`]). A superseded task does
+    /// not count — its result is discarded on arrival.
     pub fn references_surface_live(&self, label: &str) -> Option<TaskId> {
         self.in_flight
             .iter()
             .find(|t| {
-                matches!(t.kind, TaskKind::FindRefsClass | TaskKind::Callees)
+                t.kind.uses_references_surface()
                     && t.label == label
                     && !t.discarded.load(Ordering::Acquire)
             })
@@ -541,7 +618,7 @@ impl TaskManager {
     /// since supersede is discard-on-arrival rather than cancellation.
     fn discard_references_surface(&mut self) {
         for t in &mut self.in_flight {
-            if matches!(t.kind, TaskKind::FindRefsClass | TaskKind::Callees) {
+            if t.kind.uses_references_surface() {
                 t.discarded.store(true, Ordering::Release);
             }
         }
@@ -566,6 +643,9 @@ impl TaskManager {
     /// Returns tasks in **arrival order**; each is stamped with its
     /// staleness verdict so callers can drop old results.
     pub fn poll(&mut self) -> Vec<CompletedTask> {
+        // A finishing worker freed a slot; admit the next queued job
+        // (no-op when nothing is queued).
+        self.pump();
         let mut done = Vec::new();
         let mut still_pending: Vec<InFlight> = Vec::with_capacity(self.in_flight.len());
         for mut task in std::mem::take(&mut self.in_flight) {
@@ -1160,5 +1240,173 @@ mod tests {
         let out = with_decompile_warnings(bad);
         assert!(out.starts_with("// warning:"), "{out}");
         assert!(out.ends_with(bad));
+    }
+
+    fn class_strings_outcome() -> TaskOutcome {
+        TaskOutcome::ClassStrings(asc_core::ClassStringsResult {
+            dex_name: "classes.dex".into(),
+            strings: Vec::new(),
+            errors: Vec::new(),
+            complete: true,
+        })
+    }
+
+    fn callees_outcome() -> TaskOutcome {
+        TaskOutcome::Callees(asc_core::CalleesResult {
+            dex_name: "classes.dex".into(),
+            callees: Vec::new(),
+            errors: Vec::new(),
+            complete: true,
+        })
+    }
+
+    /// `uses_references_surface` must be the ONE definition of the shared
+    /// lane; adding a variant there is enough (audit P1: `ClassStrings`
+    /// was missing from the two `matches!` sites).
+    #[test]
+    fn references_surface_membership_is_explicit() {
+        assert!(TaskKind::FindRefsClass.uses_references_surface());
+        assert!(TaskKind::Callees.uses_references_surface());
+        assert!(TaskKind::ClassStrings.uses_references_surface());
+        assert!(!TaskKind::FindRefs.uses_references_surface());
+        assert!(!TaskKind::DecompileClass.uses_references_surface());
+        assert!(!TaskKind::Disasm.uses_references_surface());
+        assert!(!TaskKind::LoadArtifact.uses_references_surface());
+    }
+
+    /// An identical live `ClassStrings` request returns the SAME task id
+    /// and does not spawn a second task.
+    #[test]
+    fn identical_class_strings_request_is_reused() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("does-not-exist.apk");
+        let a = mgr.spawn_class_strings(apk, "Lcom/foo/Bar;", &ctx);
+        let b = mgr.spawn_class_strings(apk, "Lcom/foo/Bar;", &ctx);
+        assert_eq!(a, b, "identical class-strings request reuses the task");
+        assert_eq!(mgr.in_flight_count(), 1, "no second task spawned");
+    }
+
+    /// Drain every task to completion, returning the `stale` verdict for
+    /// `id` (deterministic: the test controls when the gated task lands).
+    fn drain_stale_of(mgr: &mut TaskManager, id: TaskId) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut verdict = None;
+        while mgr.has_in_flight() && std::time::Instant::now() < deadline {
+            for t in mgr.poll() {
+                if t.id == id {
+                    verdict = Some(t.stale);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for t in mgr.poll() {
+            if t.id == id {
+                verdict = Some(t.stale);
+            }
+        }
+        verdict.expect("gated task must eventually be delivered")
+    }
+
+    /// ClassStrings → FindRefsClass: the older class-strings result lands
+    /// after the newer references request and must arrive stale.
+    #[test]
+    fn late_class_strings_cannot_beat_newer_references() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("does-not-exist.apk");
+        let (old, rel) = gated(
+            &mut mgr,
+            TaskKind::ClassStrings,
+            "Lcom/foo/Bar;",
+            class_strings_outcome(),
+            &ctx,
+        );
+        let newer = mgr.spawn_findrefs_class(apk, "Lcom/foo/Bar;", &ctx);
+        assert_ne!(newer, old);
+        drop(rel);
+        assert!(drain_stale_of(&mut mgr, old), "old result must be stale");
+    }
+
+    /// ClassStrings → Callees: same surface, same supersede rule.
+    #[test]
+    fn late_class_strings_cannot_beat_newer_callees() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("does-not-exist.apk");
+        let (old, rel) = gated(
+            &mut mgr,
+            TaskKind::ClassStrings,
+            "Lcom/foo/Bar;",
+            class_strings_outcome(),
+            &ctx,
+        );
+        let newer = mgr.spawn_callees(apk, "Lcom/foo/Bar;", "m", &ctx);
+        assert_ne!(newer, old);
+        drop(rel);
+        assert!(drain_stale_of(&mut mgr, old), "old result must be stale");
+    }
+
+    /// Callees → ClassStrings: the reverse direction, to prove the lane
+    /// is symmetric (ClassStrings can supersede too).
+    #[test]
+    fn late_callees_cannot_beat_newer_class_strings() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("does-not-exist.apk");
+        let (old, rel) = gated(
+            &mut mgr,
+            TaskKind::Callees,
+            "Lcom/foo/Bar;->m",
+            callees_outcome(),
+            &ctx,
+        );
+        let newer = mgr.spawn_class_strings(apk, "Lcom/foo/Baz;", &ctx);
+        assert_ne!(newer, old);
+        drop(rel);
+        assert!(drain_stale_of(&mut mgr, old), "old result must be stale");
+    }
+
+    /// A burst of distinct submissions cannot create unlimited threads:
+    /// at most [`MAX_TASK_THREADS`] run at once, the rest wait in the
+    /// queue and drain as slots free.
+    #[test]
+    fn submit_burst_is_capped_and_drains() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let total = MAX_TASK_THREADS + 3;
+        let mut releases = Vec::new();
+        for i in 0..total {
+            let (tx, rx) = channel::<()>();
+            let outcome = ok_source(&format!("t{i}"));
+            mgr.submit(
+                TaskKind::DecompileClass,
+                format!("t{i}"),
+                move || {
+                    let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+                    outcome
+                },
+                &ctx,
+            );
+            releases.push(tx);
+        }
+        assert_eq!(mgr.in_flight_count(), total);
+        assert_eq!(
+            mgr.queued_count(),
+            total - MAX_TASK_THREADS,
+            "excess jobs must wait, not spawn a thread each"
+        );
+        for tx in &releases {
+            let _ = tx.send(());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut done = 0usize;
+        while mgr.has_in_flight() && std::time::Instant::now() < deadline {
+            done += mgr.poll().len();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        done += mgr.poll().len();
+        assert_eq!(done, total, "every queued job eventually runs");
+        assert_eq!(mgr.queued_count(), 0);
     }
 }

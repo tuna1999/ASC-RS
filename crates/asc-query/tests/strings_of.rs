@@ -19,7 +19,13 @@ fn strings_of_class_lists_constants() {
         eprintln!("corpus fixture missing; skipping");
         return;
     };
-    let strings = strings_of_class(&view, "Landroidx/core/text/util/LinkifyCompat;").unwrap();
+    let report = strings_of_class(&view, "Landroidx/core/text/util/LinkifyCompat;");
+    assert!(
+        report.complete,
+        "clean DEX must scan fully: {:?}",
+        report.errors
+    );
+    let strings = &report.strings;
     assert!(
         !strings.is_empty(),
         "LinkifyCompat loads URL scheme constants"
@@ -32,18 +38,18 @@ fn strings_of_class_lists_constants() {
         strings
     );
     assert!(!strings.is_empty(), "a real view class loads strings");
-    for s in &strings {
+    for s in strings {
         assert!(s.sites >= 1, "site count must be positive: {s:?}");
     }
     let mut seen: Vec<&str> = Vec::new();
-    for s in &strings {
+    for s in strings {
         assert!(!seen.contains(&s.text.as_str()), "duplicate {}", s.text);
         seen.push(&s.text);
     }
 }
 
-/// Unknown class → the structured `class_defs` locator error (same
-/// contract as `callees_of`).
+/// Unknown class → an incomplete report carrying the structured
+/// `class_defs` locator error (same contract as `callees_of`).
 #[test]
 fn strings_of_class_degrades_cleanly() {
     let mut bytes = Vec::new();
@@ -51,15 +57,18 @@ fn strings_of_class_degrades_cleanly() {
         eprintln!("corpus fixture missing; skipping");
         return;
     };
-    let err = strings_of_class(&view, "Lno/such/Clazz;").unwrap_err();
+    let report = strings_of_class(&view, "Lno/such/Clazz;");
+    assert!(!report.complete, "a missing class is not a complete scan");
+    assert!(report.strings.is_empty());
     assert!(
-        matches!(
-            err,
+        report.errors.iter().any(|e| matches!(
+            e,
             asc_query::SearchError::Locator {
                 pool: "class_defs",
                 ..
             }
-        ),
-        "got: {err:?}"
+        )),
+        "got: {:?}",
+        report.errors
     );
 }

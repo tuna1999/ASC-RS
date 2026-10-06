@@ -32,6 +32,21 @@ fn empty_app() -> AscApp {
     AscApp::new(None)
 }
 
+/// Serializes every test that creates an egui_kittest wgpu harness.
+///
+/// Each harness builds its own wgpu `RenderState` (egui_kittest
+/// `WgpuTestRenderer::new`), and the Windows CI runner only exposes a
+/// software/CPU adapter: several harnesses rendering at once outlast
+/// wgpu's 10 s `PollType::Wait` budget and fail with `PollError: The
+/// requested Wait timed out…` (`glyph_pixel_audit` / `visual_shots` on
+/// CI, never on a machine with a real GPU). One render test at a time
+/// keeps device creation and submissions off the same adapter.
+fn render_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking render test must not poison every later render test.
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn fake_task(id: u64, descriptor: &str, outcome: TaskOutcome) -> CompletedTask {
     CompletedTask {
         id: crate::task::TaskId(id),
@@ -540,6 +555,7 @@ fn visual_shots() {
         return;
     };
     let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    let _guard = render_lock();
     let _ = std::fs::remove_dir_all(&shots);
     std::fs::create_dir_all(&shots).unwrap();
     let save = |h: &mut egui_kittest::Harness<'_, AscApp>, name: &str| {
@@ -674,6 +690,7 @@ fn sidebar_repro() {
         eprintln!("fdroid fixture missing; skipping");
         return;
     }
+    let _guard = render_lock();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
         .wgpu()
@@ -732,6 +749,7 @@ fn sidebar_repro() {
 /// by the default font stack — otherwise it renders as tofu.
 #[test]
 fn glyph_coverage() {
+    let _guard = render_lock();
     // The full inventory of glyphs the UI renders (keep in sync
     // with src/*: grep non-ASCII string literals).
     const USED: &[&str] = &[
@@ -819,6 +837,7 @@ fn glyph_pixel_audit() {
     }
     // The control (0x2315) is held as a codepoint so the
     // glyph_coverage source scan never sees the literal.
+    let _guard = render_lock();
     const GLYPHS: &[&str] = &["◇", "◆", "▸", "▾", "×", "◀", "▶", "⌘", "●"];
     const CONTROL_CP: u32 = 0x2315;
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
@@ -854,6 +873,7 @@ fn glyph_probe() {
         eprintln!("ASC_GUI_SHOTS not set; skipping");
         return;
     }
+    let _guard = render_lock();
     const GLYPHS: &[&str] = &[
         "🔍", "🔎", "⌖", "⌾", "⊙", "◎", "◉", "○", "■", "□", "✔", "✗", "⇄", "↻", "⟳", "ℹ", "⚡",
         "☰", "▤", "⚙", "≡", "▰", "▣", "⏵", "⚠",
@@ -1438,6 +1458,7 @@ fn persistence_round_trip_panel_sizes() {
 /// committed queries. Headless (kittest, no corpus needed).
 #[test]
 fn member_scoped_search_bar_widgets() {
+    let _guard = render_lock();
     use egui_kittest::kittest::Queryable;
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
@@ -1560,6 +1581,7 @@ fn bookmark_toggle_jump_and_open_tabs_picker() {
 /// picker, settings dialog and goto-line bar render as windows.
 #[test]
 fn overlay_windows_render() {
+    let _guard = render_lock();
     use egui_kittest::kittest::Queryable;
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1200.0, 800.0))
@@ -1724,14 +1746,102 @@ fn class_strings_e2e() {
             .iter()
             .all(|r| r.matched.iter().all(|m| m.starts_with('×')))
     );
-    // The surface supersedes: a new class-strings request replaces it.
+    // The same request must be discoverable on the shared references
+    // lane (the dedup key) and spawn a fresh task whose result lands
+    // again. A bare `app.references.is_some()` would pass even if the
+    // lane predicate forgot `ClassStrings` (audit P1), so assert the
+    // task identity itself.
     crate::app::AscApp::run_ui(&ctx, |ui| {
         app.dispatch(Command::ShowClassStrings, ui.ctx());
     });
     assert!(
-        app.tasks.references_surface_live(descriptor).is_some() || app.references.is_some(),
-        "identical live request is reused, surface stays"
+        app.tasks.references_surface_live(descriptor).is_some(),
+        "the live class-strings task must be on the references lane"
     );
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.tasks.references_surface_live(descriptor).is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        app.references
+            .as_ref()
+            .is_some_and(|r| r.label.starts_with("strings of")),
+        "the second request must land on the shared surface"
+    );
+}
+
+/// P3: with a `#smali` view active and the class selected in the tree,
+/// `ShowClassStrings` must resolve the CLASS, not the smali view key —
+/// the old `.or(tree).filter(!#smali)` picked the smali key, dropped it,
+/// and aborted with "select a class first". Corpus-gated.
+#[test]
+fn class_strings_falls_back_from_active_smali_tab() {
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut app = AscApp::new(Some(apk));
+    for _ in 0..600 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(app.session.is_some(), "artifact loaded");
+    let descriptor = "Landroidx/core/text/util/LinkifyCompat;";
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        // No symbol selection: the fallback must do the work.
+        app.symbol_sel = None;
+        app.selected_class = Some(descriptor.to_string());
+        // The ACTIVE tab is the smali view of the very same class.
+        let key = crate::task::TaskManager::smali_key(descriptor, None);
+        app.tabs.open_preview(&key);
+        app.tabs.activate(&key);
+        app.active_doc = None;
+        app.dispatch(Command::ShowClassStrings, ctx);
+    });
+    assert!(
+        app.tasks.references_surface_live(descriptor).is_some(),
+        "smali-active fallback must resolve the real class descriptor"
+    );
+}
+
+/// An incomplete `ClassStrings` result must stay flagged in the GUI
+/// surface (`complete:false` + errors) — that drives the ⚠ banner
+/// instead of a false ✔. The handler used to hard-code
+/// `complete: true, errors: vec![]` (audit P1).
+#[test]
+fn incomplete_class_strings_result_is_not_reported_complete() {
+    let mut app = empty_app();
+    let mut task = fake_task(
+        1,
+        "Lcom/foo/Bar;",
+        TaskOutcome::ClassStrings(asc_core::ClassStringsResult {
+            dex_name: "classes.dex".into(),
+            strings: vec![asc_query::ClassString {
+                text: "kept".into(),
+                sites: 1,
+            }],
+            errors: vec![asc_core::SearchError {
+                dex_name: "classes.dex".into(),
+                kind: asc_core::SearchErrorKind::Engine,
+                message: "ref_walker error".into(),
+            }],
+            complete: false,
+        }),
+    );
+    task.kind = TaskKind::ClassStrings;
+    app.apply_task(task);
+    let r = app.references.as_ref().expect("result stored");
+    assert!(!r.complete, "a partial class-strings scan is not complete");
+    assert_eq!(r.errors.len(), 1, "the failure must be surfaced");
+    assert_eq!(r.rows.len(), 1, "partial data is still shown");
 }
 
 /// v0.9.0 feature shots: method Smali tab, callees rows, open-tabs
@@ -1746,6 +1856,7 @@ fn visual_shots_v090_features() {
         eprintln!("corpus fixture missing; skipping");
         return;
     };
+    let _guard = render_lock();
     let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
     std::fs::create_dir_all(&shots).unwrap();
     let save = |h: &mut egui_kittest::Harness<'_, AscApp>, name: &str| {

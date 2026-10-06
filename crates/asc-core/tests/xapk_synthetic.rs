@@ -7,15 +7,42 @@
 
 use std::io::Write as _;
 
-fn write_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
-    let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+fn zip_bytes(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let opts =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for (name, data) in entries {
         w.start_file(*name, opts).unwrap();
         w.write_all(data).unwrap();
     }
-    w.finish().unwrap();
+    w.finish().unwrap().into_inner()
+}
+
+fn write_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
+    std::fs::write(path, zip_bytes(entries)).unwrap();
+}
+
+/// Rewrite every central-directory record's declared uncompressed size.
+/// Used to manufacture members whose header lies about the payload size
+/// (both `Apk` and `ZipView` trust the central directory for it).
+fn override_cd_uncompressed_size(bytes: &mut [u8], value: u32) {
+    let mut i = 0usize;
+    while i + 46 <= bytes.len() {
+        if bytes[i..i + 4] == *b"PK\x01\x02" {
+            bytes[i + 24..i + 28].copy_from_slice(&value.to_le_bytes());
+            let name_len = u16::from_le_bytes([bytes[i + 28], bytes[i + 29]]) as usize;
+            let extra_len = u16::from_le_bytes([bytes[i + 30], bytes[i + 31]]) as usize;
+            let comment_len = u16::from_le_bytes([bytes[i + 32], bytes[i + 33]]) as usize;
+            i += 46 + name_len + extra_len + comment_len;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// A minimal member APK: one stored (non-DEX) `classes.dex`.
+fn member_apk() -> Vec<u8> {
+    zip_bytes(&[("classes.dex", b"not a dex".to_vec())])
 }
 
 #[test]
@@ -207,6 +234,73 @@ fn aggregate_budget_stops_and_reports_partial() {
         r.errors
             .iter()
             .any(|e| e.contains("aggregate budget exceeded") && e.contains("c.apk"))
+    );
+    let _ = std::fs::remove_file(&xapk);
+}
+
+/// A read that FAILS must still consume the aggregate budget. Otherwise a
+/// container full of malformed members makes the inflater churn while the
+/// counter barely moves, bypassing the work bound entirely.
+#[test]
+fn failed_read_still_consumes_aggregate_budget() {
+    let one_mib = 1usize << 20;
+    // Every member's central record DECLARES 1 MiB while the stored data
+    // is tiny, so each read fails (SizeMismatch) — a malformed member.
+    let mut container = zip_bytes(&[
+        ("a.apk", member_apk()),
+        ("b.apk", member_apk()),
+        ("c.apk", member_apk()),
+    ]);
+    override_cd_uncompressed_size(&mut container, one_mib as u32);
+    let xapk = std::env::temp_dir().join("asc-xapk-failed-budget.zip");
+    std::fs::write(&xapk, &container).unwrap();
+    // 1.5 MiB: the first failed attempt consumes 1 MiB, leaving too little
+    // for the second member.
+    let r = asc_core::xapk::run_xapk_with_budget(&xapk, one_mib + (1 << 19)).expect("run");
+    assert!(!r.complete);
+    assert_eq!(r.members.len(), 0, "no member reads successfully");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.contains("aggregate budget exceeded")),
+        "the failed attempt must have consumed budget: {:?}",
+        r.errors
+    );
+    assert_eq!(
+        r.errors
+            .iter()
+            .filter(|e| e.contains("read failed"))
+            .count(),
+        1,
+        "exactly one failed read before the budget stops traversal: {:?}",
+        r.errors
+    );
+    let _ = std::fs::remove_file(&xapk);
+}
+
+/// The aggregate-budget error must name the CALLER's budget, not the
+/// 1024 MiB default the two values used to be conflated with.
+#[test]
+fn custom_budget_message_names_the_caller_value() {
+    let mut container = zip_bytes(&[("big.apk", member_apk())]);
+    override_cd_uncompressed_size(&mut container, 64 << 20);
+    let xapk = std::env::temp_dir().join("asc-xapk-custom-budget.zip");
+    std::fs::write(&xapk, &container).unwrap();
+    let r = asc_core::xapk::run_xapk_with_budget(&xapk, 32 << 20).expect("run");
+    assert!(!r.complete);
+    assert!(r.members.is_empty());
+    let msg = r
+        .errors
+        .iter()
+        .find(|e| e.contains("aggregate budget exceeded"))
+        .unwrap_or_else(|| panic!("no budget error: {:?}", r.errors));
+    assert!(
+        msg.contains("(32 MiB)"),
+        "must name the caller's budget: {msg}"
+    );
+    assert!(
+        !msg.contains("1024 MiB"),
+        "must not name the default: {msg}"
     );
     let _ = std::fs::remove_file(&xapk);
 }

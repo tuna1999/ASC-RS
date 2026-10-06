@@ -226,6 +226,34 @@ fn declared_size_mismatch_returns_size_mismatch() {
 }
 
 #[test]
+fn under_declared_deflate_size_fails_early() {
+    // Central directory claims 1 uncompressed byte; the DEFLATE stream
+    // really inflates to 4 MiB. The reader must reject the mismatch
+    // within one inflate chunk of the declaration, not after inflating
+    // the whole payload — otherwise the declared size bounds neither
+    // work nor the process-wide scan budget reservation.
+    let actual = vec![0xA5u8; 4 << 20];
+    let mut b = ZipBuilder::new();
+    b.add_deflated("lying.dex", actual).next_usize_override(1);
+    let archive = b.build();
+    let view = parse_view(&archive).expect("parse");
+    let entry = view.entry("lying.dex").expect("entry");
+    match view.read_entry(&entry) {
+        Err(ApkError::SizeMismatch { declared, produced }) => {
+            assert_eq!(declared, 1);
+            assert!(produced > 1, "the lie must be observed");
+            // 64 KiB = INFLATE_CHUNK (private); the stop point is at most
+            // one chunk past the declared size.
+            assert!(
+                produced <= 1 + 64 * 1024,
+                "must stop within one chunk of the declaration, got {produced}"
+            );
+        }
+        other => panic!("expected early SizeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
 fn corrupt_deflate_stream_returns_deflate() {
     // Build a valid DEFLATE entry, then corrupt one byte in the middle
     // of its compressed payload.

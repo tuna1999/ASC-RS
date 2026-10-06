@@ -313,3 +313,45 @@ fn findrefs_complete_scan_still_exits_0_quietly() {
 
     let _ = std::fs::remove_file(&apk);
 }
+
+/// A `classes*.dex` entry whose bytes are not a DEX is deliberately
+/// skipped, NOT failed (audit F06 / P2 contract): exit 0, `complete`
+/// stays `true`, and the skip is visible in `errors` (JSON) and on
+/// stderr. The `complete` field means "no scan failed", not "every entry
+/// was covered" — a JSON consumer must read `errors` for coverage.
+#[test]
+fn findrefs_non_dex_entry_skips_without_failing() {
+    let apk = write_apk(
+        "nondex",
+        &[
+            ("classes.dex", needle_dex(NEEDLE)),
+            ("classes2.dex", b"not a dex at all, just padding".to_vec()),
+        ],
+    );
+
+    // Text mode: real hits kept, skip warned, exit 0.
+    let (out, stderr) = run_cli(&["findrefs", apk.to_str().unwrap(), "string", NEEDLE]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(NEEDLE), "hits must be kept:\n{stdout}");
+    assert!(
+        stderr.contains("classes2.dex") && stderr.contains("not a DEX"),
+        "the skip must be visible on stderr:\n{stderr}"
+    );
+
+    // JSON mode: `complete` stays true; the skip lives in `errors`.
+    let (out, _) = run_cli(&[
+        "--format",
+        "json",
+        "findrefs",
+        apk.to_str().unwrap(),
+        "string",
+        NEEDLE,
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.contains("\"complete\": true"), "json:\n{json}");
+    assert!(json.contains("not a DEX"), "json:\n{json}");
+
+    let _ = std::fs::remove_file(&apk);
+}

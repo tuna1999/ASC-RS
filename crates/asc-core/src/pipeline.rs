@@ -1351,6 +1351,11 @@ pub struct CalleesResult {
     pub dex_name: String,
     /// Distinct invoked methods, first-encounter order.
     pub callees: Vec<asc_query::Callee>,
+    /// Walker / code-item / label failures met while scanning. Partial
+    /// `callees` above are still valid; empty means a total scan.
+    pub errors: Vec<SearchError>,
+    /// `true` iff every relevant code body was scanned to completion.
+    pub complete: bool,
 }
 
 /// Locate the class-defining DEX (same scan as [`run_disasm`], run
@@ -1371,11 +1376,17 @@ pub fn run_callees(job: &CalleesJob) -> Result<CalleesResult, CoreError> {
         // DEX-041 containers: `header_off` points at the logical
         // member that defines the class (same as `decompile_winner`).
         let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
-        let callees = asc_query::callees_of(&view, &hit.class, &job.method)
-            .map_err(|e| CoreError::Usage(format!("callees: {e}")))?;
+        let report = asc_query::callees_of(&view, &hit.class, &job.method);
+        let errors = report
+            .errors
+            .iter()
+            .map(|e| SearchError::from_engine(&hit.name, e))
+            .collect();
         return Ok(CalleesResult {
             dex_name: hit.name,
-            callees,
+            callees: report.callees,
+            errors,
+            complete: report.complete,
         });
     }
     Err(CoreError::ClassNotFound(job.target.clone()))
@@ -1409,6 +1420,11 @@ pub struct ClassStringsResult {
     pub dex_name: String,
     /// Distinct string constants, first-encounter order.
     pub strings: Vec<asc_query::ClassString>,
+    /// Walker / code-item / string-ref failures met while scanning.
+    /// Partial `strings` above are still valid; empty means a total scan.
+    pub errors: Vec<SearchError>,
+    /// `true` iff every relevant code body was scanned to completion.
+    pub complete: bool,
 }
 
 /// Locate the class-defining DEX (same sequential scan as
@@ -1425,11 +1441,17 @@ pub fn run_class_strings(job: &ClassStringsJob) -> Result<ClassStringsResult, Co
         };
         hit.bytes = eb.into_vec();
         let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
-        let strings = asc_query::strings_of_class(&view, &hit.class)
-            .map_err(|e| CoreError::Usage(format!("class strings: {e}")))?;
+        let report = asc_query::strings_of_class(&view, &hit.class);
+        let errors = report
+            .errors
+            .iter()
+            .map(|e| SearchError::from_engine(&hit.name, e))
+            .collect();
         return Ok(ClassStringsResult {
             dex_name: hit.name,
-            strings,
+            strings: report.strings,
+            errors,
+            complete: report.complete,
         });
     }
     Err(CoreError::ClassNotFound(job.target.clone()))
