@@ -170,3 +170,43 @@ fn locket_xapk_end_to_end() {
     assert_eq!(abi.abi_dirs, ["arm64-v8a"]);
     assert!(!abi.native_libs.is_empty());
 }
+
+/// Aggregate work budget: once total uncompressed member bytes exceed
+/// the budget, the container stops analyzing further members and
+/// reports partial — without reading them.
+#[test]
+fn aggregate_budget_stops_and_reports_partial() {
+    let member = || {
+        let mut m = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut m);
+            let opts = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("classes.dex", opts).unwrap();
+            w.write_all(b"not a dex").unwrap();
+            w.finish().unwrap();
+        }
+        m.into_inner()
+    };
+    let payload = member();
+    let two = 2 * payload.len();
+    let xapk = std::env::temp_dir().join("asc-xapk-budget.zip");
+    write_zip(
+        &xapk,
+        &[
+            ("a.apk", payload.clone()),
+            ("b.apk", payload.clone()),
+            ("c.apk", payload),
+        ],
+    );
+    // Budget covers a.apk + b.apk exactly; c.apk must be skipped.
+    let r = asc_core::xapk::run_xapk_with_budget(&xapk, two).expect("run");
+    assert!(!r.complete);
+    assert_eq!(r.members.len(), 2, "third member must be skipped");
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.contains("aggregate budget exceeded") && e.contains("c.apk"))
+    );
+    let _ = std::fs::remove_file(&xapk);
+}

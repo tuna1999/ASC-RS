@@ -23,6 +23,9 @@ use crate::pipeline::CoreError;
 const MEMBER_CAP: usize = 256 << 20;
 /// Largest single entry inside a member.
 const INNER_CAP: usize = 256 << 20;
+/// Total uncompressed member bytes analyzed per container (work bound;
+/// memory stays per-member because each buffer is dropped after use).
+const TOTAL_BUDGET: usize = 1 << 30;
 /// Cap on recorded per-member native-lib names.
 const MAX_LIBS: usize = 500;
 
@@ -189,8 +192,15 @@ pub fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u
     m
 }
 
-/// Inventory every `*.apk` member of an XAPK-style container.
+/// Inventory every `*.apk` member with the default aggregate budget.
 pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
+    run_xapk_with_budget(path, TOTAL_BUDGET)
+}
+
+/// Same, with a caller-chosen aggregate work budget (uncompressed
+/// member bytes analyzed). The budget bounds total inflate work, not
+/// resident memory: each member buffer is dropped after analysis.
+pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkReport, CoreError> {
     let apk = Apk::open(path)?;
     let mut report = XapkReport {
         file: path.display().to_string(),
@@ -199,6 +209,7 @@ pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
         complete: true,
     };
     let cap = InflateLimits::with_max_output(MEMBER_CAP);
+    let mut budget_left = total_budget;
     for e in apk.entries() {
         if !e.name.ends_with(".apk") {
             continue;
@@ -210,6 +221,17 @@ pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
             report.complete = false;
             continue;
         }
+        if budget_left < e.uncompressed_size as usize {
+            report.errors.push(format!(
+                "aggregate budget exceeded ({} MiB) before {}; {} of {} members analyzed",
+                TOTAL_BUDGET >> 20,
+                e.name,
+                report.members.len(),
+                apk.entries().filter(|x| x.name.ends_with(".apk")).count()
+            ));
+            report.complete = false;
+            break;
+        }
         let bytes = match apk.read_entry_with_limits(&e, cap.unwrap_or_default()) {
             Ok(b) => b,
             Err(x) => {
@@ -218,6 +240,7 @@ pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
                 continue;
             }
         };
+        budget_left -= e.uncompressed_size as usize;
         let member = analyze_member(
             &e.name,
             e.compressed_size,
