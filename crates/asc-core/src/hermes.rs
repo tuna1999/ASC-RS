@@ -324,10 +324,10 @@ fn decode_entry(b: &[u8], l: &Layout, i: usize) -> Result<Entry, String> {
 
 fn decode_text(slice: &[u8], is_utf16: bool, truncated: bool) -> String {
     let mut text = if is_utf16 {
-        let units: Vec<u16> = slice
-            .chunks_exact(std::mem::size_of::<u16>())
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        // as_chunks (not chunks_exact): constant-size chunks_exact trips
+        // clippy::manual_chunk_sizes on newer stable toolchains.
+        let (chunks, _) = slice.as_chunks::<2>();
+        let units: Vec<u16> = chunks.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(slice).into_owned()
