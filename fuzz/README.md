@@ -71,6 +71,8 @@ fuzz/
     fuzz_inspect.rs
     fuzz_rebuild.rs
     fuzz_disasm.rs
+    fuzz_hermes.rs
+    fuzz_xapk.rs
   seeds/              # committed seed corpus (one subdir per target)
 ```
 
@@ -248,6 +250,8 @@ when the matching crate lands.
 | `fuzz_inspect`       | `asc-core`    | `run_inspect`, `run_native`, `run_cert`, `run_resources(path, query)` |
 | `fuzz_rebuild`        | `asc-rebuild` | `rebuild(view, type_idx) -> Result<Vec<u8>, Error>`                 |
 | `fuzz_disasm`         | `asc-decompile` | `DroidsawBackend::disassemble(bytes, descriptor, method) -> Result<String, DecompileError>` |
+| `fuzz_hermes`        | `asc-core`    | `hermes::extract_strings(bytes, opts)` (bytes-level, no ZIP)          |
+| `fuzz_xapk`          | `asc-core`    | `xapk::analyze_member(name, c, u, bytes)` (member APK bytes, no outer ZIP) |
 
 `dummy` is always compiled and never touches a sibling crate —
 it exists for self-test only.

@@ -65,6 +65,70 @@ fn synthetic_xapk_member_isolation() {
     assert_eq!(broken.dex.len(), 1);
     assert_eq!(broken.dex[0].classes, 0);
     assert!(broken.dex[0].error.is_some());
+    // Corrupt DEX content is a per-DEX data error, NOT a traversal
+    // failure: both the member and the container stay complete.
+    assert!(broken.complete);
+    let _ = std::fs::remove_file(&xapk);
+}
+
+/// F03: an oversized NON-DEX entry must not appear as a `MemberDex`.
+/// The huge asset is DEFLATED (300 MiB uncompressed, tiny on disk) and
+/// never inflated at all.
+#[test]
+fn oversized_non_dex_asset_is_not_a_dex() {
+    let mut member = std::io::Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut member);
+        let opts =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("assets/huge.bin", opts).unwrap();
+        let zeros = vec![0u8; 1 << 20];
+        for _ in 0..300 {
+            w.write_all(&zeros).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    let xapk = std::env::temp_dir().join("asc-xapk-huge-asset.zip");
+    write_zip(&xapk, &[("config.asset.apk", member.into_inner())]);
+    let r = asc_core::xapk::run_xapk(&xapk).expect("run");
+    assert!(r.complete, "errors: {:?}", r.errors);
+    let m = &r.members[0];
+    assert!(
+        m.dex.is_empty(),
+        "oversized asset leaked into dex: {:?}",
+        m.dex
+    );
+    assert!(m.complete);
+    let text = asc_core::xapk::format_xapk_text(&r);
+    assert!(!text.contains("assets/huge.bin"));
+    let _ = std::fs::remove_file(&xapk);
+}
+
+/// F04: a member that is not a readable ZIP makes the report partial
+/// (exit 2 at the CLI), with the reason kept distinct from a missing
+/// manifest or a bad DEX.
+#[test]
+fn unreadable_member_makes_report_incomplete() {
+    let xapk = std::env::temp_dir().join("asc-xapk-unreadable.zip");
+    write_zip(
+        &xapk,
+        &[
+            ("garbage.apk", b"definitely not a zip".to_vec()),
+            ("manifest.json", b"{}".to_vec()),
+        ],
+    );
+    let r = asc_core::xapk::run_xapk(&xapk).expect("run");
+    assert!(!r.complete, "unreadable member must be partial");
+    let m = &r.members[0];
+    assert!(!m.complete);
+    assert!(m.manifest.is_none());
+    assert!(m.dex.is_empty());
+    let why = m.manifest_error.as_deref().unwrap();
+    assert!(why.contains("not a readable ZIP"), "got: {why}");
+    let text = asc_core::xapk::format_xapk_text(&r);
+    assert!(text.contains("garbage.apk"));
+    assert!(text.contains("(incomplete)"));
+    assert!(text.contains("report incomplete"));
     let _ = std::fs::remove_file(&xapk);
 }
 

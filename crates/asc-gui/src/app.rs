@@ -277,8 +277,9 @@ impl AscApp {
         self.pending_scroll = None;
         self.symbol_sel = None;
         self.last_clicked_line = None;
+        self.show_open_tabs = false;
+        self.open_tabs_filter.clear();
         self.show_rename = false;
-        self.comment_target = None;
         self.loading_artifact = false;
         self.window_title = if title.is_empty() {
             "asc-gui".to_string()

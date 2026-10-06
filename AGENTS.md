@@ -8,6 +8,7 @@
 - `getclass <descriptor>` — locate a class, rebuild a minimal standalone DEX, decompile to Java.
 - `disasm <descriptor> [--method NAME]` — Smali-syntax listing of one class from the WHOLE DEX (no rebuild/closure, no Java structurer). Renderer: `asc-decompile/src/disasm.rs` (droidsaw `fmt_instruction` + 9 audited overrides, refuses malformed code); gate: `asc-decompile/tests/disasm_synthetic.rs`, differential: `tests/differential/run_disasm_diff.py` (androguard, `reference/venv`).
 - `listclass`, `manifest`, `inspect`, `native`, `cert`, `resources`, `strings`, `extract`, `axml` — class list, manifest dump, inventory/packer signals, ELF/JNI inventory, signing-cert display, resources.arsc view, full DEX string-pool dump, single-entry extraction, and decoding of any compiled binary-XML entry (`--format json` on all).
+- `hermes <apk>` — Hermes bytecode bundle string-table extraction (v96 only; `crates/asc-core/src/hermes.rs`; UTF-16 lengths are code units per upstream). `xapk <file>` — ZIP-of-APKs member inventory with per-member completeness (`crates/asc-core/src/xapk.rs`).
 
 Pillars: **lazy** DEX access, **zero-copy** pools, **bounded memory**. No whole-APK preprocessing, no global xref graphs, no Python/JVM/Node at runtime. Outputs: `target/release/asc-rs.exe` (CLI) and `asc-gui.exe` (egui workbench). Oracle + spec live (read-only) under `reference/` (`BEHAVIOR.md`, `FREEZE.md`; `reference/asc/` is gitignored, never write to it).
 

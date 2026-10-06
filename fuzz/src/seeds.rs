@@ -30,7 +30,8 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_signing" => emit_signing(&dir)?,
             "fuzz_arsc" => emit_arsc(&dir)?,
             "fuzz_axml" => emit_axml(&dir)?,
-            "fuzz_apk_open" | "fuzz_inspect" => emit_apk_file(&dir)?,
+            "fuzz_apk_open" | "fuzz_inspect" | "fuzz_xapk" => emit_apk_file(&dir)?,
+            "fuzz_hermes" => emit_hermes(&dir)?,
             "fuzz_rebuild" => {
                 // Reuses the dex_minimal seed; nothing extra to emit
                 // unless the directory is empty (e.g. on first run
@@ -107,6 +108,53 @@ fn emit_mutf8(dir: &Path) -> io::Result<usize> {
     n += write_bytes(dir.join("mutf8_surrogate.bin"), &[0xED, 0xA0, 0x80])?;
     n += write_bytes(dir.join("mutf8_overlong.bin"), &[0xC0, 0x80])?;
     n += write_bytes(dir.join("mutf8_empty.bin"), b"")?;
+    Ok(n)
+}
+
+fn emit_hermes(dir: &Path) -> io::Result<usize> {
+    const MAGIC: [u8; 8] = [0xC6, 0x1F, 0xBC, 0x03, 0xC1, 0x03, 0x19, 0x1F];
+    // Minimal valid v96 bundle: 0 functions, 3 strings (ASCII +
+    // UTF-16 small + UTF-16 overflow).
+    let mut storage: Vec<u8> = b"hello".to_vec();
+    storage.extend_from_slice(&[0x68, 0x00, 0xE9, 0x00]); // "hé" UTF-16LE
+    let s0 = 5u32 << 24; // "hello" at 0, len 5, ascii
+    let s1 = 1u32 | (2u32 << 24); // utf16, len 2 units, off 0
+    let s2 = 0xFFu32 << 24; // overflow marker, index 0
+    let mut b = Vec::new();
+    b.extend_from_slice(&MAGIC);
+    b.extend_from_slice(&96u32.to_le_bytes());
+    b.extend_from_slice(&[0u8; 20]); // sourceHash
+    b.extend_from_slice(&0u32.to_le_bytes()); // fileLength (patched)
+    b.extend_from_slice(&0u32.to_le_bytes()); // globalCodeIndex
+    b.extend_from_slice(&0u32.to_le_bytes()); // functionCount
+    b.extend_from_slice(&1u32.to_le_bytes()); // stringKindCount
+    b.extend_from_slice(&0u32.to_le_bytes()); // identifierCount
+    b.extend_from_slice(&3u32.to_le_bytes()); // stringCount
+    b.extend_from_slice(&1u32.to_le_bytes()); // overflowStringCount
+    b.extend_from_slice(&(storage.len() as u32).to_le_bytes());
+    for v in [0u32; 11] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&[0u8; 20]); // options + padding → 128
+    b.extend_from_slice(&1u32.to_le_bytes()); // kinds RLE: string ×3
+    b.extend_from_slice(&s0.to_le_bytes());
+    b.extend_from_slice(&s1.to_le_bytes());
+    b.extend_from_slice(&s2.to_le_bytes());
+    b.extend_from_slice(&9u32.to_le_bytes()); // overflow: off 9
+    b.extend_from_slice(&2u32.to_le_bytes()); // len 2 units
+    b.extend_from_slice(&storage);
+    let file_len = b.len() as u32;
+    b[32..36].copy_from_slice(&file_len.to_le_bytes());
+    let mut n = 0;
+    n += write_bytes(dir.join("hermes_v96.bin"), &b)?;
+    n += write_bytes(dir.join("hermes_magic_only.bin"), &MAGIC)?;
+    let bad_version = {
+        let mut v = b.clone();
+        v[8..12].copy_from_slice(&95u32.to_le_bytes());
+        v
+    };
+    n += write_bytes(dir.join("hermes_bad_version.bin"), &bad_version)?;
+    n += write_bytes(dir.join("hermes_truncated.bin"), &b[..100])?;
     Ok(n)
 }
 

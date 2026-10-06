@@ -58,6 +58,11 @@ pub struct MemberApk {
     /// `lib/<abi>/*.so` entry names (capped).
     pub native_libs: Vec<String>,
     pub abi_dirs: Vec<String>,
+    /// `false` when the member ZIP could not be traversed at all or a
+    /// DEX entry could not be READ (cap exceeded, inflate failure) —
+    /// the inventory is then partial. A DEX whose bytes parse fine but
+    /// yield a corrupt header is a per-DEX `error`, not incompleteness.
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +70,10 @@ pub struct XapkReport {
     pub file: String,
     /// Analyzed `*.apk` members, central-directory order.
     pub members: Vec<MemberApk>,
-    /// Container-level failures (unreadable member, cap exceeded). Partial.
+    /// Container-level failures (unreadable member, cap exceeded).
+    /// `complete` is false for those OR any member whose own traversal
+    /// failed (unreadable member ZIP, DEX read failure). Per-DEX
+    /// content errors and manifest states stay member-level.
     pub errors: Vec<String>,
     pub complete: bool,
 }
@@ -85,7 +93,9 @@ fn count_classes(bytes: &[u8]) -> Result<usize, String> {
 }
 
 /// Analyze one member APK buffer: manifest, DEX entries, native libs.
-fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u8]) -> MemberApk {
+/// Public bytes-level API (fuzz target drives it directly, no
+/// filesystem or outer-ZIP wrapper).
+pub fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u8]) -> MemberApk {
     let mut m = MemberApk {
         name: name.to_string(),
         compressed_size: compressed,
@@ -96,12 +106,14 @@ fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u8]) 
         dex: Vec::new(),
         native_libs: Vec::new(),
         abi_dirs: Vec::new(),
+        complete: true,
     };
     let inner_cap = InflateLimits::with_max_output(INNER_CAP);
     let view = match ZipView::parse(bytes) {
         Ok(v) => v,
         Err(e) => {
             m.manifest_error = Some(format!("member is not a readable ZIP: {e}"));
+            m.complete = false;
             return m;
         }
     };
@@ -127,14 +139,9 @@ fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u8]) 
     }
     let mut abis: Vec<String> = Vec::new();
     for e in view.entries() {
-        if e.uncompressed_size as usize > MEMBER_CAP {
-            m.dex.push(MemberDex {
-                name: e.name.clone(),
-                classes: 0,
-                error: Some(format!("exceeds {} MiB cap", MEMBER_CAP >> 20)),
-            });
-            continue;
-        }
+        // Oversized NON-DEX entries (huge assets) are simply skipped:
+        // they are not part of the DEX inventory and never counted in
+        // `dex`. Only oversized DEX entries make the inventory partial.
         if e.name.starts_with("lib/") && e.name.ends_with(".so") {
             if m.native_libs.len() < MAX_LIBS {
                 m.native_libs.push(e.name.clone());
@@ -153,14 +160,26 @@ fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u8]) 
     m.abi_dirs = abis;
     let inner_cap = InflateLimits::with_max_output(INNER_CAP);
     for e in view.dex_entries() {
-        let (classes, error) = match view.read_entry_with_limits(&e, inner_cap.unwrap_or_default())
-        {
-            Ok(b) => match count_classes(b.as_slice()) {
-                Ok(n) => (n, None),
-                Err(why) => (0, Some(why)),
-            },
-            Err(x) => (0, Some(format!("read failed: {x}"))),
-        };
+        if e.uncompressed_size as usize > INNER_CAP {
+            m.dex.push(MemberDex {
+                name: e.name.clone(),
+                classes: 0,
+                error: Some(format!("exceeds {} MiB cap", INNER_CAP >> 20)),
+            });
+            m.complete = false;
+            continue;
+        }
+        let (classes, error, readable) =
+            match view.read_entry_with_limits(&e, inner_cap.unwrap_or_default()) {
+                Ok(b) => match count_classes(b.as_slice()) {
+                    Ok(n) => (n, None, true),
+                    // Corrupt DEX content: the bytes were read; this is a
+                    // per-DEX data error, not a traversal failure.
+                    Err(why) => (0, Some(why), true),
+                },
+                Err(x) => (0, Some(format!("read failed: {x}")), false),
+            };
+        m.complete &= readable;
         m.dex.push(MemberDex {
             name: e.name.clone(),
             classes,
@@ -199,12 +218,16 @@ pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
                 continue;
             }
         };
-        report.members.push(analyze_member(
+        let member = analyze_member(
             &e.name,
             e.compressed_size,
             e.uncompressed_size,
             bytes.as_slice(),
-        ));
+        );
+        if !member.complete {
+            report.complete = false;
+        }
+        report.members.push(member);
     }
     Ok(report)
 }
@@ -216,7 +239,7 @@ pub fn format_xapk_text(r: &XapkReport) -> String {
     for m in &r.members {
         let _ = writeln!(
             s,
-            "{}: role={} size={}/{} dex={} classes={} native-libs={} abis={}",
+            "{}: role={} size={}/{} dex={} classes={} native-libs={} abis={}{}",
             m.name,
             m.role,
             m.compressed_size,
@@ -224,7 +247,8 @@ pub fn format_xapk_text(r: &XapkReport) -> String {
             m.dex.len(),
             m.dex.iter().map(|d| d.classes).sum::<usize>(),
             m.native_libs.len(),
-            m.abi_dirs.join(",")
+            m.abi_dirs.join(","),
+            if m.complete { "" } else { " (incomplete)" }
         );
         if let Some(man) = &m.manifest {
             let _ = writeln!(

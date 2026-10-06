@@ -55,6 +55,8 @@ pub struct HermesString {
     /// `"string"` / `"identifier"` / `"unknown"` (RLE did not cover it).
     pub kind: &'static str,
     pub is_utf16: bool,
+    /// Raw decoded string (control chars intact); the TEXT renderer
+    /// masks them, JSON and `--pattern` do not.
     pub text: String,
 }
 
@@ -98,6 +100,21 @@ pub fn run_hermes(path: &Path, opts: &HermesOptions) -> Result<HermesReport, Cor
     let cap = InflateLimits::with_max_output(FILE_CAP);
     let limit = opts.limit.min(MAX_STRINGS);
     for e in apk.entries() {
+        // F02: bounded prefix sniff (36 B) BEFORE any full inflate; a
+        // non-Hermes entry — however large — is never read in full and
+        // never fails the report.
+        let (prefix, _whole) = match apk.read_entry_prefix(&e, 36) {
+            Ok(p) => p,
+            Err(x) => {
+                report.errors.push(format!("{}: read failed: {x}", e.name));
+                report.complete = false;
+                continue;
+            }
+        };
+        let b = prefix.as_slice();
+        if b.len() < 36 || b[..8] != MAGIC {
+            continue;
+        }
         if e.uncompressed_size as usize > FILE_CAP {
             report
                 .errors
@@ -114,9 +131,6 @@ pub fn run_hermes(path: &Path, opts: &HermesOptions) -> Result<HermesReport, Cor
             }
         };
         let b = bytes.as_slice();
-        if b.len() < 36 || b[..8] != MAGIC {
-            continue;
-        }
         let version = u32_at(b, 8).unwrap_or(0);
         let mut info = BundleInfo {
             name: e.name.clone(),
@@ -156,8 +170,10 @@ pub fn run_hermes(path: &Path, opts: &HermesOptions) -> Result<HermesReport, Cor
 }
 
 /// Decode every string of a v96 bundle (bounded by `limit` after the
-/// pattern filter). Returns `(strings, truncated_by_limit)`.
-fn extract_strings(
+/// pattern filter). Public bytes-level API: the fuzz target drives it
+/// directly, without a filesystem or ZIP wrapper. Returns
+/// `(strings, truncated_by_limit)`.
+pub fn extract_strings(
     b: &[u8],
     opts: &HermesOptions,
     limit: usize,
@@ -165,12 +181,21 @@ fn extract_strings(
     let layout = table_layout(b)?;
     let storage = &b[layout.storage_off..layout.storage_off + layout.storage_size];
     let mut out = Vec::new();
-    let mut matched = 0usize;
     let mut truncated = false;
     for i in 0..layout.string_count as usize {
         let entry = decode_entry(b, &layout, i)?;
+        // Upstream (`RuntimeModule::getStringFromStringID`,
+        // `ConsecutiveStringStorage::getEntryHash`) treats the table
+        // length as UTF-16 code UNITS for UTF-16 strings (byte extent
+        // = len * 2) and as bytes for ASCII strings.
+        let byte_len = if entry.is_utf16 {
+            entry.len.checked_mul(2).ok_or("length overflow")?
+        } else {
+            entry.len
+        };
+        let end = entry.off.checked_add(byte_len).ok_or("extent overflow")?;
         let slice = storage
-            .get(entry.off..entry.off.checked_add(entry.len).ok_or("extent overflow")?)
+            .get(entry.off..end)
             .ok_or("string outside storage")?;
         let truncated_len = slice.len() > MAX_STRING_BYTES;
         let slice = &slice[..slice.len().min(MAX_STRING_BYTES)];
@@ -180,7 +205,6 @@ fn extract_strings(
         {
             continue;
         }
-        matched += 1;
         if out.len() >= limit {
             truncated = true;
             break;
@@ -192,7 +216,6 @@ fn extract_strings(
             text,
         });
     }
-    let _ = matched;
     Ok((out, truncated))
 }
 
@@ -312,7 +335,13 @@ fn decode_text(slice: &[u8], is_utf16: bool, truncated: bool) -> String {
     if truncated {
         text.push('…');
     }
-    // Keep text output one-line: mask ASCII control characters.
+    text
+}
+
+/// Mask ASCII control characters and DEL so each string renders as one
+/// line. Applied by the TEXT formatter only; JSON and `--pattern` see
+/// the raw decoded string.
+fn mask_control(text: &str) -> String {
     text.chars()
         .map(|c| {
             if (c as u32) < 0x20 || c as u32 == 0x7F {
@@ -342,7 +371,14 @@ pub fn format_hermes_text(r: &HermesReport) -> String {
             }
         );
         for st in &b.strings {
-            let _ = writeln!(s, "{} #{} {} {}", b.name, st.index, st.kind, st.text);
+            let _ = writeln!(
+                s,
+                "{} #{} {} {}",
+                b.name,
+                st.index,
+                st.kind,
+                mask_control(&st.text)
+            );
         }
         if b.truncated {
             let _ = writeln!(s, "{}: output truncated by limit", b.name);

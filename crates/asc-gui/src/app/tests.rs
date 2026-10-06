@@ -1210,6 +1210,30 @@ fn apply_artifact_sets_window_title() {
     }
 }
 
+/// `apply_artifact` closes the open-tabs picker: the artifact load
+/// clears the tab list, and a picker listing the now-dead tabs must
+/// not stay visible (regression: 272a069 dropped the reset).
+#[test]
+fn apply_artifact_closes_open_tabs_picker() {
+    let mut app = empty_app();
+    use crate::task::LoadedArtifact;
+    let path = std::path::PathBuf::from("corpus/apk/workload.apk");
+    if let Ok(s) = crate::session::WorkspaceSession::open(&path) {
+        app.show_open_tabs = true;
+        app.open_tabs_filter = "stale".into();
+        let artifact = LoadedArtifact {
+            session: s,
+            classes: Vec::new(),
+            dex_counts: Vec::new(),
+            manifest: None,
+            warnings: Vec::new(),
+        };
+        app.apply_artifact(artifact);
+        assert!(!app.show_open_tabs, "picker must close on artifact load");
+        assert!(app.open_tabs_filter.is_empty(), "stale filter must clear");
+    }
+}
+
 /// `apply_artifact` aggregates dex counts per entry. Covers
 /// ASC-GUI-032 (dex counts aggregate per entry).
 #[test]

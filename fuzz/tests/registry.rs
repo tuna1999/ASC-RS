@@ -1,7 +1,7 @@
 //! Integration tests for the fuzz target registry. These run under
 //! `cargo test -p asc-fuzz`.
 
-use asc_fuzz::{FuzzOutcome, registry};
+use asc_fuzz::{registry, FuzzOutcome};
 
 #[test]
 fn registry_has_at_least_twelve_targets() {
@@ -75,6 +75,8 @@ const CONTRACT_TARGETS: &[(&str, &str)] = &[
     ("fuzz_axml", "manifest"),
     ("fuzz_rebuild", "rebuild"),
     ("fuzz_inspect", "core"),
+    ("fuzz_hermes", "core"),
+    ("fuzz_xapk", "core"),
     ("fuzz_disasm", "decompile"),
 ];
 

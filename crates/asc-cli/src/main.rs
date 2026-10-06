@@ -952,7 +952,9 @@ fn run_hermes_cmd(
 }
 
 /// `asc-rs xapk <file>`: member-by-member inventory. Partial reports
-/// (unreadable member, cap exceeded) print in full and exit 2.
+/// (unreadable member or member ZIP, cap exceeded, DEX read failure)
+/// print in full and exit 2; corrupt DEX content stays a member-level
+/// `error:` line and exits 0.
 fn run_xapk_cmd(
     apk: &std::path::Path,
     output: Option<&std::path::Path>,
