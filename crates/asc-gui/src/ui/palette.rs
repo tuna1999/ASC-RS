@@ -249,6 +249,7 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
             "Show callees of clicked method (one-hop)",
             Command::ShowCallees,
         ),
+        ("Strings used by selected class", Command::ShowClassStrings),
         ("Toggle bookmark (Ctrl+B)", Command::ToggleBookmark),
         ("Go to bookmark (Ctrl+Shift+B)", Command::GoToBookmark),
         ("Open tabs picker (Ctrl+Shift+H)", Command::ShowOpenTabs),

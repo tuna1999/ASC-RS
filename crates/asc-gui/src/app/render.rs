@@ -161,6 +161,21 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ShowCallees);
                     }
+                    let class_ok = self
+                        .symbol_sel
+                        .as_ref()
+                        .map(|s| !s.descriptor.is_empty())
+                        .unwrap_or(false)
+                        || self.tabs.active_descriptor().is_some()
+                        || self.selected_class.is_some();
+                    if ui
+                        .add_enabled(class_ok, egui::Button::new("Strings used by this class"))
+                        .on_disabled_hover_text("select a class first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowClassStrings);
+                    }
                     let sel_ok = self.symbol_sel.is_some();
                     if ui
                         .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))

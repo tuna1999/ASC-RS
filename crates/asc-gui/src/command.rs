@@ -64,8 +64,10 @@ pub enum Command {
     /// (`disasm --method`, ASC-RS-GUI-004).
     ShowSmaliMethod,
     /// One-hop callees of the clicked method (`run_callees`,
-    /// ASC-RS-GUI-001) — rendered in the REFERENCES tab.
     ShowCallees,
+    /// String constants loaded by the selected class's own code
+    /// (`run_class_strings`, ASC-RS-GUI-006) — REFERENCES tab.
+    ShowClassStrings,
     /// Toggle a bookmark on the active tab at the clicked line
     /// (JADX-GUI-010).
     ToggleBookmark,

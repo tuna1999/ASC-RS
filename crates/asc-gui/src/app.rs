@@ -616,6 +616,36 @@ impl AscApp {
                 self.references = Some(SearchResults::from_error(task.label, e));
                 self.focus_bottom_tab(BottomTab::References);
             }
+            (TaskKind::ClassStrings, TaskOutcome::ClassStrings(result)) => {
+                // Class-scoped string constants, rendered as rows in
+                // the REFERENCES tab (class · string · site count).
+                let label = format!("strings of {}", task.label);
+                let rows = result
+                    .strings
+                    .iter()
+                    .map(|s| crate::state::SearchRow {
+                        dex_name: result.dex_name.clone(),
+                        caller_class: task.label.clone(),
+                        caller_member: s.text.clone(),
+                        matched: vec![format!("×{}", s.sites)],
+                        code_off: None,
+                    })
+                    .collect();
+                self.references = Some(crate::state::SearchResults {
+                    label,
+                    rows,
+                    complete: true,
+                    errors: Vec::new(),
+                });
+                self.reveal_bottom_tab(BottomTab::References);
+                self.set_status("class strings ready", true);
+            }
+            (TaskKind::ClassStrings, TaskOutcome::Failed(e)) => {
+                self.last_error = Some(format!("class strings: {e}"));
+                self.set_status(format!("class strings failed: {e}"), false);
+                self.references = Some(SearchResults::from_error(task.label, e));
+                self.focus_bottom_tab(BottomTab::References);
+            }
             (TaskKind::Disasm, TaskOutcome::Failed(e)) => {
                 self.tabs.set_failed(&task.label, e.clone());
                 self.last_error = Some(format!("disasm: {e}"));
@@ -830,6 +860,33 @@ impl AscApp {
                 self.tasks
                     .spawn_disasm(&apk, &descriptor, Some(&method), ctx);
                 self.set_status(format!("disasm: {descriptor}->{method}"), true);
+            }
+            Command::ShowClassStrings => {
+                // Class-scoped: symbol's class, else active tab /
+                // tree selection — never a `#smali` view key.
+                let descriptor = self
+                    .symbol_sel
+                    .as_ref()
+                    .map(|s| s.descriptor.clone())
+                    .filter(|d| !d.is_empty())
+                    .or_else(|| {
+                        self.tabs
+                            .active_descriptor()
+                            .or(self.selected_class.as_deref())
+                            .filter(|d| !d.contains("#smali"))
+                            .map(str::to_string)
+                    });
+                let Some(descriptor) = descriptor else {
+                    self.set_status("select a class first", false);
+                    return;
+                };
+                let Some(session) = &self.session else { return };
+                self.tasks
+                    .spawn_class_strings(session.path(), &descriptor, ctx);
+                self.unpin_bottom_focus();
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::References;
+                self.set_status(format!("strings: {descriptor}"), true);
             }
             Command::ToggleBookmark => {
                 // Bookmark the active tab at the clicked line (or
@@ -1268,6 +1325,7 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
         TaskOutcome::Loaded(_) => "loaded",
         TaskOutcome::Disassembled { .. } => "disassembled",
         TaskOutcome::Callees(_) => "callees",
+        TaskOutcome::ClassStrings(_) => "class strings",
         TaskOutcome::Search(_) => "search",
         TaskOutcome::Failed(_) => "failed",
     }

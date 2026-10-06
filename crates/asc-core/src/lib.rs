@@ -67,10 +67,10 @@ pub use crate::format::{
 pub use crate::inspect::{InspectReport, format_inspect_text, run_inspect};
 pub use crate::native::{NativeReport, format_native_text, run_native};
 pub use crate::pipeline::{
-    CalleesJob, CalleesResult, CoreError, DisasmJob, DisasmOptions, DisasmResult, FindRefsJob,
-    FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult, ListClassesJob,
-    ListClassesOptions, ListClassesResult, logical_dex_name, run_callees, run_disasm, run_findrefs,
-    run_getclass, run_listclasses,
+    CalleesJob, CalleesResult, ClassStringsJob, ClassStringsResult, CoreError, DisasmJob,
+    DisasmOptions, DisasmResult, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions,
+    GetClassResult, ListClassesJob, ListClassesOptions, ListClassesResult, logical_dex_name,
+    run_callees, run_class_strings, run_disasm, run_findrefs, run_getclass, run_listclasses,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::resources::{ResourcesQuery, ResourcesReport, format_resources_text, run_resources};

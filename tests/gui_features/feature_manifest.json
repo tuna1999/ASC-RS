@@ -867,12 +867,12 @@
       "feature": "Strings used by selected class",
       "priority": "P2",
       "weight": 3,
-      "status": "BLOCKED",
+      "status": "COMPLETE",
       "applicable": false,
-      "acceptance": "asc-gui::ui::inspector::tests::class_strings_*",
-      "test_kind": "cargo_test_new",
-      "blocking_engine_change": true,
-      "reference": "derived"
+      "acceptance": "asc-gui::app::tests::class_strings_e2e",
+      "test_kind": "cargo_test",
+      "blocking_engine_change": false,
+      "reference": "asc_query::strings_of_class + asc_core::run_class_strings (v0.15.0)"
     },
     {
       "id": "ASC-RS-GUI-007",

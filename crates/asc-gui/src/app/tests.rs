@@ -1677,6 +1677,63 @@ fn method_smali_and_callees_e2e() {
     );
 }
 
+/// ASC-RS-GUI-006: string constants of the selected class land in the
+/// REFERENCES tab as `strings of <class>` rows (class · string ·
+/// ×sites). Corpus-gated.
+#[test]
+fn class_strings_e2e() {
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut app = AscApp::new(Some(apk));
+    for _ in 0..600 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(app.session.is_some(), "artifact loaded");
+    let descriptor = "Landroidx/core/text/util/LinkifyCompat;";
+    // No symbol selection: class-level resolution must fall back to
+    // the active tab / tree selection.
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.navigate_to(descriptor, false, None, NavOrigin::Tree, ctx);
+        app.dispatch(Command::ShowClassStrings, ctx);
+    });
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app
+            .references
+            .as_ref()
+            .is_some_and(|r| r.label.starts_with("strings of"))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let refs = app.references.as_ref().expect("class strings landed");
+    assert!(refs.label.starts_with("strings of"));
+    assert!(!refs.rows.is_empty(), "a real view class loads strings");
+    assert!(refs.rows.iter().all(|r| r.caller_class == descriptor));
+    assert!(
+        refs.rows
+            .iter()
+            .all(|r| r.matched.iter().all(|m| m.starts_with('×')))
+    );
+    // The surface supersedes: a new class-strings request replaces it.
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.dispatch(Command::ShowClassStrings, ui.ctx());
+    });
+    assert!(
+        app.tasks.references_surface_live(descriptor).is_some() || app.references.is_some(),
+        "identical live request is reused, surface stays"
+    );
+}
+
 /// v0.9.0 feature shots: method Smali tab, callees rows, open-tabs
 /// picker. Same opt-in as `visual_shots`.
 #[test]

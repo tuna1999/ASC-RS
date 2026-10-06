@@ -1381,6 +1381,60 @@ pub fn run_callees(job: &CalleesJob) -> Result<CalleesResult, CoreError> {
     Err(CoreError::ClassNotFound(job.target.clone()))
 }
 
+// ------------------- class-strings pipeline -------------------
+
+/// One class-scoped string run: which string literals does `target`'s
+/// own code load (ASC-RS-GUI-006).
+#[derive(Debug, Clone)]
+pub struct ClassStringsJob {
+    /// Path to the APK or raw `.dex`.
+    pub apk: std::path::PathBuf,
+    /// Class descriptor (`Lcom/foo/Bar;`).
+    pub target: String,
+}
+
+impl ClassStringsJob {
+    pub fn new(apk: impl Into<std::path::PathBuf>, target: impl Into<String>) -> Self {
+        Self {
+            apk: apk.into(),
+            target: target.into(),
+        }
+    }
+}
+
+/// Output of a successful [`run_class_strings`].
+#[derive(Debug, Clone)]
+pub struct ClassStringsResult {
+    /// Display name of the DEX that defines the class.
+    pub dex_name: String,
+    /// Distinct string constants, first-encounter order.
+    pub strings: Vec<asc_query::ClassString>,
+}
+
+/// Locate the class-defining DEX (same sequential scan as
+/// [`run_callees`]) and collect every string constant the class's
+/// code-bearing methods load.
+pub fn run_class_strings(job: &ClassStringsJob) -> Result<ClassStringsResult, CoreError> {
+    let apk = Apk::open(&job.apk)?;
+    check_raw_dex(&apk)?;
+    for entry in apk.dex_entries() {
+        let _guard = crate::budget::acquire(effective_budget(0), entry.uncompressed_size as usize)?;
+        let eb = apk.read_entry(&entry)?;
+        let Some(mut hit) = scan_one_for_class(&entry.name, eb.as_slice(), &job.target)? else {
+            continue;
+        };
+        hit.bytes = eb.into_vec();
+        let view = DexView::parse_at(&hit.bytes, hit.header_off)?;
+        let strings = asc_query::strings_of_class(&view, &hit.class)
+            .map_err(|e| CoreError::Usage(format!("class strings: {e}")))?;
+        return Ok(ClassStringsResult {
+            dex_name: hit.name,
+            strings,
+        });
+    }
+    Err(CoreError::ClassNotFound(job.target.clone()))
+}
+
 // --------------------- listclass pipeline ---------------------
 
 /// One listclass run.

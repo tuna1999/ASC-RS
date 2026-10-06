@@ -76,6 +76,8 @@ pub enum TaskKind {
     Disasm,
     /// `run_callees` for one method (one-hop call fan-out).
     Callees,
+    /// `run_class_strings` for one class (its own string constants).
+    ClassStrings,
 }
 
 impl TaskKind {
@@ -88,6 +90,7 @@ impl TaskKind {
             TaskKind::FindRefsClass => "references",
             TaskKind::Disasm => "disasm",
             TaskKind::Callees => "callees",
+            TaskKind::ClassStrings => "class strings",
         }
     }
 }
@@ -120,6 +123,8 @@ pub enum TaskOutcome {
     Search(asc_core::SearchReport),
     /// Successful `run_callees`: one-hop call fan-out of a method.
     Callees(asc_core::CalleesResult),
+    /// Successful `run_class_strings`: string constants of one class.
+    ClassStrings(asc_core::ClassStringsResult),
     /// Engine error or worker panic, as a display string.
     Failed(String),
 }
@@ -426,6 +431,30 @@ impl TaskManager {
         )
     }
 
+    /// Spawn a class-scoped string-constant scan (ASC-RS-GUI-006).
+    /// Shares the references surface (supersedes callees /
+    /// class-references; identical live request is reused).
+    pub fn spawn_class_strings(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let label = descriptor.to_string();
+        if let Some(existing) = self.references_surface_live(&label) {
+            return existing;
+        }
+        self.discard_references_surface();
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        self.submit(
+            TaskKind::ClassStrings,
+            label,
+            move || run_class_strings_job(&apk, &target),
+            ctx,
+        )
+    }
+
     /// Is a class-references query running?
     pub fn findrefs_class_running(&self) -> bool {
         self.in_flight
@@ -717,6 +746,14 @@ fn run_disasm_job(apk: &Path, descriptor: &str, method: Option<&str>) -> TaskOut
 fn run_callees_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
     match asc_core::run_callees(&asc_core::CalleesJob::new(apk, descriptor, method)) {
         Ok(r) => TaskOutcome::Callees(r),
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one class-scoped string scan (worker-thread body).
+fn run_class_strings_job(apk: &Path, descriptor: &str) -> TaskOutcome {
+    match asc_core::run_class_strings(&asc_core::ClassStringsJob::new(apk, descriptor)) {
+        Ok(r) => TaskOutcome::ClassStrings(r),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
 }
