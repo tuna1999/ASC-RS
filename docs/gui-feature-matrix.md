@@ -114,7 +114,7 @@ PASS only when its `acceptance` identifier returns green.
 
 | ID | Feature | Reason | Status |
 |---|---|---|---|
-| ASC-RS-GUI-101 | Smali viewer | Engine has no smali writer; would require `RefWalker` + opcode→smali writer | BLOCKED |
+| ASC-RS-GUI-101 | Smali viewer | SHIPPED via `asc-rs disasm` (`run_disasm`, whole-DEX renderer, no structurer) — class listing = JADX-GUI-018, method listing = ASC-RS-GUI-004 | COMPLETE (superseded) |
 | ASC-RS-GUI-102 | Bytecode viewer (offset table) | Engine has opcode metadata but no offset-aware formatter | BLOCKED |
 | ASC-RS-GUI-103 | Resources browsing (AXML / res/) | Engine has `asc_manifest` only — no resource decoder | BLOCKED |
 | ASC-RS-GUI-104 | CFG (control-flow graph) | No engine implementation; not in BEHAVIOR.md | BLOCKED |
