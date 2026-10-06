@@ -106,6 +106,23 @@ fn main() -> ExitCode {
     if let Cmd::Axml { apk, entry } = &cli.cmd {
         return run_axml_cmd(apk, entry, cli.shared.output.as_deref(), cli.shared.format);
     }
+    if let Cmd::Hermes {
+        apk,
+        pattern,
+        limit,
+    } = &cli.cmd
+    {
+        return run_hermes_cmd(
+            apk,
+            pattern.as_deref(),
+            *limit,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
+    }
+    if let Cmd::Xapk { apk } = &cli.cmd {
+        return run_xapk_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
+    }
     match dispatch(&cli) {
         Ok(()) => ExitCode::from(EXIT_OK),
         Err(e) => {
@@ -289,6 +306,25 @@ enum Cmd {
         /// Entry name inside the APK.
         entry: String,
     },
+    /// Structured string-table extraction from Hermes bytecode bundles
+    /// (version 96 only; other versions are reported unsupported).
+    Hermes {
+        /// Path to the APK.
+        apk: PathBuf,
+        /// Case-sensitive substring filter (e.g. a URL fragment).
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Maximum strings emitted per bundle.
+        #[arg(long, default_value_t = 100_000)]
+        limit: usize,
+    },
+    /// Inventory an XAPK (ZIP-of-APKs) container: member APKs,
+    /// manifests, DEX class counts and native libs — analyzed per
+    /// member, never merged.
+    Xapk {
+        /// Path to the XAPK.
+        apk: PathBuf,
+    },
 }
 
 /// The four findrefs query kinds.
@@ -375,7 +411,9 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         | Cmd::Resources { .. }
         | Cmd::Strings { .. }
         | Cmd::Extract { .. }
-        | Cmd::Axml { .. } => {
+        | Cmd::Axml { .. }
+        | Cmd::Hermes { .. }
+        | Cmd::Xapk { .. } => {
             unreachable!("handled in main")
         }
         Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),
@@ -846,6 +884,92 @@ fn run_strings_cmd(
     }
     let text = match format {
         OutputFormat::Text => asc_core::strings::format_strings_text(&report),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, text.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_USER_ERROR);
+            }
+        }
+        None => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(if report.complete {
+        EXIT_OK
+    } else {
+        EXIT_INTERNAL
+    })
+}
+
+/// `asc-rs hermes <apk>`: extract Hermes bundle string tables. Partial
+/// reports (unsupported version, decode failure) print in full and exit 2.
+fn run_hermes_cmd(
+    apk: &std::path::Path,
+    pattern: Option<&str>,
+    limit: usize,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let opts = asc_core::hermes::HermesOptions {
+        pattern: pattern.map(str::to_string),
+        limit,
+    };
+    let report = match asc_core::hermes::run_hermes(apk, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: hermes: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    for e in &report.errors {
+        eprintln!("warning: {e}");
+    }
+    let text = match format {
+        OutputFormat::Text => asc_core::hermes::format_hermes_text(&report),
+        OutputFormat::Json => to_json(&report),
+    };
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, text.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_USER_ERROR);
+            }
+        }
+        None => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(if report.complete {
+        EXIT_OK
+    } else {
+        EXIT_INTERNAL
+    })
+}
+
+/// `asc-rs xapk <file>`: member-by-member inventory. Partial reports
+/// (unreadable member, cap exceeded) print in full and exit 2.
+fn run_xapk_cmd(
+    apk: &std::path::Path,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let report = match asc_core::xapk::run_xapk(apk) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: xapk: {e}");
+            return ExitCode::from(EXIT_INTERNAL);
+        }
+    };
+    for e in &report.errors {
+        eprintln!("warning: {e}");
+    }
+    let text = match format {
+        OutputFormat::Text => asc_core::xapk::format_xapk_text(&report),
         OutputFormat::Json => to_json(&report),
     };
     match output {

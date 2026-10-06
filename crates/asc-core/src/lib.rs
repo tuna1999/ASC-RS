@@ -45,6 +45,7 @@ pub mod budget;
 pub mod cert;
 pub mod class_name;
 pub mod format;
+pub mod hermes;
 pub mod inspect;
 pub mod native;
 mod paranoid;
@@ -53,6 +54,7 @@ pub mod report;
 pub mod resources;
 pub mod strings;
 pub mod worker;
+pub mod xapk;
 
 pub use crate::budget::{DEFAULT_SCAN_BUDGET, Guard};
 pub use crate::cert::{CertReport, format_cert_text, run_cert};
