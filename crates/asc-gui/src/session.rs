@@ -92,6 +92,15 @@ impl ClassKind {
     }
 }
 
+/// Result of enumerating classes: the readable entries plus human-readable
+/// warnings for every DEX (or class_def) that had to be skipped. A non-empty
+/// `warnings` means the list is PARTIAL, never "complete".
+#[derive(Debug, Clone, Default)]
+pub struct ClassList {
+    pub classes: Vec<ClassEntry>,
+    pub warnings: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +121,111 @@ mod tests {
             ClassKind::from_flags(ACC_INTERFACE | ACC_ANNOTATION),
             ClassKind::Annotation
         );
+    }
+    /// Minimal hand-built DEX: header + strings + type_ids + class_defs
+    /// (one per descriptor). `bad_type_idx` corrupts index 0 to exercise
+    /// the PARTIAL path.
+    fn tiny_dex(descriptors: &[&str], bad_type_idx: bool) -> Vec<u8> {
+        const NO_INDEX: u32 = 0xFFFF_FFFF;
+        let mut strings: Vec<Vec<u8>> = Vec::new(); // uleb len + mutf8 + NUL
+        for d in descriptors {
+            let mut s = vec![d.len() as u8];
+            s.extend_from_slice(d.as_bytes());
+            s.push(0);
+            strings.push(s);
+        }
+        let header_size = 112usize;
+        let string_ids_size = strings.len();
+        let string_ids_off = header_size;
+        let type_ids_off = string_ids_off + string_ids_size * 4;
+        let type_ids_size = string_ids_size;
+        let class_defs_off = type_ids_off + type_ids_size * 4;
+        let class_defs_size = string_ids_size;
+        let string_data_off = class_defs_off + class_defs_size * 32;
+        let mut string_data = Vec::new();
+        let mut offsets = Vec::new();
+        for s in &strings {
+            offsets.push((string_data_off + string_data.len()) as u32);
+            string_data.extend_from_slice(s);
+        }
+        let file_size = string_data_off + string_data.len();
+        let mut b = Vec::new();
+        b.extend_from_slice(b"dex\n035\0");
+        b.extend_from_slice(&[0u8; 24]); // checksum + signature (unchecked)
+        b.extend_from_slice(&(file_size as u32).to_le_bytes());
+        b.extend_from_slice(&112u32.to_le_bytes());
+        b.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes()); // link_size
+        b.extend_from_slice(&0u32.to_le_bytes()); // link_off
+        b.extend_from_slice(&0u32.to_le_bytes()); // map_off
+        for (off, size) in [
+            (string_ids_off, string_ids_size),
+            (type_ids_off, type_ids_size),
+            (0, 0), // proto
+            (0, 0), // field
+            (0, 0), // method
+            (class_defs_off, class_defs_size),
+        ] {
+            b.extend_from_slice(&(size as u32).to_le_bytes());
+            b.extend_from_slice(&(off as u32).to_le_bytes());
+        }
+        b.extend_from_slice(&0u32.to_le_bytes()); // data_size
+        b.extend_from_slice(&0u32.to_le_bytes()); // data_off
+        debug_assert_eq!(b.len(), header_size);
+        for o in offsets {
+            b.extend_from_slice(&o.to_le_bytes());
+        }
+        for i in 0..type_ids_size {
+            let idx = if bad_type_idx && i == 0 {
+                NO_INDEX
+            } else {
+                i as u32
+            };
+            b.extend_from_slice(&idx.to_le_bytes());
+        }
+        for i in 0..class_defs_size {
+            let ty = if bad_type_idx && i == 0 {
+                NO_INDEX
+            } else {
+                i as u32
+            };
+            b.extend_from_slice(&ty.to_le_bytes()); // class_idx
+            b.extend_from_slice(&0x0001u32.to_le_bytes()); // access_flags
+            b.extend_from_slice(&NO_INDEX.to_le_bytes()); // superclass
+            b.extend_from_slice(&0u32.to_le_bytes()); // interfaces_off
+            b.extend_from_slice(&NO_INDEX.to_le_bytes()); // source_file_idx
+            b.extend_from_slice(&0u32.to_le_bytes()); // annotations_off
+            b.extend_from_slice(&0u32.to_le_bytes()); // class_data_off
+            b.extend_from_slice(&0u32.to_le_bytes()); // static_values_off
+        }
+        b.extend_from_slice(&string_data);
+        b
+    }
+
+    #[test]
+    fn valid_dex_enumerates_without_warnings() {
+        let bytes = tiny_dex(&["LFoo;", "LBar;"], false);
+        let list = build_class_list("classes.dex", &bytes);
+        assert_eq!(list.classes.len(), 2);
+        assert!(list.warnings.is_empty(), "{:?}", list.warnings);
+    }
+
+    #[test]
+    fn unresolvable_class_def_is_partial_with_warning() {
+        let bytes = tiny_dex(&["LFoo;", "LBar;"], true);
+        let list = build_class_list("classes.dex", &bytes);
+        assert_eq!(list.classes.len(), 1, "readable class must survive");
+        assert_eq!(list.classes[0].descriptor, "LBar;");
+        assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
+        assert!(list.warnings[0].contains("1/2 class_defs skipped"));
+    }
+
+    #[test]
+    fn garbage_dex_is_warning_not_error() {
+        let list = build_class_list("classes.dex", b"not a dex");
+        assert!(list.classes.is_empty());
+        assert_eq!(list.warnings.len(), 1);
+        assert!(list.warnings[0].contains("parse failed"));
     }
 }
 
@@ -139,7 +253,7 @@ pub struct WorkspaceSession {
     /// Per-dex class list cache, indexed by dex position in
     /// `dex_entries`. Lazily filled on first request; `None` slot
     /// means "not built yet".
-    class_cache: Mutex<Vec<Option<Vec<ClassEntry>>>>,
+    class_cache: Mutex<Vec<Option<ClassList>>>,
     /// Findrefs history (most-recent at the back).
     findrefs_history: Mutex<VecDeque<FindRefsHistoryEntry>>,
 }
@@ -193,16 +307,18 @@ impl WorkspaceSession {
     /// defined here.
     fn try_class_in_dex(&self, entry: &asc_apk::DexEntry, descriptor: &str) -> Option<String> {
         let bytes = self.apk.read_entry(entry).ok()?;
-        logical_views(&entry.name, bytes.as_slice())
-            .ok()?
+        let mut warnings = Vec::new();
+        logical_views(&entry.name, bytes.as_slice(), &mut warnings)
             .into_iter()
             .find(|(_, view)| asc_query::class_defines(view, descriptor))
             .map(|(name, _)| name)
     }
 
     /// Build (or return cached) class list for `dex_idx`. Returns
-    /// `Err(NotFound)` if `dex_idx` is out of range.
-    pub fn classes_for_dex(&self, dex_idx: usize) -> SessionResult<Vec<ClassEntry>> {
+    /// `Err(NotFound)` if `dex_idx` is out of range. Parse failures are
+    /// PARTIAL: readable classes are returned with a warning per skipped
+    /// DEX / class_def.
+    pub fn classes_for_dex(&self, dex_idx: usize) -> SessionResult<ClassList> {
         if dex_idx >= self.dex_entries.len() {
             return Err(SessionError::NotFound(format!(
                 "dex index {dex_idx} (have {})",
@@ -214,22 +330,31 @@ impl WorkspaceSession {
         }
         // Cache miss: build the list by walking class_defs.
         let entry = &self.dex_entries[dex_idx];
-        let bytes = self.apk.read_entry(entry)?;
-        let classes = build_class_list(&entry.name, bytes.as_slice())?;
-        self.class_cache.lock()[dex_idx] = Some(classes.clone());
-        Ok(classes)
+        let mut list = match self.apk.read_entry(entry) {
+            Ok(bytes) => build_class_list(&entry.name, bytes.as_slice()),
+            Err(e) => ClassList {
+                classes: Vec::new(),
+                warnings: vec![format!("{}: unreadable ({e})", entry.name)],
+            },
+        };
+        list.classes.shrink_to_fit();
+        self.class_cache.lock()[dex_idx] = Some(list.clone());
+        Ok(list)
     }
 
     /// Build a complete class list for every DEX, returning the
     /// concatenated (sorted, deduped-by-name) set. This is what the
-    /// left-panel tree view shows.
-    pub fn all_classes(&self) -> SessionResult<Vec<ClassEntry>> {
-        let mut out = Vec::new();
+    /// left-panel tree view shows. A DEX that fails to parse degrades to
+    /// a warning + the classes of every other DEX (never a total failure).
+    pub fn all_classes(&self) -> SessionResult<ClassList> {
+        let mut out = ClassList::default();
         for i in 0..self.dex_entries.len() {
-            out.extend(self.classes_for_dex(i)?);
+            let list = self.classes_for_dex(i)?;
+            out.classes.extend(list.classes);
+            out.warnings.extend(list.warnings);
         }
         // Sort by descriptor for stable display.
-        out.sort_by(|a, b| a.descriptor.cmp(&b.descriptor));
+        out.classes.sort_by(|a, b| a.descriptor.cmp(&b.descriptor));
         Ok(out)
     }
 
@@ -250,52 +375,78 @@ impl WorkspaceSession {
 
 /// Parse every logical DEX of one entry: a single view for DEX ≤040, one
 /// per logical header for a DEX-041 container (named like the CLI does).
+/// A logical DEX that fails to parse is skipped with a warning pushed to
+/// `warnings` (partial result, not an error).
 fn logical_views<'a>(
     entry_name: &str,
     bytes: &'a [u8],
-) -> SessionResult<Vec<(String, DexView<'a>)>> {
-    let fail = |name: &str| SessionError::NotFound(format!("failed to parse {name} as DEX"));
+    warnings: &mut Vec<String>,
+) -> Vec<(String, DexView<'a>)> {
     if bytes.starts_with(b"dex\n041\0") {
-        let offsets = DexView::logical_header_offsets(bytes).map_err(|_| fail(entry_name))?;
+        let offsets = match DexView::logical_header_offsets(bytes) {
+            Ok(o) => o,
+            Err(e) => {
+                warnings.push(format!("{entry_name}: no logical DEX headers ({e})"));
+                return Vec::new();
+            }
+        };
         let count = offsets.len();
         offsets
-            .iter()
+            .into_iter()
             .enumerate()
-            .map(|(i, &off)| {
+            .filter_map(|(i, off)| {
                 let name = asc_core::logical_dex_name(entry_name, count, i);
-                DexView::parse_at(bytes, off)
-                    .map(|v| (name.clone(), v))
-                    .map_err(|_| fail(&name))
+                match DexView::parse_at(bytes, off) {
+                    Ok(v) => Some((name, v)),
+                    Err(e) => {
+                        warnings.push(format!("{name}: parse failed ({e})"));
+                        None
+                    }
+                }
             })
             .collect()
     } else {
-        let view = DexView::parse(bytes).map_err(|_| fail(entry_name))?;
-        Ok(vec![(entry_name.to_string(), view)])
+        match DexView::parse(bytes) {
+            Ok(view) => vec![(entry_name.to_string(), view)],
+            Err(e) => {
+                warnings.push(format!("{entry_name}: parse failed ({e})"));
+                Vec::new()
+            }
+        }
     }
 }
 
-/// Walk `bytes` (one DEX entry) and emit a list of `[descriptor, dex_name]`
-/// pairs by iterating `class_defs` of every logical DEX. Errors if a DEX
-/// header is malformed.
-fn build_class_list(dex_name: &str, bytes: &[u8]) -> SessionResult<Vec<ClassEntry>> {
-    let mut out = Vec::new();
-    for (name, view) in logical_views(dex_name, bytes)? {
+/// Walk `bytes` (one DEX entry) and emit `[descriptor, dex_name]` pairs by
+/// iterating `class_defs` of every logical DEX. class_defs whose type or
+/// string index does not resolve are counted and reported as ONE warning
+/// per logical DEX (partial result, not an error).
+fn build_class_list(dex_name: &str, bytes: &[u8]) -> ClassList {
+    let mut out = ClassList::default();
+    for (name, view) in logical_views(dex_name, bytes, &mut out.warnings) {
         let count = view.class_def_count();
-        out.reserve(count as usize);
+        out.classes.reserve(count as usize);
+        let mut skipped = 0u32;
         for i in 0..count {
-            let Ok(def) = view.class_def(i) else { continue };
-            let Ok(sidx) = view.type_(def.class) else {
-                continue;
-            };
-            let Ok(sref) = view.string(sidx) else {
-                continue;
-            };
-            out.push(ClassEntry {
-                descriptor: sref.decode_lossy().into_owned(),
-                dex_name: name.clone(),
-                kind: ClassKind::from_flags(def.access_flags),
+            let resolved = view.class_def(i).ok().and_then(|def| {
+                view.type_(def.class)
+                    .ok()
+                    .and_then(|sidx| view.string(sidx).ok().map(|sref| (def, sref)))
             });
+            match resolved {
+                Some((def, sref)) => out.classes.push(ClassEntry {
+                    descriptor: sref.decode_lossy().into_owned(),
+                    dex_name: name.clone(),
+                    kind: ClassKind::from_flags(def.access_flags),
+                }),
+                None => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            out.warnings.push(format!(
+                "{name}: {skipped}/{} class_defs skipped (unresolvable type/string index)",
+                count
+            ));
         }
     }
-    Ok(out)
+    out
 }

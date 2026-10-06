@@ -99,6 +99,9 @@ pub struct LoadedArtifact {
     pub manifest: Option<asc_manifest::ManifestInfo>,
     /// All classes (already sorted by descriptor).
     pub classes: Vec<crate::session::ClassEntry>,
+    /// Non-empty = the class list is PARTIAL (a DEX or class_defs were
+    /// skipped). Surfaced to the user, never silently dropped.
+    pub warnings: Vec<String>,
     /// Per-DEX class counts, central-directory order.
     pub dex_counts: Vec<(String, usize)>,
 }
@@ -599,10 +602,42 @@ fn run_getclass_job(apk: &Path, descriptor: &str, paranoid: bool) -> TaskOutcome
         ..GetClassOptions::default()
     };
     match asc_core::run_getclass(&GetClassJob::new(apk, normalized), &opts) {
-        Ok(r) => TaskOutcome::Decompiled(std::sync::Arc::new(
-            crate::state::documents::Document::new(descriptor.to_string(), r.dex_name, r.source),
-        )),
+        Ok(r) => {
+            let source = with_decompile_warnings(&r.source);
+            TaskOutcome::Decompiled(std::sync::Arc::new(crate::state::documents::Document::new(
+                descriptor.to_string(),
+                r.dex_name,
+                source,
+            )))
+        }
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Prepend a `// warning:` banner when the decompiled Java shows known
+/// structurer defect signatures (same heuristics as the CLI). The Java
+/// output is a cross-check aid, never ground truth — see
+/// `crates/asc-decompile/BACKENDS.md` §11.
+fn with_decompile_warnings(source: &str) -> String {
+    let mut banner = String::new();
+    let unbound = asc_core::unbound_locals(source);
+    if !unbound.is_empty() {
+        banner.push_str(&format!(
+            "// warning: decompiled Java may be incorrect: {} local(s) read but never assigned: {}\n",
+            unbound.len(),
+            unbound.join(", ")
+        ));
+    }
+    let dup = asc_core::duplicated_catch_bodies(source);
+    if dup >= 2 {
+        banner.push_str(&format!(
+            "// warning: decompiled Java may be incorrect: {dup} identical catch bodies (cross-check with the Smali view)\n"
+        ));
+    }
+    if banner.is_empty() {
+        source.to_string()
+    } else {
+        format!("{banner}{source}")
     }
 }
 
@@ -620,11 +655,12 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
         .map(|e| (e.name.clone(), 0usize))
         .collect();
     match session.all_classes() {
-        Ok(classes) => TaskOutcome::Loaded(Box::new(LoadedArtifact {
-            dex_counts: per_dex_counts(&classes, dex_order),
+        Ok(list) => TaskOutcome::Loaded(Box::new(LoadedArtifact {
+            dex_counts: per_dex_counts(&list.classes, dex_order),
             session,
             manifest,
-            classes,
+            classes: list.classes,
+            warnings: list.warnings,
         })),
         Err(e) => TaskOutcome::Failed(e.to_string()),
     }
@@ -1075,5 +1111,17 @@ mod tests {
         while mgr.has_in_flight() {
             let _ = mgr.poll();
         }
+    }
+
+    /// Clean Java gets no banner; the known defect signatures get one
+    /// (`// warning:` line prepended, source otherwise untouched).
+    #[test]
+    fn decompile_warning_banner() {
+        let clean = "class A { void f() { int x = 1; g(x); } }";
+        assert_eq!(with_decompile_warnings(clean), clean);
+        let bad = "class A { void f() { g(v2_3 + v4_1); } }";
+        let out = with_decompile_warnings(bad);
+        assert!(out.starts_with("// warning:"), "{out}");
+        assert!(out.ends_with(bad));
     }
 }

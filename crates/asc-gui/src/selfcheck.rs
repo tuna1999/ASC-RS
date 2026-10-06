@@ -48,7 +48,7 @@ const DEFAULT_FINDREFS_PATTERN: &str = "ClockFace";
 pub fn run_selfcheck(apk: &Path) -> Result<SelfcheckReport, SelfcheckError> {
     let session = WorkspaceSession::open(apk)?;
     let dex_count = session.dex_entries().len();
-    let class_count = session.all_classes()?.len();
+    let class_count = session.all_classes()?.classes.len();
 
     // One findrefs: substring search.
     let query = Query::string(DEFAULT_FINDREFS_PATTERN);

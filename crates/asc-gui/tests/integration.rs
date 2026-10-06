@@ -61,9 +61,14 @@ fn open_session_then_list_classes() {
     let session = asc_gui::WorkspaceSession::open(&apk).expect("open");
     assert!(!session.dex_entries().is_empty());
     let classes = session.all_classes().expect("classes");
-    assert!(!classes.is_empty());
+    assert!(!classes.classes.is_empty());
+    assert!(
+        classes.warnings.is_empty(),
+        "clean corpus: {:?}",
+        classes.warnings
+    );
     // Every entry should have a non-empty descriptor and dex_name.
-    for c in &classes {
+    for c in &classes.classes {
         assert!(
             c.descriptor.starts_with('L'),
             "bad descriptor: {:?}",

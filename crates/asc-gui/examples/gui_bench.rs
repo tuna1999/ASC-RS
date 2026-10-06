@@ -68,12 +68,12 @@ fn main() {
         let classes = session.all_classes().expect("classes");
         println!(
             "  all_classes ({} cls)   {:8.1} ms",
-            classes.len(),
+            classes.classes.len(),
             ms(t.elapsed())
         );
 
         let t = Instant::now();
-        let mut tree = PackageTree::build(classes.clone());
+        let mut tree = PackageTree::build(classes.classes.clone());
         println!(
             "  PackageTree::build       {:8.1} ms  ({} nodes)",
             ms(t.elapsed()),
@@ -97,6 +97,7 @@ fn main() {
         let target = session
             .all_classes()
             .expect("classes cached")
+            .classes
             .first()
             .map(|c| c.descriptor.clone())
             .expect("non-empty class list");

@@ -1203,6 +1203,7 @@ fn apply_artifact_sets_window_title() {
             classes: Vec::new(),
             dex_counts: vec![("classes.dex".into(), 6220)],
             manifest: None,
+            warnings: Vec::new(),
         };
         app.apply_artifact(artifact);
         assert!(app.window_title.contains("workload"));
@@ -1222,6 +1223,7 @@ fn dex_counts_aggregate_per_entry() {
             classes: Vec::new(),
             dex_counts: vec![("classes.dex".into(), 6220)],
             manifest: None,
+            warnings: Vec::new(),
         };
         app.apply_artifact(artifact);
         // One entry was provided; the controller stores the same

@@ -205,7 +205,7 @@ impl AscApp {
     #[cfg(test)]
     fn from_session(session: WorkspaceSession) -> Self {
         let mut app = Self::new(None);
-        let classes = session.all_classes().unwrap_or_default();
+        let list = session.all_classes().unwrap_or_default();
         let dex_counts = session
             .dex_entries()
             .iter()
@@ -213,10 +213,11 @@ impl AscApp {
             .collect();
         app.manifest = asc_manifest::parse_from_apk(session.path()).ok();
         app.apply_artifact(LoadedArtifact {
-            dex_counts: crate::task::per_dex_counts(&classes, dex_counts),
+            dex_counts: crate::task::per_dex_counts(&list.classes, dex_counts),
             session,
             manifest: app.manifest.clone(),
-            classes,
+            classes: list.classes,
+            warnings: list.warnings,
         });
         app
     }
@@ -289,7 +290,10 @@ impl AscApp {
         if let Some(session) = &self.session {
             self.tabs.push_recent_artifact(session.path().to_path_buf());
         }
-        self.show_open_tabs = false;
+        if !artifact.warnings.is_empty() {
+            let msg = artifact.warnings.join("; ");
+            self.set_status(format!("class list partial: {msg}"), false);
+        }
     }
 
     /// Replace the active document's source (rename / comment edit):
