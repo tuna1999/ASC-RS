@@ -24,7 +24,6 @@
 
 use asc_apk::Apk;
 use asc_dex::DexView;
-use asc_query;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -369,36 +368,6 @@ impl WorkspaceSession {
     /// `asc_apk::Apk::dex_entries()`).
     pub fn dex_entries(&self) -> &[asc_apk::DexEntry] {
         &self.dex_entries
-    }
-
-    /// Name of the DEX that "wins" the class lookup for `descriptor`
-    /// (i.e. the first one whose `class_def`s contain it). Returns
-    /// `None` if no DEX defines the class.
-    ///
-    /// Used by the GUI to route a `<descriptor>` click to the
-    /// correct entry tab when the same class happens to be defined
-    /// in more than one DEX.
-    pub fn winning_dex_for(&self, descriptor: &str) -> Option<String> {
-        // Walk entries without locking the cache (a cache miss just
-        // falls through to a linear scan).
-        for entry in &self.dex_entries {
-            if let Some(name) = self.try_class_in_dex(entry, descriptor) {
-                return Some(name);
-            }
-        }
-        None
-    }
-
-    /// Linear class lookup against one DEX entry (every logical DEX of a
-    /// DEX-041 container). Returns the logical dex name if `descriptor` is
-    /// defined here.
-    fn try_class_in_dex(&self, entry: &asc_apk::DexEntry, descriptor: &str) -> Option<String> {
-        let bytes = self.apk.read_entry(entry).ok()?;
-        let mut warnings = Vec::new();
-        logical_views(&entry.name, bytes.as_slice(), &mut warnings)
-            .into_iter()
-            .find(|(_, view)| asc_query::class_defines(view, descriptor))
-            .map(|(name, _)| name)
     }
 
     /// Build (or return cached) class list for `dex_idx`. Returns
