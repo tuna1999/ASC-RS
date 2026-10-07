@@ -303,7 +303,18 @@ impl AscApp {
                     });
             }
             None => {
-                let _ = ui.weak("no manifest (synthetic corpus?)");
+                // Three distinct states, never merged: no artifact open,
+                // an APK that genuinely has no AndroidManifest.xml (e.g. a
+                // synthetic fixture), and one whose manifest failed to
+                // decode (metadata is then untrustworthy, not absent).
+                let msg = if self.session.is_none() {
+                    "no artifact".to_string()
+                } else if let Some(err) = &self.manifest_error {
+                    format!("manifest parse failed: {err}")
+                } else {
+                    "no AndroidManifest.xml".to_string()
+                };
+                let _ = ui.weak(msg);
             }
         });
     }

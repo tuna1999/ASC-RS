@@ -459,73 +459,89 @@ fn invalid_path_io_error() {
     assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
 }
 
-#[test]
-fn apk_without_manifest_errors() {
-    // Hand-built minimal ZIP containing only `empty.txt`. No
-    // AndroidManifest.xml entry — parse_from_apk must report a
-    // truncated / not-found error rather than panic or silently
-    // succeed.
-    use std::io::Write as _;
-    let mut zip_bytes: Vec<u8> = Vec::new();
-    let name = b"empty.txt";
-    let payload = b"hello";
+/// Hand-built single-entry STORED ZIP — the minimum `Apk::open` accepts.
+/// (Test builders are duplicated per crate by house style; there is no
+/// shared test-utils crate.)
+fn stored_zip(name: &str, payload: &[u8]) -> Vec<u8> {
+    let name = name.as_bytes();
     let crc = crc32fast::hash(payload);
+    let mut zip: Vec<u8> = Vec::new();
 
     // Local file header (offset 0).
     let local_offset: u32 = 0;
-    zip_bytes.extend_from_slice(b"PK\x03\x04");
-    zip_bytes.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // compression = stored
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // mod time
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // mod date
-    zip_bytes.extend_from_slice(&crc.to_le_bytes());
-    zip_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // compressed
-    zip_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // uncompressed
-    zip_bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // extra
-    zip_bytes.extend_from_slice(name);
-    zip_bytes.extend_from_slice(payload);
+    zip.extend_from_slice(b"PK\x03\x04");
+    zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+    zip.extend_from_slice(&0u16.to_le_bytes()); // compression = stored
+    zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // compressed
+    zip.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // uncompressed
+    zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes()); // extra
+    zip.extend_from_slice(name);
+    zip.extend_from_slice(payload);
 
-    let central_off = zip_bytes.len() as u32;
-    // Central directory
-    zip_bytes.extend_from_slice(b"PK\x01\x02");
-    zip_bytes.extend_from_slice(&20u16.to_le_bytes()); // version made by
-    zip_bytes.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // flags
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // compression
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // mod time
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // mod date
-    zip_bytes.extend_from_slice(&crc.to_le_bytes());
-    zip_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    zip_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    zip_bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // extra
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // comment
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // internal attr
-    zip_bytes.extend_from_slice(&0u32.to_le_bytes()); // external attr
-    zip_bytes.extend_from_slice(&local_offset.to_le_bytes());
-    zip_bytes.extend_from_slice(name);
-    let central_size = (zip_bytes.len() as u32) - central_off;
+    let central_off = zip.len() as u32;
+    // Central directory.
+    zip.extend_from_slice(b"PK\x01\x02");
+    zip.extend_from_slice(&20u16.to_le_bytes()); // version made by
+    zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+    zip.extend_from_slice(&0u16.to_le_bytes()); // compression
+    zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes()); // extra
+    zip.extend_from_slice(&0u16.to_le_bytes()); // comment
+    zip.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+    zip.extend_from_slice(&0u16.to_le_bytes()); // internal attr
+    zip.extend_from_slice(&0u32.to_le_bytes()); // external attr
+    zip.extend_from_slice(&local_offset.to_le_bytes());
+    zip.extend_from_slice(name);
+    let central_size = (zip.len() as u32) - central_off;
 
-    // End of central directory
-    zip_bytes.extend_from_slice(b"PK\x05\x06");
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // disk number
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // disk with CD
-    zip_bytes.extend_from_slice(&1u16.to_le_bytes()); // CD entries on this disk
-    zip_bytes.extend_from_slice(&1u16.to_le_bytes()); // total CD entries
-    zip_bytes.extend_from_slice(&central_size.to_le_bytes());
-    zip_bytes.extend_from_slice(&central_off.to_le_bytes());
-    zip_bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    // End of central directory.
+    zip.extend_from_slice(b"PK\x05\x06");
+    zip.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    zip.extend_from_slice(&0u16.to_le_bytes()); // disk with CD
+    zip.extend_from_slice(&1u16.to_le_bytes()); // CD entries on this disk
+    zip.extend_from_slice(&1u16.to_le_bytes()); // total CD entries
+    zip.extend_from_slice(&central_size.to_le_bytes());
+    zip.extend_from_slice(&central_off.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    zip
+}
 
+#[test]
+fn apk_without_manifest_is_absence_not_failure() {
+    // No AndroidManifest.xml entry at all: `parse_from_apk` must report
+    // *absence* (`NotFound`) so a caller can print "no manifest" instead
+    // of "manifest is corrupt", and must never panic or succeed.
     let tmp = std::env::temp_dir().join("asc_manifest_no_manifest.apk");
-    std::fs::File::create(&tmp)
-        .unwrap()
-        .write_all(&zip_bytes)
-        .unwrap();
+    std::fs::write(&tmp, stored_zip("empty.txt", b"hello")).unwrap();
     let err = parse_from_apk(&tmp).unwrap_err();
-    assert!(matches!(err, ManifestError::Truncated(_)), "got {err:?}");
+    assert!(matches!(err, ManifestError::NotFound(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn apk_with_corrupt_manifest_is_a_parse_failure() {
+    // Present but not binary XML. Must be a *parse* error, distinct from
+    // the absence case above, so the GUI can say "manifest parse failed"
+    // rather than conflating it with "no manifest".
+    let tmp = std::env::temp_dir().join("asc_manifest_corrupt.apk");
+    std::fs::write(&tmp, stored_zip("AndroidManifest.xml", b"not axml at all")).unwrap();
+    let err = parse_from_apk(&tmp).unwrap_err();
+    assert!(matches!(err, ManifestError::NotAXml), "got {err:?}");
+    assert!(
+        !matches!(err, ManifestError::NotFound(_)),
+        "a corrupt manifest is not an absent one"
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 

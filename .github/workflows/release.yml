@@ -39,7 +39,25 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # Build artefacts from the TAG's commit, never from whatever ref
+          # the workflow happened to be dispatched on: a manual
+          # workflow_dispatch from a branch would otherwise publish branch
+          # HEAD under the tag's name (the version string alone does not
+          # prove the commit).
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+
+      - name: Verify checkout is the release tag's commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          tag_sha=$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)
+          [ -n "$tag_sha" ] || { echo "::error::$RELEASE_TAG is not a known tag"; exit 1; }
+          [ "$head_sha" = "$tag_sha" ] || {
+            echo "::error::checked out $head_sha but $RELEASE_TAG is $tag_sha"; exit 1;
+          }
+          echo "building $RELEASE_TAG at $head_sha"
 
       - name: Verify tag matches Cargo.toml version
         shell: bash
@@ -172,7 +190,22 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # Same source-of-truth rule as `gates`: the published binaries
+          # must be a function of the tag's commit.
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+
+      - name: Verify checkout is the release tag's commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          tag_sha=$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)
+          [ -n "$tag_sha" ] || { echo "::error::$RELEASE_TAG is not a known tag"; exit 1; }
+          [ "$head_sha" = "$tag_sha" ] || {
+            echo "::error::checked out $head_sha but $RELEASE_TAG is $tag_sha"; exit 1;
+          }
+          echo "building $RELEASE_TAG at $head_sha"
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -233,7 +266,21 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # The source ZIP must be the tag's tree, not the dispatching ref.
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+
+      - name: Verify checkout is the release tag's commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          tag_sha=$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)
+          [ -n "$tag_sha" ] || { echo "::error::$RELEASE_TAG is not a known tag"; exit 1; }
+          [ "$head_sha" = "$tag_sha" ] || {
+            echo "::error::checked out $head_sha but $RELEASE_TAG is $tag_sha"; exit 1;
+          }
+          echo "archiving $RELEASE_TAG at $head_sha"
 
       - name: Build byte-reproducible source ZIP
         shell: bash

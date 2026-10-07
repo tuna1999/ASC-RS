@@ -102,6 +102,13 @@ pub enum ManifestError {
     #[error("not a binary Android XML file (magic mismatch)")]
     NotAXml,
 
+    /// The input carries no `AndroidManifest.xml` at all: the APK has no
+    /// such entry, or the input is a raw DEX (which cannot have one). This
+    /// is *absence*, not a parse failure — callers must not report it as
+    /// malformed input.
+    #[error("no AndroidManifest.xml: {0}")]
+    NotFound(String),
+
     /// A header advertised a size that would read past EOF, or a fixed-
     /// width field read would underflow the remaining bytes.
     #[error("truncated binary XML: {0}")]
@@ -422,13 +429,13 @@ pub fn parse_from_apk(path: impl AsRef<Path>) -> Result<ManifestInfo, ManifestEr
     let apk = asc_apk::Apk::open(path.as_ref())
         .map_err(|e| ManifestError::Truncated(format!("apk open: {e}")))?;
     if apk.is_raw_dex() {
-        return Err(ManifestError::Truncated(
+        return Err(ManifestError::NotFound(
             "input is a raw DEX; 'manifest' requires an APK".into(),
         ));
     }
     let entry = apk
         .entry("AndroidManifest.xml")
-        .ok_or_else(|| ManifestError::Truncated("AndroidManifest.xml entry not found".into()))?;
+        .ok_or_else(|| ManifestError::NotFound("entry not found in the APK".into()))?;
     let bytes = apk
         .read_entry(&entry)
         .map_err(|e| ManifestError::Truncated(format!("read AndroidManifest.xml: {e}")))?;

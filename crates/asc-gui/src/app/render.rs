@@ -272,7 +272,9 @@ impl eframe::App for AscApp {
                     if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         self.queue(Command::RunSearch);
                     }
-                    if self.tasks.findrefs_running() {
+                    // Live only: a cancelled/superseded scan keeps running
+                    // but its result is discarded, so it must not spin here.
+                    if self.tasks.findrefs_live() {
                         ui.spinner();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

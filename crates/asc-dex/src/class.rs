@@ -128,16 +128,19 @@ impl<'a> DexView<'a> {
             });
         }
 
-        let total = (static_fields_size
-            + instance_fields_size
-            + direct_methods_size
-            + virtual_methods_size) as usize;
-
-        // 3 ulebs per field, 4 ulebs per method (idx, access, code_off).
-        let estimated = total.saturating_mul(8);
-        if estimated > slice.len() {
+        // Exact lower bound on the bytes the entry lists need: every uleb128
+        // is at least one byte, an encoded field is 2 ulebs (idx-diff,
+        // access) and an encoded method is 3 (idx-diff, access, code_off).
+        // This can never reject a valid — even maximally compact — list; it
+        // only lets a clearly truncated one fail before we reserve the
+        // (already MAX_LIST-capped) vectors. `u64` arithmetic because the
+        // four sizes are each capped at MAX_LIST and `usize` may be 32-bit.
+        let fields = u64::from(static_fields_size) + u64::from(instance_fields_size);
+        let methods = u64::from(direct_methods_size) + u64::from(virtual_methods_size);
+        let min_bytes = fields * 2 + methods * 3;
+        if min_bytes > slice.len() as u64 {
             return Err(DexError::Truncated {
-                needed: estimated,
+                needed: min_bytes as usize,
                 actual: slice.len(),
             });
         }

@@ -1229,6 +1229,7 @@ fn apply_artifact_sets_window_title() {
             classes: Vec::new(),
             dex_counts: vec![("classes.dex".into(), 6220)],
             manifest: None,
+            manifest_error: None,
             warnings: Vec::new(),
         };
         app.apply_artifact(artifact);
@@ -1252,6 +1253,7 @@ fn apply_artifact_closes_open_tabs_picker() {
             classes: Vec::new(),
             dex_counts: Vec::new(),
             manifest: None,
+            manifest_error: None,
             warnings: Vec::new(),
         };
         app.apply_artifact(artifact);
@@ -1273,6 +1275,7 @@ fn dex_counts_aggregate_per_entry() {
             classes: Vec::new(),
             dex_counts: vec![("classes.dex".into(), 6220)],
             manifest: None,
+            manifest_error: None,
             warnings: Vec::new(),
         };
         app.apply_artifact(artifact);
@@ -1510,6 +1513,135 @@ fn member_scoped_search_bar_widgets() {
     h.state_mut().search.commit_to_history();
     h.run_steps(2);
     h.get_by_label("hist (1)");
+}
+
+/// Bottom panel: the "searching…" placeholder tracks *wanted* work, not
+/// merely in-flight work. Cancelling a scan (Esc / the cancel button) only
+/// discards its future result — the worker keeps churning — so the panel
+/// must stop claiming a search is in progress and re-offer Run.
+#[test]
+fn cancelled_search_stops_reporting_searching() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    // Defaults: bottom panel open, SEARCH RESULTS tab, no retained results.
+    assert_eq!(
+        h.state().bottom_tab,
+        crate::ui::bottom_panel::BottomTab::Results
+    );
+
+    // A findrefs task that blocks until we drop `tx` → stays in flight.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let ctx = egui::Context::default();
+    let _id = h.state_mut().tasks.submit(
+        crate::task::TaskKind::FindRefs,
+        "string \"x\"",
+        move || {
+            let _ = rx.recv();
+            crate::task::TaskOutcome::Search(asc_core::SearchReport::empty())
+        },
+        &ctx,
+    );
+    h.run_steps(3);
+    assert!(h.state().tasks.findrefs_live(), "live task");
+    assert!(
+        h.query_by_label("searching…").is_some(),
+        "a live scan reports that it is searching"
+    );
+
+    // Cancel: the worker is still running, but the result is discarded.
+    h.state_mut()
+        .tasks
+        .cancel_kind(crate::task::TaskKind::FindRefs);
+    h.run_steps(3);
+    assert!(
+        h.state().tasks.findrefs_running(),
+        "cancellation is discard-on-arrival, not a kill"
+    );
+    assert!(
+        h.query_by_label("searching…").is_none(),
+        "a cancelled scan must not claim it is searching"
+    );
+    assert!(
+        h.query_by_label("no results — run a search (Ctrl+Shift+F)")
+            .is_some(),
+        "the panel falls back to the idle prompt"
+    );
+    // Run is offered again (cancel button is gone).
+    assert!(
+        h.query_by_label("cancel").is_none(),
+        "nothing live left to cancel"
+    );
+    drop(tx);
+}
+
+/// Render `app`, expand the (collapsed-by-default) METADATA header, and
+/// report which of `needles` appear in the rendered labels.
+fn metadata_contains(app: AscApp, needles: &[&'static str]) -> Vec<bool> {
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), app);
+    h.run_steps(2);
+    h.get_by_label("METADATA").click();
+    h.run_steps(2);
+    needles
+        .iter()
+        .map(|n| h.query_by_label_contains(n).is_some())
+        .collect()
+}
+
+/// The inspector must not merge "this APK has no manifest" with "the
+/// manifest is corrupt": before the fix both rendered as
+/// `no manifest (synthetic corpus?)`, hiding real parse failures.
+#[test]
+fn inspector_distinguishes_absent_and_failed_manifest() {
+    let _guard = render_lock();
+
+    // Corrupt manifest: the workspace still opens (DEX access is
+    // unaffected); the metadata section reports the decode failure.
+    let apk = crate::test_zip::write_temp_apk(
+        "inspector_corrupt_manifest",
+        &[("AndroidManifest.xml", b"not axml at all")],
+    );
+    let session = crate::session::WorkspaceSession::open(&apk)
+        .expect("a corrupt manifest must not fail the APK open");
+    let app = AscApp::from_session(session);
+    let _ = std::fs::remove_file(&apk);
+    assert!(app.manifest.is_none());
+    assert!(app.manifest_error.is_some());
+    let flags = metadata_contains(app, &["manifest parse failed", "no AndroidManifest.xml"]);
+    assert_eq!(
+        flags,
+        vec![true, false],
+        "corrupt manifest must read as a failure, never as absence"
+    );
+
+    // Genuinely absent (the synthetic workload fixture): no error, and the
+    // panel says so plainly.
+    let apk =
+        crate::test_zip::write_temp_apk("inspector_absent_manifest", &[("assets/x.txt", b"hi")]);
+    let session = crate::session::WorkspaceSession::open(&apk).expect("open");
+    let app = AscApp::from_session(session);
+    let _ = std::fs::remove_file(&apk);
+    assert!(
+        app.manifest.is_none(),
+        "expected no manifest, got {:?}",
+        app.manifest.as_ref().map(|m| m.package.clone())
+    );
+    assert!(
+        app.manifest_error.is_none(),
+        "absence is not a failure, got {:?}",
+        app.manifest_error
+    );
+    let flags = metadata_contains(app, &["no AndroidManifest.xml", "manifest parse failed"]);
+    assert_eq!(
+        flags,
+        vec![true, false],
+        "absence must read as absence, not as a decode failure"
+    );
 }
 
 /// JADX-GUI-018: ShowSmali spawns `run_disasm` and files the listing

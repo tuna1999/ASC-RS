@@ -30,6 +30,15 @@ fn selfcheck_on_workload_apk() {
     // The workload corpus is synthetic (no AndroidManifest.xml), so
     // manifest fields may be None. Engine calls must still succeed.
     assert!(
+        report.manifest_package.is_none() && report.manifest_version_code.is_none(),
+        "the workload fixture has no manifest"
+    );
+    assert!(
+        report.manifest_error.is_none(),
+        "an absent manifest is not a decode failure, got {:?}",
+        report.manifest_error
+    );
+    assert!(
         report.findrefs_complete,
         "findrefs must report complete=true on the workload corpus"
     );

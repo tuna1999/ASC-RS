@@ -2,9 +2,11 @@
 //!
 //! Opens an APK, lists its DEX entries, builds the per-DEX class
 //! cache, runs one `findrefs` query, decompiles one class, and
-//! parses the manifest. Exits 0 on success; prints a one-line summary
-//! of every step to stdout. Used both by the `asc-gui --selfcheck`
-//! binary and by the integration test in `tests/integration.rs`.
+//! parses the manifest. Prints a one-line summary of every step to
+//! stdout and returns `Err` (→ non-zero exit) unless every engine step
+//! demonstrably worked — see [`run_selfcheck`] / [`SelfcheckReport::verify`].
+//! Used both by the `asc-gui --selfcheck` binary and by the integration
+//! test in `tests/integration.rs`.
 
 use std::path::Path;
 
@@ -28,6 +30,11 @@ pub struct SelfcheckReport {
     pub decompiled_source_bytes: usize,
     pub manifest_package: Option<String>,
     pub manifest_version_code: Option<u32>,
+    /// Set only when the APK *has* an `AndroidManifest.xml` that could not
+    /// be decoded. A manifest-less fixture (e.g. the synthetic workload
+    /// corpus) leaves both this and the two fields above `None`, and is
+    /// NOT a selfcheck failure.
+    pub manifest_error: Option<String>,
 }
 
 /// Class name the workload corpus's manifest-package expects — the
@@ -41,51 +48,55 @@ const DEFAULT_TARGET_CLASS: &str = "Lcom/google/android/material/timepicker/Cloc
 /// referenced from the chosen target.
 const DEFAULT_FINDREFS_PATTERN: &str = "ClockFace";
 
-/// Run the full selfcheck path against `apk`. Returns a
-/// `SelfcheckReport` summarizing every step. Designed to never panic
-/// on engine errors — engine failures are reflected in the report's
-/// fields (zero counts, `complete=false`).
+/// Run the full selfcheck path against `apk`.
+///
+/// Returns `Err` unless every engine step actually *worked*: the session
+/// must open, the class list must be non-empty, the findrefs scan must
+/// complete without per-DEX errors, and getclass must produce source.
+/// Engine failures are never flattened into a zero-count "success" — the
+/// binary turns any `Err` into a non-zero exit code, and CI relies on that
+/// (see `.github/workflows/ci.yml`'s Selfcheck step).
+///
+/// Manifest absence is tolerated (the synthetic workload fixture has no
+/// `AndroidManifest.xml`); a manifest that is present but undecodable is
+/// reported in [`SelfcheckReport::manifest_error`] without failing.
 pub fn run_selfcheck(apk: &Path) -> Result<SelfcheckReport, SelfcheckError> {
     let session = WorkspaceSession::open(apk)?;
     let dex_count = session.dex_entries().len();
     let class_count = session.all_classes()?.classes.len();
 
-    // One findrefs: substring search.
+    // One findrefs: substring search. A hard engine error propagates.
     let query = Query::string(DEFAULT_FINDREFS_PATTERN);
     let label = format!("string \"{DEFAULT_FINDREFS_PATTERN}\"");
     let findrefs_job = FindRefsJob::new(apk, query);
     let find_opts = FindRefsOptions::default();
-    let find_report = asc_core::run_findrefs(&findrefs_job, &find_opts);
-    let (caller_lines, complete, errors) = match find_report {
-        Ok(r) => (r.total_lines(), r.complete, r.errors.len()),
-        Err(_) => (0, false, 1),
-    };
+    let find_report = asc_core::run_findrefs(&findrefs_job, &find_opts)?;
 
-    // One getclass: decompile ClockFaceView.
+    // One getclass: decompile ClockFaceView. Likewise fatal on error.
     let get_job = GetClassJob::new(apk, DEFAULT_TARGET_CLASS);
     let get_opts = GetClassOptions::default();
-    let decompiled = asc_core::run_getclass(&get_job, &get_opts);
-    let (decompiled_target, source_bytes) = match decompiled {
-        Ok(r) => (r.dex_name, r.source.len()),
-        Err(_) => (String::new(), 0),
-    };
+    let decompiled = asc_core::run_getclass(&get_job, &get_opts)?;
 
-    // Manifest via asc-manifest.
-    let manifest_info = asc_manifest::parse_from_apk(apk).ok();
+    // Manifest via asc-manifest: absence is fine, a decode failure is kept
+    // (and surfaced) but does not fail the run — DEX analysis is unaffected.
+    let (manifest, manifest_error) = crate::task::load_manifest(apk);
 
-    Ok(SelfcheckReport {
+    let report = SelfcheckReport {
         apk: apk.display().to_string(),
         dex_count,
         class_count,
         findrefs_query: label,
-        findrefs_caller_lines: caller_lines,
-        findrefs_complete: complete,
-        findrefs_errors: errors,
-        decompiled_class: decompiled_target,
-        decompiled_source_bytes: source_bytes,
-        manifest_package: manifest_info.as_ref().and_then(|m| m.package.clone()),
-        manifest_version_code: manifest_info.as_ref().and_then(|m| m.version_code),
-    })
+        findrefs_caller_lines: find_report.total_lines(),
+        findrefs_complete: find_report.complete,
+        findrefs_errors: find_report.errors.len(),
+        decompiled_class: decompiled.dex_name,
+        decompiled_source_bytes: decompiled.source.len(),
+        manifest_package: manifest.as_ref().and_then(|m| m.package.clone()),
+        manifest_version_code: manifest.as_ref().and_then(|m| m.version_code),
+        manifest_error,
+    };
+    report.verify()?;
+    Ok(report)
 }
 
 /// Errors from the selfcheck path.
@@ -99,6 +110,37 @@ pub enum SelfcheckError {
     /// underlying cause for diagnostics.
     #[error("engine: {0}")]
     Core(#[from] CoreError),
+
+    /// An engine call *returned* but the result proves it did not work
+    /// (no classes, a scan that skipped DEXes, a decompile with no
+    /// source). `--selfcheck` must exit non-zero for these too, otherwise
+    /// a silently broken engine would look like a green CI run.
+    #[error("selfcheck incomplete: {0}")]
+    Incomplete(String),
+}
+
+impl SelfcheckReport {
+    /// The success criteria: every engine step a selfcheck exists to prove
+    /// must actually have produced work.
+    fn verify(&self) -> Result<(), SelfcheckError> {
+        let fail = |what: &str| Err(SelfcheckError::Incomplete(what.to_string()));
+        if self.dex_count == 0 {
+            return fail("no DEX entries in the APK");
+        }
+        if self.class_count == 0 {
+            return fail("class enumeration produced no classes");
+        }
+        if !self.findrefs_complete {
+            return fail("findrefs did not scan every DEX");
+        }
+        if self.findrefs_errors != 0 {
+            return fail("findrefs reported per-DEX errors");
+        }
+        if self.decompiled_class.is_empty() || self.decompiled_source_bytes == 0 {
+            return fail("getclass produced no source");
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for SelfcheckReport {
@@ -125,6 +167,83 @@ impl std::fmt::Display for SelfcheckReport {
             "  manifest          = package={:?}, versionCode={:?}",
             self.manifest_package, self.manifest_version_code
         )?;
+        if let Some(err) = &self.manifest_error {
+            writeln!(f, "  manifest_error    = {err}")?;
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A report where every engine step worked, minus the fields a test
+    /// overrides. Nothing here is asserted by `verify` beyond the fields
+    /// set below.
+    fn report(dex_count: usize, class_count: usize) -> SelfcheckReport {
+        SelfcheckReport {
+            apk: "fixture.apk".into(),
+            dex_count,
+            class_count,
+            findrefs_query: "string \"ClockFace\"".into(),
+            findrefs_caller_lines: 3,
+            findrefs_complete: true,
+            findrefs_errors: 0,
+            decompiled_class: "classes.dex".into(),
+            decompiled_source_bytes: 1234,
+            manifest_package: None,
+            manifest_version_code: None,
+            manifest_error: None,
+        }
+    }
+
+    #[test]
+    fn a_fully_working_report_verifies() {
+        assert!(report(1, 500).verify().is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_each_engine_step_that_did_not_work() {
+        assert!(report(0, 500).verify().is_err(), "no DEX entries");
+        assert!(report(1, 0).verify().is_err(), "no classes");
+
+        let mut r = report(1, 500);
+        r.findrefs_complete = false;
+        assert!(r.verify().is_err(), "findrefs skipped a DEX");
+
+        let mut r = report(1, 500);
+        r.findrefs_errors = 2;
+        assert!(r.verify().is_err(), "findrefs reported errors");
+
+        let mut r = report(1, 500);
+        r.decompiled_source_bytes = 0;
+        assert!(r.verify().is_err(), "empty decompile");
+
+        let mut r = report(1, 500);
+        r.decompiled_class.clear();
+        assert!(r.verify().is_err(), "no winning dex");
+
+        // A manifest that exists but failed to decode is surfaced in the
+        // report, NOT turned into a failed selfcheck (DEX analysis is
+        // unaffected, and the workload fixture has no manifest at all).
+        let mut r = report(1, 500);
+        r.manifest_error = Some("manifest decode failed: bad chunk".into());
+        assert!(r.verify().is_ok(), "manifest failure is informational");
+    }
+
+    /// End-to-end return semantics: an APK with no DEX at all cannot
+    /// satisfy a selfcheck. The pre-fix code flattened every engine error
+    /// into zero counts and returned `Ok` → the binary exited 0.
+    #[test]
+    fn dex_less_apk_fails_the_selfcheck() {
+        let apk = crate::test_zip::write_temp_apk(
+            "selfcheck_no_dex",
+            &[("assets/readme.txt", b"no dex here")],
+        );
+        let outcome = run_selfcheck(&apk);
+        let _ = std::fs::remove_file(&apk);
+        let err = outcome.expect_err("an APK with no DEX must not pass the selfcheck");
+        assert!(!err.to_string().is_empty());
     }
 }

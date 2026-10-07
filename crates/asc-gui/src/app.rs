@@ -55,6 +55,9 @@ pub struct AscApp {
     pub(crate) tree: PackageTree,
     pub(crate) dex_counts: Vec<(String, usize)>,
     pub(crate) manifest: Option<asc_manifest::ManifestInfo>,
+    /// Manifest decode failure, when the APK *has* a manifest we could not
+    /// parse. `None` with `manifest: None` = genuinely no manifest.
+    pub(crate) manifest_error: Option<String>,
     pub(crate) tasks: TaskManager,
     pub(crate) loading_artifact: bool,
     /// Latest open-task id (only its result may become the session).
@@ -149,6 +152,7 @@ impl AscApp {
             tree: PackageTree::build(Vec::new()),
             dex_counts: Vec::new(),
             manifest: None,
+            manifest_error: None,
             tasks: TaskManager::new(),
             loading_artifact: false,
             pending_open: None,
@@ -211,11 +215,14 @@ impl AscApp {
             .iter()
             .map(|e| (e.name.clone(), 0))
             .collect();
-        app.manifest = asc_manifest::parse_from_apk(session.path()).ok();
+        let (manifest, manifest_error) = crate::task::load_manifest(session.path());
+        app.manifest = manifest.clone();
+        app.manifest_error = manifest_error.clone();
         app.apply_artifact(LoadedArtifact {
             dex_counts: crate::task::per_dex_counts(&list.classes, dex_counts),
             session,
-            manifest: app.manifest.clone(),
+            manifest,
+            manifest_error,
             classes: list.classes,
             warnings: list.warnings,
         });
@@ -266,6 +273,7 @@ impl AscApp {
         self.tree = PackageTree::build(artifact.classes);
         self.dex_counts = artifact.dex_counts;
         self.manifest = artifact.manifest;
+        self.manifest_error = artifact.manifest_error;
         self.documents = DocumentCache::default();
         self.tabs.clear();
         self.nav = NavigationHistory::default();

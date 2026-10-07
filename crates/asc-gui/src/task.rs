@@ -127,6 +127,10 @@ impl TaskKind {
 pub struct LoadedArtifact {
     pub session: crate::session::WorkspaceSession,
     pub manifest: Option<asc_manifest::ManifestInfo>,
+    /// Set when the APK *has* an `AndroidManifest.xml` that could not be
+    /// parsed. `None` + `manifest: None` means the APK genuinely has none
+    /// (e.g. a synthetic corpus fixture) — the two states are never merged.
+    pub manifest_error: Option<String>,
     /// All classes (already sorted by descriptor).
     pub classes: Vec<crate::session::ClassEntry>,
     /// Non-empty = the class list is PARTIAL (a DEX or class_defs were
@@ -800,6 +804,22 @@ fn with_decompile_warnings(source: &str) -> String {
     }
 }
 
+/// Parse the APK manifest, keeping *absence* and *failure* apart.
+///
+/// `ManifestError::NotFound` (no `AndroidManifest.xml` entry, or a raw DEX)
+/// is genuine absence → `(None, None)`. Anything else is a real decode
+/// failure and its message is preserved, so the inspector can say the
+/// metadata is untrustworthy instead of pretending the APK has no manifest
+/// (audit: `Option<T>` conflating "missing" with "failed"; mirrors
+/// `asc_core::xapk`'s `manifest` / `manifest_error` pair).
+pub(crate) fn load_manifest(path: &Path) -> (Option<asc_manifest::ManifestInfo>, Option<String>) {
+    match asc_manifest::parse_from_apk(path) {
+        Ok(m) => (Some(m), None),
+        Err(asc_manifest::ManifestError::NotFound(_)) => (None, None),
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
 /// Run one APK-open job (worker-thread body): open the session,
 /// enumerate every DEX's classes, parse the manifest.
 fn run_load_job(apk: &Path) -> TaskOutcome {
@@ -807,7 +827,7 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
         Ok(s) => s,
         Err(e) => return TaskOutcome::Failed(e.to_string()),
     };
-    let manifest = asc_manifest::parse_from_apk(session.path()).ok();
+    let (manifest, manifest_error) = load_manifest(session.path());
     let dex_order: Vec<(String, usize)> = session
         .dex_entries()
         .iter()
@@ -818,6 +838,7 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
             dex_counts: per_dex_counts(&list.classes, dex_order),
             session,
             manifest,
+            manifest_error,
             classes: list.classes,
             warnings: list.warnings,
         })),
@@ -1116,6 +1137,80 @@ mod tests {
             .iter()
             .any(|t| t.discarded.load(std::sync::atomic::Ordering::Acquire));
         assert!(discarded_any, "FindRefs marked discarded");
+    }
+
+    /// A cancelled scan keeps *running* (the engine has no cancel hook) but
+    /// stops being *live* the moment it is discarded. Every indicator that
+    /// means "the request you are waiting for" — the bottom-panel
+    /// "searching…" placeholder, the toolbar/search-bar spinners, the
+    /// Run-vs-cancel button — must ask `findrefs_live`, or the GUI claims
+    /// progress for a result that will be thrown away on arrival.
+    #[test]
+    fn cancelled_findrefs_runs_but_is_no_longer_live() {
+        use asc_query::Query;
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("nonexistent_fixture_for_test.apk");
+        let _id = mgr.spawn_findrefs(apk, Query::string("hello"), "string \"hello\"", false, &ctx);
+        assert!(mgr.findrefs_running(), "in flight");
+        assert!(mgr.findrefs_live(), "and still wanted");
+
+        mgr.cancel_kind(TaskKind::FindRefs);
+
+        assert!(
+            mgr.findrefs_running(),
+            "the worker is still churning; only the result was discarded"
+        );
+        assert!(
+            !mgr.findrefs_live(),
+            "a cancelled scan is not what the user is waiting for"
+        );
+    }
+
+    /// A manifest that is *present but undecodable* must be preserved as an
+    /// error. Before the fix the worker used `.ok()`, melting it into
+    /// `manifest: None`, which the inspector rendered as "no manifest" —
+    /// hiding a real parse failure from the analyst.
+    #[test]
+    fn load_job_keeps_a_corrupt_manifest_as_an_error() {
+        let apk = crate::test_zip::write_temp_apk(
+            "load_job_corrupt_manifest",
+            &[("AndroidManifest.xml", b"not axml at all")],
+        );
+        let outcome = run_load_job(&apk);
+        let _ = std::fs::remove_file(&apk);
+
+        let TaskOutcome::Loaded(artifact) = outcome else {
+            panic!("a corrupt manifest must not fail the whole APK open");
+        };
+        assert!(artifact.manifest.is_none());
+        assert!(
+            artifact
+                .manifest_error
+                .as_deref()
+                .is_some_and(|e| e.contains("binary Android XML")),
+            "got {:?}",
+            artifact.manifest_error
+        );
+    }
+
+    /// ...while genuine absence stays absence: no error, no manifest.
+    #[test]
+    fn load_job_reports_an_absent_manifest_as_absence() {
+        let apk =
+            crate::test_zip::write_temp_apk("load_job_no_manifest", &[("assets/x.txt", b"hi")]);
+        let outcome = run_load_job(&apk);
+        let _ = std::fs::remove_file(&apk);
+
+        let TaskOutcome::Loaded(artifact) = outcome else {
+            panic!("an APK without a manifest still opens");
+        };
+        assert!(artifact.manifest.is_none());
+        assert!(
+            artifact.manifest_error.is_none(),
+            "absence is not a failure: {:?}",
+            artifact.manifest_error
+        );
     }
 
     /// click A, click B, B finishes first, A finishes later → both

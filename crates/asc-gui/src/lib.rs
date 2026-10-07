@@ -35,6 +35,8 @@ pub mod session;
 pub mod source_edit;
 pub mod state;
 pub mod task;
+#[cfg(test)]
+pub(crate) mod test_zip;
 pub mod ui;
 
 pub use crate::app::AscApp;

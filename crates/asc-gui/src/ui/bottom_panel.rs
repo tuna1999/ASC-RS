@@ -157,7 +157,13 @@ impl AscApp {
                         }
                     });
             });
-            if self.tasks.findrefs_running() {
+            // `findrefs_live`, not `findrefs_running`: a cancelled or
+            // superseded worker keeps churning until it lands, but its
+            // result is discarded on arrival — so claiming a request is
+            // still in progress (and offering "cancel" for it) would
+            // advertise work the user will never see. Same rule as the
+            // Run-button gate and `references_surface_busy`.
+            if self.tasks.findrefs_live() {
                 ui.spinner();
                 if ui.button("cancel").clicked() {
                     self.queue(Command::CancelTask);
@@ -214,7 +220,11 @@ impl AscApp {
         let needle = self.search.results_filter.trim().to_ascii_lowercase();
         let rows = self.search.results().map_or(&[][..], |r| &r.rows[..]);
         if rows.is_empty() {
-            ui.weak(if self.tasks.findrefs_running() {
+            // "searching…" means "the request you are waiting for is in
+            // flight". A cancelled/superseded scan is still running but
+            // will never be applied, so it must not claim the user is
+            // waiting for it (the Run button is enabled again).
+            ui.weak(if self.tasks.findrefs_live() {
                 "searching…"
             } else {
                 "no results — run a search (Ctrl+Shift+F)"
