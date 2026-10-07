@@ -828,14 +828,13 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
         Err(e) => return TaskOutcome::Failed(e.to_string()),
     };
     let (manifest, manifest_error) = load_manifest(session.path());
-    let dex_order: Vec<(String, usize)> = session
-        .dex_entries()
-        .iter()
-        .map(|e| (e.name.clone(), 0usize))
-        .collect();
+    // Per-DEX counts come from the DEXes themselves, not from
+    // `all_classes()` (which collapses a class shadowed by an earlier DEX
+    // and would report such a DEX as empty).
+    let dex_counts = session.class_counts_per_dex();
     match session.all_classes() {
         Ok(list) => TaskOutcome::Loaded(Box::new(LoadedArtifact {
-            dex_counts: per_dex_counts(&list.classes, dex_order),
+            dex_counts,
             session,
             manifest,
             manifest_error,
@@ -844,28 +843,6 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
         })),
         Err(e) => TaskOutcome::Failed(e.to_string()),
     }
-}
-
-/// Count classes per DEX (preserving central-directory order) from the
-/// full class list. Logical DEX names of a DEX-041 container are not
-/// known up front, so unseen names are appended in first-seen order.
-pub(crate) fn per_dex_counts(
-    classes: &[crate::session::ClassEntry],
-    mut order: Vec<(String, usize)>,
-) -> Vec<(String, usize)> {
-    for c in classes {
-        match order.iter_mut().find(|(name, _)| *name == c.dex_name) {
-            Some((_, n)) => *n += 1,
-            None => order.push((c.dex_name.clone(), 1)),
-        }
-    }
-    // A DEX-041 container is reported through its logical members only.
-    let names: Vec<String> = order.iter().map(|(n, _)| n.clone()).collect();
-    order.retain(|(name, n)| {
-        let prefix = format!("{name}!classes");
-        *n > 0 || !names.iter().any(|o| o.starts_with(&prefix))
-    });
-    order
 }
 
 /// Run one findrefs engine job (worker-thread body).

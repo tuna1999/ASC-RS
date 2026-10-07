@@ -39,8 +39,39 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Build artefacts from the TAG's commit, never from whatever ref
-          # the workflow happened to be dispatched on: a manual
+          # Step 1 of the release flow: release CONTROL logic (this workflow
+          # and everything under scripts/) comes from the revision that RUNS
+          # the workflow, never from the historical tag being released.
+          # scripts/verify_release_tag.sh first shipped in v0.15.4, so a
+          # re-release of an older tag (workflow_dispatch with tag=v0.15.3)
+          # would fail at the verify step if the verifier were read from the
+          # target tree — the file is not in that tree. The default ref is
+          # the dispatching revision, which is exactly the revision that
+          # defines this workflow; the target tag is checked out further
+          # down, after the verifier has been staged outside the workspace.
+          fetch-depth: 0
+
+      - name: Regression-test the release verifier
+        # A checked-in test nobody executes protects nothing. The verifier
+        # gates every job below, so its own suite runs here first (bash +
+        # git only; the Linux leg is enough).
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/test_verify_release_tag.sh
+
+      - name: Stage the release verifier outside the target tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The next step replaces the whole working tree with the tag's, so
+          # the verifier is copied to $RUNNER_TEMP (outside the workspace)
+          # and executed from there against the tag checkout.
+          cp scripts/verify_release_tag.sh "$RUNNER_TEMP/verify_release_tag.sh"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Step 2: build artefacts from the TAG's commit, never from
+          # whatever ref the workflow happened to be dispatched on: a manual
           # workflow_dispatch from a branch would otherwise publish branch
           # HEAD under the tag's name (the version string alone does not
           # prove the commit). The ref is namespace-qualified because a
@@ -51,7 +82,10 @@ jobs:
 
       - name: Verify the checkout is the release tag's commit
         shell: bash
-        run: bash scripts/verify_release_tag.sh "$RELEASE_TAG"
+        # Runs from the tag's working directory (the checkout above) so
+        # `git show-ref` / `git rev-parse HEAD` / `Cargo.toml` all refer to
+        # the source being released; only the script lives outside it.
+        run: bash "$RUNNER_TEMP/verify_release_tag.sh" "$RELEASE_TAG"
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -178,6 +212,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Same control-vs-target split as `gates`: the verifier comes from
+          # the revision running this workflow (which may be newer than the
+          # tag being re-released), the binaries from the tag's commit.
+          fetch-depth: 0
+
+      - name: Stage the release verifier outside the target tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/verify_release_tag.sh "$RUNNER_TEMP/verify_release_tag.sh"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
           # Same source-of-truth rule as `gates`: the published binaries
           # must be a function of the tag's commit.
           ref: refs/tags/${{ env.RELEASE_TAG }}
@@ -185,7 +232,7 @@ jobs:
 
       - name: Verify the checkout is the release tag's commit
         shell: bash
-        run: bash scripts/verify_release_tag.sh "$RELEASE_TAG"
+        run: bash "$RUNNER_TEMP/verify_release_tag.sh" "$RELEASE_TAG"
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -246,13 +293,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Same control-vs-target split as `gates` and `binaries`; the
+          # verifier is staged out of the workspace before the tag checkout
+          # replaces the tree.
+          fetch-depth: 0
+
+      - name: Stage the release verifier outside the target tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/verify_release_tag.sh "$RUNNER_TEMP/verify_release_tag.sh"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
           # The source ZIP must be the tag's tree, not the dispatching ref.
           ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Verify the checkout is the release tag's commit
         shell: bash
-        run: bash scripts/verify_release_tag.sh "$RELEASE_TAG"
+        run: bash "$RUNNER_TEMP/verify_release_tag.sh" "$RELEASE_TAG"
 
       - name: Build byte-reproducible source ZIP
         shell: bash

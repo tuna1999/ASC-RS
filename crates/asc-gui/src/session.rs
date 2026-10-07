@@ -227,6 +227,93 @@ mod tests {
         assert_eq!(list.warnings.len(), 1);
         assert!(list.warnings[0].contains("parse failed"));
     }
+
+    /// The same class defined in two DEXes: `all_classes` must collapse the
+    /// duplicate onto the lowest DEX index (`classes.dex` shadows
+    /// `classes2.dex`, the winner rule `run_getclass` uses), keep every
+    /// non-duplicate class, keep enumeration warnings, and hand the tree /
+    /// filter exactly one logical leaf.
+    ///
+    /// The per-DEX class_def counts are a separate contract: a DEX whose
+    /// classes are shadowed still reports how many classes IT defines, so
+    /// the DEX inspector never shows a non-empty DEX as "0 classes".
+    #[test]
+    fn all_classes_dedups_shadowed_definitions_first_dex_wins() {
+        let d1 = tiny_dex(&["Lcom/example/Foo;", "Lcom/example/Only1;"], false);
+        let d2 = tiny_dex(&["Lcom/example/Foo;", "Lcom/example/Only2;"], false);
+        let apk = crate::test_zip::write_temp_apk(
+            "shadowed_class",
+            &[
+                ("classes.dex", d1.as_slice()),
+                ("classes2.dex", d2.as_slice()),
+                ("classes3.dex", b"not a dex"),
+            ],
+        );
+        let session = WorkspaceSession::open(&apk).expect("open temp apk");
+
+        let list = session.all_classes().expect("all_classes");
+        let foos: Vec<&ClassEntry> = list
+            .classes
+            .iter()
+            .filter(|c| c.descriptor == "Lcom/example/Foo;")
+            .collect();
+        assert_eq!(foos.len(), 1, "one logical Foo: {:?}", list.classes);
+        assert_eq!(
+            foos[0].dex_name, "classes.dex",
+            "classes.dex shadows classes2.dex"
+        );
+        let dex_of = |d: &str| {
+            list.classes
+                .iter()
+                .find(|c| c.descriptor == d)
+                .map(|c| c.dex_name.clone())
+        };
+        assert_eq!(
+            dex_of("Lcom/example/Only1;").as_deref(),
+            Some("classes.dex")
+        );
+        assert_eq!(
+            dex_of("Lcom/example/Only2;").as_deref(),
+            Some("classes2.dex")
+        );
+        assert_eq!(list.classes.len(), 3, "no non-duplicate class lost");
+        // classes3.dex is garbage: its warning must survive dedup.
+        assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
+        assert!(
+            list.warnings[0].contains("classes3.dex"),
+            "{:?}",
+            list.warnings
+        );
+
+        assert_eq!(
+            session.class_counts_per_dex(),
+            vec![
+                ("classes.dex".to_string(), 2),
+                ("classes2.dex".to_string(), 2),
+                ("classes3.dex".to_string(), 0),
+            ],
+            "per-DEX counts describe each DEX's own class_defs"
+        );
+
+        // The tree is built from `all_classes`, so it inherits the collapse:
+        // one Foo leaf, one filter hit.
+        let mut tree = crate::package_tree::PackageTree::build(list.classes.clone());
+        let com = tree.node(tree.root()).children["com"];
+        let example = tree.node(com).children["example"];
+        let foo = tree.node(example).children["Foo"];
+        assert_eq!(tree.node(foo).class_leaves.len(), 1, "one logical Foo leaf");
+        let leaf = tree.node(foo).class_leaves[0];
+        assert_eq!(tree.entry(leaf).dex_name, "classes.dex");
+        assert_eq!(tree.len(), 3, "tree holds the deduped list");
+        assert_eq!(
+            tree.filter("com/example/foo").len(),
+            1,
+            "filtered search returns one Foo"
+        );
+
+        drop(session);
+        let _ = std::fs::remove_file(&apk);
+    }
 }
 
 /// One history entry — a query that was actually run to completion.
@@ -343,9 +430,15 @@ impl WorkspaceSession {
     }
 
     /// Build a complete class list for every DEX, returning the
-    /// concatenated (sorted, deduped-by-name) set. This is what the
+    /// concatenated (sorted by descriptor, deduped) set. This is what the
     /// left-panel tree view shows. A DEX that fails to parse degrades to
     /// a warning + the classes of every other DEX (never a total failure).
+    ///
+    /// Duplicate descriptors — the same class defined in more than one DEX
+    /// — collapse onto the FIRST definition in central-directory order, so
+    /// `classes.dex` shadows `classes2.dex`: the winner rule
+    /// [`asc_core::run_getclass`] uses. Per-DEX counts are a different
+    /// question and live in [`Self::class_counts_per_dex`].
     pub fn all_classes(&self) -> SessionResult<ClassList> {
         let mut out = ClassList::default();
         for i in 0..self.dex_entries.len() {
@@ -353,9 +446,47 @@ impl WorkspaceSession {
             out.classes.extend(list.classes);
             out.warnings.extend(list.warnings);
         }
-        // Sort by descriptor for stable display.
+        // `classes` was appended in DEX-index order and `sort_by` is
+        // stable, so equal descriptors stay in that order and `dedup_by`
+        // (which keeps the first of each run) retains the lowest DEX's
+        // definition — never a higher-index shadow.
         out.classes.sort_by(|a, b| a.descriptor.cmp(&b.descriptor));
+        out.classes.dedup_by(|a, b| a.descriptor == b.descriptor);
         Ok(out)
+    }
+
+    /// `class_def` count per DEX entry, in central-directory order.
+    ///
+    /// This is what each DEX file actually defines — the DEX inspector's
+    /// "N classes" figure — so a DEX whose classes are shadowed by an
+    /// earlier one still reports its own count, unlike [`Self::all_classes`]
+    /// which collapses duplicates. Logical DEX names of a DEX-041 container
+    /// are not known up front, so unseen names are appended in first-seen
+    /// order.
+    pub fn class_counts_per_dex(&self) -> Vec<(String, usize)> {
+        let mut order: Vec<(String, usize)> = self
+            .dex_entries
+            .iter()
+            .map(|e| (e.name.clone(), 0))
+            .collect();
+        for i in 0..self.dex_entries.len() {
+            let Ok(list) = self.classes_for_dex(i) else {
+                continue;
+            };
+            for c in &list.classes {
+                match order.iter_mut().find(|(name, _)| *name == c.dex_name) {
+                    Some((_, n)) => *n += 1,
+                    None => order.push((c.dex_name.clone(), 1)),
+                }
+            }
+        }
+        // A DEX-041 container is reported through its logical members only.
+        let names: Vec<String> = order.iter().map(|(n, _)| n.clone()).collect();
+        order.retain(|(name, n)| {
+            let prefix = format!("{name}!classes");
+            *n > 0 || !names.iter().any(|o| o.starts_with(&prefix))
+        });
+        order
     }
 
     /// Record a completed findrefs run.

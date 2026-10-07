@@ -42,6 +42,16 @@ jobs:
           # Golden fixtures are committed; corpus APKs are downloaded below.
           fetch-depth: 0
 
+      - name: Release verifier regression test
+        # `scripts/test_verify_release_tag.sh` pins the ref shapes the
+        # release workflow must accept or reject (above all: a BRANCH named
+        # like a release tag must not satisfy the verifier). It is a
+        # checked-in test, so it only protects anything if a workflow runs
+        # it — this lane does, on Linux, before any Rust build.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/test_verify_release_tag.sh
+
       - name: Install Rust toolchain (latest stable)
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:

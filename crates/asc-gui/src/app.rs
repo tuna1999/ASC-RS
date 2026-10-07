@@ -210,16 +210,12 @@ impl AscApp {
     fn from_session(session: WorkspaceSession) -> Self {
         let mut app = Self::new(None);
         let list = session.all_classes().unwrap_or_default();
-        let dex_counts = session
-            .dex_entries()
-            .iter()
-            .map(|e| (e.name.clone(), 0))
-            .collect();
+        let dex_counts = session.class_counts_per_dex();
         let (manifest, manifest_error) = crate::task::load_manifest(session.path());
         app.manifest = manifest.clone();
         app.manifest_error = manifest_error.clone();
         app.apply_artifact(LoadedArtifact {
-            dex_counts: crate::task::per_dex_counts(&list.classes, dex_counts),
+            dex_counts,
             session,
             manifest,
             manifest_error,
