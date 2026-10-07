@@ -739,6 +739,7 @@ fn sidebar_repro() {
         h.step();
     }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&dir).unwrap();
     let img = h.render().expect("render");
     img.save(dir.join("repro_full.png")).unwrap();
     eprintln!("repro saved");
@@ -893,6 +894,11 @@ fn glyph_probe() {
     let img = h.render().expect("render");
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/shots/09_glyph_probe.png");
+    // Several shot tests write here; each must ensure the directory itself,
+    // otherwise the first one to run on a fresh checkout fails with
+    // "path not found" (the tests run in parallel, so the order is not
+    // defined).
+    std::fs::create_dir_all(out.parent().expect("shot path has a parent")).unwrap();
     img.save(&out).unwrap();
     eprintln!("probe: {}", out.display());
 }
