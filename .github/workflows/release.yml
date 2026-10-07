@@ -15,8 +15,12 @@ concurrency:
   group: release-${{ github.workflow }}
   cancel-in-progress: false
 
+# Least privilege: only `publish` needs to write (it creates the GitHub
+# release). The gates/binaries/source-archive jobs just read the repository
+# and hand files to `publish` through the job runtime token, so the
+# workflow default is `contents: read` and `publish` opts in explicitly.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +37,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-2022]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -43,11 +47,17 @@ jobs:
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           [ "v$v" = "$RELEASE_TAG" ] || { echo "::error::tag $RELEASE_TAG != Cargo.toml version v$v"; exit 1; }
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
+          # Reproducible release: pin the exact compiler instead of the
+          # moving `stable` ref, so a released binary is a function of the
+          # tag, not of the day the tag was pushed. 1.97.1 is the version
+          # the full local gate suite (fmt/clippy/test/release build) is
+          # verified with; CI's `stable` lane may be newer.
+          toolchain: "1.97.1"
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
 
@@ -160,13 +170,17 @@ jobs:
             bin_prefix: '.exe'
             artifact: asc-rs-windows-x64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          # Same pinned compiler as `gates`: these two jobs produce the
+          # published binaries, so they must agree.
+          toolchain: "1.97.1"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install Linux build deps
         if: runner.os == 'Linux'
@@ -206,7 +220,7 @@ jobs:
           fi
 
       - name: Upload release archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
@@ -217,7 +231,7 @@ jobs:
     needs: gates
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -232,7 +246,7 @@ jobs:
           python scripts/build_release.py "$RELEASE_TAG" --output dist
 
       - name: Upload source archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: source-archive
           path: |
@@ -244,9 +258,13 @@ jobs:
     name: publish release
     needs: [binaries, source-archive]
     runs-on: ubuntu-22.04
+    # The one job that needs to write: it creates the GitHub release and
+    # attaches the artifacts. Everything else in this workflow is read-only.
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           pattern: '*'
@@ -267,7 +285,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: ${{ env.RELEASE_TAG }}
           tag_name: ${{ env.RELEASE_TAG }}

@@ -4,6 +4,7 @@ description = "Orchestration for ASC-RS: getclass/findrefs/listclass pipelines, 
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 thiserror.workspace = true

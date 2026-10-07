@@ -4,6 +4,7 @@ description = "Paranoid / LSParanoid string deobfuscation for ASC-RS"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 asc-dex.workspace = true

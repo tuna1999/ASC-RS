@@ -14,9 +14,10 @@
 //! - Activation intent lives on the *task*, not in a shared slot, so a
 //!   failing older request can no longer clear a newer request's
 //!   intent (audit F1).
-//! - Starting a new findrefs supersedes the previous one: the old
-//!   worker may physically finish, but its result is discarded on
-//!   arrival (audit F3). `run_findrefs` is a single blocking engine
+//! - Starting a new findrefs supersedes the previous one: an old worker
+//!   that already started may physically finish, but its result is
+//!   discarded on arrival (audit F3); an old job that is still queued is
+//!   dropped before it starts. `run_findrefs` is a single blocking engine
 //!   call with no cancellation hook (core change deliberately
 //!   deferred, see docs/gui-redesign-plan.md), so supersede is
 //!   discard-on-arrival, never a UI block.
@@ -25,9 +26,12 @@
 //!   more threads (audit F10).
 //! - Burst protection: at most [`MAX_TASK_THREADS`] worker threads run
 //!   at once; overflow jobs wait in a FIFO queue and start as slots
-//!   free. Supersede stays discard-on-arrival (the engine has no
-//!   cancellation hook), so an already-started superseded job still
-//!   runs to completion — the cap bounds thread creation, not CPU.
+//!   free. A superseded job that is *still queued* is dropped before it
+//!   starts ([`TaskManager::pump`] consults the same discard flag and
+//!   generation the poll-time verdict does), so stale work can neither
+//!   burn an engine scan nor delay the request the user actually wants.
+//!   Only a job that already started keeps running: the engine has no
+//!   cancellation hook, so the cap bounds thread creation, not CPU.
 //!
 //! Job execution runs inside `catch_unwind`: the engine is panic-free
 //! by invariant, but a panicking worker must degrade into a failed
@@ -188,6 +192,21 @@ struct InFlight {
     discarded: Arc<AtomicBool>,
 }
 
+/// One queued job: the worker body plus the identity of the task it
+/// belongs to, so [`TaskManager::pump`] can drop it *before* it starts
+/// when the task was already superseded (discard flag) or belongs to a
+/// retired session generation. Without the identity, a superseded job
+/// sitting in the queue still burned a full engine scan the moment a
+/// worker slot freed — the result was thrown away on arrival, but the
+/// work (and the delay it imposed on newer requests) was real.
+struct PendingJob {
+    generation: SessionGeneration,
+    /// Shared with the task's [`InFlight`] entry: cancelling a task flips
+    /// this even while its job is still queued.
+    discarded: Arc<AtomicBool>,
+    run: Box<dyn FnOnce() + Send + 'static>,
+}
+
 /// One entry of the bounded recent-task log (Tasks view).
 #[derive(Debug, Clone)]
 pub struct TaskLogEntry {
@@ -223,8 +242,10 @@ pub struct TaskManager {
     in_flight: Vec<InFlight>,
     log: std::collections::VecDeque<TaskLogEntry>,
     /// Jobs admitted but not yet started (over the [`MAX_TASK_THREADS`]
-    /// cap); FIFO so the oldest request runs first.
-    pending: std::collections::VecDeque<Box<dyn FnOnce() + Send + 'static>>,
+    /// cap); FIFO so the oldest *live* request runs first. Entries whose
+    /// task was superseded before it started are dropped here, never
+    /// spawned.
+    pending: std::collections::VecDeque<PendingJob>,
     /// Live worker-thread count. Shared with each worker so it can drop
     /// its own slot on exit; `pump` reads it to admit more work.
     active: Arc<AtomicUsize>,
@@ -307,9 +328,13 @@ impl TaskManager {
             label: label.into(),
             started: Instant::now(),
             receiver: rx,
-            discarded,
+            discarded: Arc::clone(&discarded),
         });
-        self.pending.push_back(job);
+        self.pending.push_back(PendingJob {
+            generation,
+            discarded,
+            run: job,
+        });
         self.pump();
         id
     }
@@ -319,16 +344,28 @@ impl TaskManager {
     /// queue is empty and the job starts immediately) and at the top of
     /// [`Self::poll`], so a slot freed by a finishing worker admits the
     /// next queued job on the following frame.
+    ///
+    /// Superseded jobs are dropped here, *before* they start: the queue
+    /// must never spend a worker (or an engine scan) on a result nobody
+    /// will read. The check runs before the cap check, so a dead entry at
+    /// the head of the queue cannot delay the live request behind it.
+    /// Dropping the job also drops the envelope sender, so its [`InFlight`]
+    /// slot retires as a discarded completion on the next [`Self::poll`] —
+    /// no slot, receiver or flag is left behind.
     fn pump(&mut self) {
-        while !self.pending.is_empty() {
+        while let Some(job) = self.pending.pop_front() {
+            if job.discarded.load(Ordering::Acquire) || job.generation != self.generation {
+                continue;
+            }
             if self.active.load(Ordering::Acquire) >= MAX_TASK_THREADS {
+                self.pending.push_front(job);
                 break;
             }
-            let job = self.pending.pop_front().expect("checked non-empty");
             self.active.fetch_add(1, Ordering::AcqRel);
             let active = Arc::clone(&self.active);
+            let run = job.run;
             std::thread::spawn(move || {
-                job();
+                run();
                 active.fetch_sub(1, Ordering::AcqRel);
             });
         }
@@ -530,11 +567,21 @@ impl TaskManager {
         )
     }
 
-    /// Is a class-references query running?
-    pub fn findrefs_class_running(&self) -> bool {
+    /// Whether a *wanted* task is publishing into the shared references
+    /// surface ([`TaskKind::uses_references_surface`]) right now.
+    ///
+    /// The REFERENCES tab uses this for its placeholder, so it asks the same
+    /// question the poll-time verdict does: a superseded/cancelled task's
+    /// result is discarded on arrival, and claiming "collecting…" for it (or
+    /// for a scan whose lane was already taken over by a newer request) would
+    /// advertise work the user will never see — same rule as
+    /// [`Self::findrefs_live`]. The lane is shared by class-references,
+    /// one-hop callees and class strings, so all three count: whichever is
+    /// live is what will replace the tab's content.
+    pub fn references_surface_busy(&self) -> bool {
         self.in_flight
             .iter()
-            .any(|t| t.kind == TaskKind::FindRefsClass)
+            .any(|t| t.kind.uses_references_surface() && !t.discarded.load(Ordering::Acquire))
     }
 
     /// The in-flight decompile task for `descriptor`, if any.
@@ -664,10 +711,12 @@ impl TaskManager {
                     });
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => still_pending.push(task),
-                // Unreachable while delivery is unconditional (the
-                // receiver lives as long as the InFlight slot), but
-                // kept defensive: a vanished worker must never wedge
-                // the slot forever.
+                // Unreachable for a job that ran (delivery is
+                // unconditional) — but a job dropped by `pump` while still
+                // queued lands here, and must retire as a discarded
+                // completion, exactly as a superseded result would. Also
+                // kept defensive for a vanished worker, which must never
+                // wedge the slot forever.
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     done.push(CompletedTask {
                         id: task.id,
@@ -676,7 +725,8 @@ impl TaskManager {
                         label: std::mem::take(&mut task.label),
                         outcome: TaskOutcome::Failed("worker exited without a result".into()),
                         elapsed: task.started.elapsed(),
-                        stale: task.discarded.load(Ordering::Acquire),
+                        stale: task.discarded.load(Ordering::Acquire)
+                            || task.generation != self.generation,
                     });
                 }
             }
@@ -1006,7 +1056,39 @@ mod tests {
         let ctx = ctx();
         let apk = std::path::Path::new("nonexistent_fixture_for_test.apk");
         let _id = mgr.spawn_findrefs_class(apk, "Lcom/foo/Bar;", &ctx);
-        assert!(mgr.findrefs_class_running());
+        assert!(mgr.references_surface_busy());
+    }
+
+    /// The REFERENCES placeholder asks `references_surface_busy`, which counts
+    /// only tasks whose result will actually land: a superseded/cancelled
+    /// scan must stop claiming "collecting references…" (the lane is shared,
+    /// so a newer callee/class-strings request keeps it busy).
+    #[test]
+    fn superseded_references_task_is_not_busy() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let apk = Path::new("nonexistent_fixture_for_test.apk");
+
+        let refs = mgr.spawn_findrefs_class(apk, "Lcom/foo/Bar;", &ctx);
+        assert!(mgr.references_surface_busy(), "the request is live");
+
+        // A callee scan on the same lane supersedes it — still busy, because
+        // the newer request will replace the tab's content.
+        let callees = mgr.spawn_callees(apk, "Lcom/foo/Bar;", "m", &ctx);
+        assert_ne!(callees, refs);
+        assert!(mgr.references_surface_busy(), "the newer request is live");
+
+        // Cancel the newest request: both tasks are still physically in
+        // flight, but neither result will ever be applied.
+        mgr.cancel(callees);
+        assert!(
+            mgr.has_in_flight(),
+            "the tasks are still in flight (supersede is not cancellation)"
+        );
+        assert!(
+            !mgr.references_surface_busy(),
+            "nothing live is left to collect references"
+        );
     }
 
     /// `cancel_kind` removes every in-flight FindRefs task. After
@@ -1408,5 +1490,172 @@ mod tests {
         done += mgr.poll().len();
         assert_eq!(done, total, "every queued job eventually runs");
         assert_eq!(mgr.queued_count(), 0);
+    }
+
+    /// Fill every worker slot with a job that blocks until the returned
+    /// senders fire. The cap is then exactly saturated, so anything
+    /// submitted afterwards is queued — no sleep decides that.
+    fn fill_all_slots(
+        mgr: &mut TaskManager,
+        ctx: &egui::Context,
+    ) -> Vec<std::sync::mpsc::Sender<()>> {
+        let mut release = Vec::with_capacity(MAX_TASK_THREADS);
+        for i in 0..MAX_TASK_THREADS {
+            let (_id, tx) = gated(
+                mgr,
+                TaskKind::DecompileClass,
+                &format!("fill{i}"),
+                ok_source(&format!("fill{i}")),
+                ctx,
+            );
+            release.push(tx);
+        }
+        assert_eq!(mgr.active.load(Ordering::Acquire), MAX_TASK_THREADS);
+        assert_eq!(mgr.queued_count(), 0, "every filler got a thread");
+        release
+    }
+
+    /// Poll until nothing is in flight (including jobs admitted by `pump`
+    /// during the drain), then wait for the last worker threads to drop
+    /// their slots. Returns every completion observed.
+    fn drain_all(mgr: &mut TaskManager) -> Vec<CompletedTask> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut done = Vec::new();
+        loop {
+            done.extend(mgr.poll());
+            if !mgr.has_in_flight() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        while mgr.active.load(Ordering::Acquire) != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        done
+    }
+
+    /// A job superseded while it is still *queued* must never start: the
+    /// queue must not spend a worker (and a whole-artifact engine scan) on
+    /// a result that will be discarded on arrival — and it must not sit in
+    /// front of the request the user actually asked for.
+    #[test]
+    fn superseded_queued_job_never_starts() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let release = fill_all_slots(&mut mgr, &ctx);
+
+        // Queued behind the saturated cap: one loser, then one wanted job.
+        let ran_dead = Arc::new(AtomicUsize::new(0));
+        let ran_live = Arc::new(AtomicUsize::new(0));
+        let dead = {
+            let ran = Arc::clone(&ran_dead);
+            mgr.submit(
+                TaskKind::FindRefs,
+                "dead",
+                move || {
+                    ran.fetch_add(1, Ordering::AcqRel);
+                    TaskOutcome::Search(asc_core::SearchReport::empty())
+                },
+                &ctx,
+            )
+        };
+        let live = {
+            let ran = Arc::clone(&ran_live);
+            mgr.submit(
+                TaskKind::FindRefs,
+                "live",
+                move || {
+                    ran.fetch_add(1, Ordering::AcqRel);
+                    TaskOutcome::Search(asc_core::SearchReport::empty())
+                },
+                &ctx,
+            )
+        };
+        assert_eq!(mgr.queued_count(), 2, "both wait for a free slot");
+        mgr.cancel(dead);
+
+        for tx in &release {
+            let _ = tx.send(());
+        }
+        let done = drain_all(&mut mgr);
+
+        assert_eq!(
+            ran_dead.load(Ordering::Acquire),
+            0,
+            "a superseded queued job must never execute"
+        );
+        assert_eq!(
+            ran_live.load(Ordering::Acquire),
+            1,
+            "the live job must still run"
+        );
+        assert!(
+            done.iter()
+                .find(|t| t.id == dead)
+                .expect("dropped job retires")
+                .stale,
+            "the dropped job retires as a discarded completion"
+        );
+        assert!(
+            !done
+                .iter()
+                .find(|t| t.id == live)
+                .expect("live job completes")
+                .stale,
+            "the live job's result must apply"
+        );
+        assert_eq!(mgr.in_flight_count(), 0, "no task slot leaks");
+        assert_eq!(mgr.queued_count(), 0, "the queue drains");
+        assert_eq!(
+            mgr.active.load(Ordering::Acquire),
+            0,
+            "no worker slot leaks"
+        );
+    }
+
+    /// Same rule driven by the generation: a job queued against a session
+    /// that was then reloaded (APK opened) must not burn a worker.
+    #[test]
+    fn generation_bump_skips_queued_job() {
+        let mut mgr = TaskManager::new();
+        let ctx = ctx();
+        let release = fill_all_slots(&mut mgr, &ctx);
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let old = {
+            let ran = Arc::clone(&ran);
+            mgr.submit(
+                TaskKind::FindRefs,
+                "old-session",
+                move || {
+                    ran.fetch_add(1, Ordering::AcqRel);
+                    TaskOutcome::Search(asc_core::SearchReport::empty())
+                },
+                &ctx,
+            )
+        };
+        assert_eq!(mgr.queued_count(), 1);
+        let generation = mgr.bump_generation();
+        assert_eq!(generation, mgr.generation());
+
+        for tx in &release {
+            let _ = tx.send(());
+        }
+        let done = drain_all(&mut mgr);
+
+        assert_eq!(
+            ran.load(Ordering::Acquire),
+            0,
+            "an old-generation queued job must never execute"
+        );
+        let retired = done
+            .iter()
+            .find(|t| t.id == old)
+            .expect("old-generation job retires");
+        assert!(retired.stale, "its completion must be stale");
+        assert_eq!(retired.generation, SessionGeneration::INITIAL);
+        assert_eq!(mgr.in_flight_count(), 0);
+        assert_eq!(mgr.queued_count(), 0);
+        assert_eq!(mgr.active.load(Ordering::Acquire), 0);
     }
 }

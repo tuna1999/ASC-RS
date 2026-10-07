@@ -14,7 +14,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use asc_apk::{Apk, InflateLimits, ZipView};
+use asc_apk::{Apk, Compression, InflateLimits, ZipView};
 use serde::Serialize;
 
 use crate::pipeline::CoreError;
@@ -23,8 +23,10 @@ use crate::pipeline::CoreError;
 const MEMBER_CAP: usize = 256 << 20;
 /// Largest single entry inside a member.
 const INNER_CAP: usize = 256 << 20;
-/// Total uncompressed member bytes analyzed per container (work bound;
-/// memory stays per-member because each buffer is dropped after use).
+/// Aggregate inflate-work budget per container: the members analyzed may
+/// cost at most this many bytes of declared-uncompressed + compressed
+/// input (see [`run_xapk_with_budget`]). Memory stays per-member because
+/// each buffer is dropped after use.
 const TOTAL_BUDGET: usize = 1 << 30;
 /// Cap on recorded per-member native-lib names.
 const MAX_LIBS: usize = 500;
@@ -197,14 +199,27 @@ pub fn run_xapk(path: &Path) -> Result<XapkReport, CoreError> {
     run_xapk_with_budget(path, TOTAL_BUDGET)
 }
 
-/// Same, with a caller-chosen aggregate work budget (uncompressed
-/// member bytes analyzed). The budget bounds total inflate work, not
-/// resident memory: each member buffer is dropped after analysis.
+/// Same, with a caller-chosen aggregate work budget. The budget bounds
+/// total inflate work, not resident memory: each member buffer is dropped
+/// after analysis.
 ///
-/// The budget is charged from the central-directory declared size
-/// *before* each read and is never refunded, so a member that fails to
-/// inflate still consumes its share — a container of malformed members
-/// cannot bypass the bound by failing.
+/// Each member is charged *before* its read and the charge is never
+/// refunded, so a member that fails to inflate still consumes its share — a
+/// container of malformed members cannot bypass the bound by failing.
+///
+/// The charge is the real work the read can cost, not just the bytes handed
+/// to the analyzer:
+///
+/// * inflate **output** is bounded by the declared uncompressed size plus
+///   one byte (`asc_apk`'s `inflate_into_vec` never asks the decoder for
+///   more), so a member declaring 0 bytes cannot expand to megabytes; and
+/// * a DEFLATE decoder may also walk its **input** without producing output
+///   (a stream of empty blocks), bounded by the compressed size.
+///
+/// So the charge is `declared + compressed` for a DEFLATE member and
+/// `declared` for a STORED one (a borrowed slice — no inflate work), and N
+/// under-declared members cannot buy N payloads' worth of decoding against a
+/// budget that barely moves.
 pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkReport, CoreError> {
     let apk = Apk::open(path)?;
     let mut report = XapkReport {
@@ -226,7 +241,21 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
             report.complete = false;
             continue;
         }
-        if budget_left < e.uncompressed_size as usize {
+        // Work this member can cost, charged BEFORE the read:
+        //  * inflate OUTPUT is bounded by the declared size (+1 byte), which
+        //    `inflate_into_vec` guarantees;
+        //  * a DEFLATE decoder can also walk its INPUT without producing
+        //    output (a stream of empty blocks), and that walk is bounded by
+        //    the compressed size.
+        // Charging both is what makes the aggregate a bound on real work:
+        // charging the declaration alone let N members that declare 0 bytes
+        // buy N compressed payloads' worth of decoding for free. A STORED
+        // entry is a borrowed slice — no inflate work at all.
+        let charge = (e.uncompressed_size as usize).saturating_add(match e.method {
+            Compression::Deflated => e.compressed_size as usize,
+            Compression::Stored => 0,
+        });
+        if budget_left < charge {
             report.errors.push(format!(
                 "aggregate budget exceeded ({} MiB) before {}; {} of {} members analyzed",
                 total_budget >> 20,
@@ -237,12 +266,11 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
             report.complete = false;
             break;
         }
-        // Charge the work budget BEFORE reading. A member that fails to
-        // inflate still cost the inflater real work, and a failed attempt
-        // must not be refundable: otherwise a container full of broken
-        // members makes the inflater churn with the aggregate counter
-        // barely moving.
-        budget_left -= e.uncompressed_size as usize;
+        // A member that fails to inflate still cost the inflater real work,
+        // and a failed attempt must not be refundable: otherwise a container
+        // full of broken members makes the inflater churn with the aggregate
+        // counter barely moving.
+        budget_left -= charge;
         let bytes = match apk.read_entry_with_limits(&e, cap.unwrap_or_default()) {
             Ok(b) => b,
             Err(x) => {

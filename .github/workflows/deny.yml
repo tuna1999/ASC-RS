@@ -1,0 +1,43 @@
+name: Dependency policy
+
+# Advisories, licenses, sources and duplicate bans over the whole dependency
+# graph, via `deny.toml`.
+#
+# Deliberately its OWN workflow instead of a job in `ci.yml`:
+#   * it is network-sensitive (clones the RustSec advisory DB, reads the
+#     crates.io index), and an upstream outage must not redden the
+#     build/test gates for a commit that changed nothing;
+#   * advisories appear on their own schedule (a crate locked months ago can
+#     be disclosed today), so the weekly run below is what keeps the
+#     already-shipped lock honest.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+# Read-only: the check reads the repository and the network only.
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo-deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: cargo-deny check
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+          manifest-path: ./Cargo.toml
+          # The action ships cargo-deny 0.20.2 on a rust:1.85 container; make
+          # sure the container's cargo can parse this workspace (edition
+          # 2024, resolver 3, `rust-version = 1.95`).
+          rust-version: stable

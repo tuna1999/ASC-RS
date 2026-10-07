@@ -181,7 +181,7 @@ impl AscApp {
     fn draw_references(&mut self, ui: &mut egui::Ui) {
         let rows = self.references.as_ref().map_or(&[][..], |r| &r.rows[..]);
         if rows.is_empty() {
-            ui.weak(if self.tasks.findrefs_class_running() {
+            ui.weak(if self.tasks.references_surface_busy() {
                 "collecting references…"
             } else {
                 "no references — Analysis ▸ Find references to the open class"

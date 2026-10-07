@@ -9,7 +9,7 @@
 name = "asc-fuzz"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 description = "Deterministic mutation fuzzer for ASC-RS (DEX, ZIP, RefWalker, Rebuild)"
 publish = false
 

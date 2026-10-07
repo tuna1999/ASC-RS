@@ -22,6 +22,19 @@ fn write_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
     std::fs::write(path, zip_bytes(entries)).unwrap();
 }
 
+/// Same, but every entry is DEFLATE-compressed (the payloads used with
+/// this are highly compressible, so the container stays tiny on disk).
+fn zip_bytes_deflated(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in entries {
+        w.start_file(*name, opts).unwrap();
+        w.write_all(data).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
 /// Rewrite every central-directory record's declared uncompressed size.
 /// Used to manufacture members whose header lies about the payload size
 /// (both `Apk` and `ZipView` trust the central directory for it).
@@ -275,6 +288,100 @@ fn failed_read_still_consumes_aggregate_budget() {
         "exactly one failed read before the budget stops traversal: {:?}",
         r.errors
     );
+    let _ = std::fs::remove_file(&xapk);
+}
+
+/// The aggregate budget is a *work* bound, not only an output bound.
+///
+/// Every member here declares 0 uncompressed bytes in the central directory
+/// while holding a 512 KiB DEFLATE payload. The charge must cover what the
+/// read can actually cost — the declared output (+1 byte) *and* the
+/// compressed input a DEFLATE decoder may walk without producing output —
+/// otherwise a container of N such members buys N payloads' worth of
+/// decoding against a budget that barely moves.
+#[test]
+fn under_declared_deflate_members_cannot_buy_uncharged_work() {
+    const MEMBERS: usize = 4;
+    let owned: Vec<(String, Vec<u8>)> = (0..MEMBERS)
+        .map(|i| (format!("m{i}.apk"), vec![0u8; 512 * 1024]))
+        .collect();
+    let entries: Vec<(&str, Vec<u8>)> =
+        owned.iter().map(|(n, d)| (n.as_str(), d.clone())).collect();
+    let mut container = zip_bytes_deflated(&entries);
+    // Every member now claims 0 uncompressed bytes.
+    override_cd_uncompressed_size(&mut container, 0);
+    let xapk = std::env::temp_dir().join("asc-xapk-underdeclared.zip");
+    std::fs::write(&xapk, &container).unwrap();
+
+    // What one member must cost: declared (0) + the compressed input.
+    let charge = {
+        let apk = asc_apk::Apk::open(&xapk).expect("open");
+        let e = apk.entry("m0.apk").expect("member entry");
+        assert_eq!(e.uncompressed_size, 0, "the lie must be in place");
+        assert!(
+            e.compressed_size > 0 && (e.compressed_size as usize) < 512 * 1024,
+            "fixture must be a small payload that expands hugely, got {}",
+            e.compressed_size
+        );
+        e.compressed_size as usize
+    };
+
+    // (a) One byte short of that charge: the member is never read at all.
+    let r = asc_core::xapk::run_xapk_with_budget(&xapk, charge - 1).expect("run");
+    assert!(r.members.is_empty());
+    assert_eq!(
+        r.errors
+            .iter()
+            .filter(|e| e.contains("read failed"))
+            .count(),
+        0,
+        "an unaffordable member must not be inflated: {:?}",
+        r.errors
+    );
+    assert!(
+        r.errors
+            .iter()
+            .any(|e| e.contains("aggregate budget exceeded") && e.contains("m0.apk")),
+        "the charge must cover the compressed input the decoder walks: {:?}",
+        r.errors
+    );
+
+    // (b) With every charge paid, each attempt still stops exactly one byte
+    //     past its declaration (the inflater bound, independently).
+    let r = asc_core::xapk::run_xapk_with_budget(&xapk, MEMBERS * charge + MEMBERS).expect("run");
+    let failed: Vec<&String> = r
+        .errors
+        .iter()
+        .filter(|e| e.contains("read failed"))
+        .collect();
+    assert_eq!(
+        failed.len(),
+        MEMBERS,
+        "every member is attempted: {:?}",
+        r.errors
+    );
+    for e in &failed {
+        assert!(
+            e.contains("declared 0, produced 1"),
+            "an under-declared member must stop one byte past its declaration, got {e}"
+        );
+    }
+    assert!(r.members.is_empty(), "no member can be analyzed");
+    let _ = std::fs::remove_file(&xapk);
+}
+
+/// The tighter stop point must not disturb a truthful DEFLATE member:
+/// it still inflates to exactly its declared size and gets analyzed.
+#[test]
+fn deflated_member_still_reads_at_its_declared_size() {
+    let payload = member_apk();
+    let container = zip_bytes_deflated(&[("base.apk", payload)]);
+    let xapk = std::env::temp_dir().join("asc-xapk-true-deflate.zip");
+    std::fs::write(&xapk, &container).unwrap();
+    let r = asc_core::xapk::run_xapk_with_budget(&xapk, 1 << 20).expect("run");
+    assert!(r.complete, "errors: {:?}", r.errors);
+    assert_eq!(r.members.len(), 1, "the member is analyzed");
+    assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
     let _ = std::fs::remove_file(&xapk);
 }
 

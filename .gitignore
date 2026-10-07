@@ -33,6 +33,7 @@ corpus/
 # --- fuzzer runtime state (seeds/ and regress/ ARE tracked) ---
 crashes/
 fuzz/crashes/
+# (fuzz/corpus-out/, fuzz/crashes/, fuzz/target/ are ignored by fuzz/.gitignore)
 
 # --- debugging / session scratch ---
 gui-check*.png

@@ -15,6 +15,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: every job here only reads the repository (checkout) and
+# uploads build artifacts through the job's runtime token, so `contents:
+# read` is the whole requirement. Granting more per-job is done inline, and
+# only where a job truly needs it (no job here does).
+permissions:
+  contents: read
+
 jobs:
   lint-build-test:
     name: lint + build + test (${{ matrix.os }})
@@ -29,21 +36,27 @@ jobs:
             artifact: asc-rs-windows-x64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Reference oracle lives at reference/asc/ but is gitignored.
           # Golden fixtures are committed; corpus APKs are downloaded below.
           fetch-depth: 0
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (latest stable)
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          # Workspace rust-version is 1.93 (droidsaw-dex 2.0.0, egui 0.36);
-          # use whatever stable rustup ships, which must be >= that.
+          # This lane deliberately tracks the LATEST stable, so a new
+          # compiler/clippy lint shows up here instead of in a release.
+          # The MSRV floor (workspace `rust-version`) is covered by the
+          # `msrv` job below; releases pin their own toolchain.
+          #
+          # `toolchain` is set explicitly because the action's ref is a
+          # commit SHA, which the action cannot read a version from.
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo registry & build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
 
@@ -150,7 +163,7 @@ jobs:
 
       - name: Upload release binaries
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -164,13 +177,16 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (latest stable)
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          # Explicit because the action's ref is a SHA (see the other lane).
+          toolchain: stable
 
       - name: Cache cargo registry & build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
             .
@@ -219,3 +235,41 @@ jobs:
               exit 2
             fi
           done
+
+  # The `lint-build-test` lane above runs on whatever `stable` is today, so
+  # a genuine MSRV break (a dependency or a stdlib/edition feature newer than
+  # the workspace's `rust-version`) can only be discovered by a user. This
+  # lane pins the declared floor and compiles the whole workspace with it.
+  #
+  # `cargo check --all-targets` (not the test suite) is deliberate: the
+  # question is "does this still build on the oldest supported compiler",
+  # which needs no corpus, GPU or release build, and the full behavioural
+  # coverage already runs on both stable legs.
+  msrv:
+    name: msrv (pinned, rust-version floor)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install pinned MSRV toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          # Keep in lockstep with `[workspace.package] rust-version`
+          # (1.95: the egui 0.36 stack requires it — `cargo metadata
+          # --format-version 1` reports `rust_version` 1.95 for
+          # eframe/egui/epaint/…).
+          toolchain: "1.95.0"
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config
+
+      - name: cargo check (workspace, all targets/features)
+        run: cargo check --workspace --all-targets --all-features

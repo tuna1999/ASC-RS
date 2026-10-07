@@ -16,9 +16,10 @@ use std::io::Read;
 /// preventing a hostile archive from forcing a multi-gigabyte allocation.
 pub const DEFAULT_MAX_OUTPUT: usize = 1 << 30;
 
-/// Chunk size used for streaming inflation. Smaller than the caps so an
-/// over-long stream is rejected promptly: within at most one extra chunk
-/// of growth past the declared uncompressed size.
+/// Chunk size used for streaming inflation. The last read of a stream is
+/// capped at one byte past the declared uncompressed size, so an
+/// over-long stream is rejected after at most one extra byte of output —
+/// the declaration (not this chunk) is what bounds the inflate work.
 pub const INFLATE_CHUNK: usize = 64 * 1024;
 
 /// Limits that govern inflate output size.
@@ -61,6 +62,10 @@ impl InflateLimits {
 /// * `limits` caps the output size; `TooLarge` is returned if the
 ///   inflater exceeds `limits.max_output` at any point.
 ///
+/// Work bound: the decoder is never asked to produce more than
+/// `expected_len + 1` bytes, so a lying declaration bounds this call's
+/// inflate work — callers that reserve the declared size are honest.
+///
 /// Stream corruption yields [`crate::ApkError::Deflate`]. Length
 /// mismatch yields [`crate::ApkError::SizeMismatch`].
 pub(crate) fn inflate_into_vec(
@@ -82,15 +87,24 @@ pub(crate) fn inflate_into_vec(
 
     // Chunked loop that fails the moment the stream produces more than
     // the central directory declared. `expected_len <= limits.max_output`
-    // was checked above, so this is the tighter bound: a lying
-    // `uncompressed_size` (e.g. 1 byte declared, hundreds of MiB actual)
-    // now stops within one chunk instead of inflating the whole payload
-    // — which is what kept the declared-size reservation in
-    // `asc_core::budget` honest. `SizeMismatch.produced` is the count
-    // observed at the stop point, not the full stream length.
+    // was checked above, so this is the tighter bound. Each read is
+    // capped at `expected_len + 1` bytes of output, so the total output
+    // the decoder is ever asked to produce is bounded by the declaration
+    // plus ONE byte — not one 64 KiB chunk. That is what makes the
+    // declared-size reservations in `asc_core::budget` and
+    // `asc_core::xapk` charge the real inflate work: a container of
+    // members that each declare 0 bytes and expand to megabytes can no
+    // longer spend 64 KiB of uncharged inflate work per member.
+    //
+    // `SizeMismatch.produced` is therefore exactly `declared + 1` when
+    // the stream is longer than declared (and the count observed at the
+    // stop point, never the full stream length).
     let mut chunk = vec![0u8; INFLATE_CHUNK];
     loop {
-        let cap = INFLATE_CHUNK.min(chunk.len());
+        // `out.len() <= expected_len` holds by construction, so this is
+        // at least 1; saturating so a bogus `expected_len == usize::MAX`
+        // cannot overflow into a panic.
+        let cap = INFLATE_CHUNK.min(expected_len.saturating_sub(out.len()).saturating_add(1));
         let n = match decoder.read(&mut chunk[..cap]) {
             Ok(n) => n,
             Err(e) => return Err(crate::ApkError::Deflate(e.to_string())),
