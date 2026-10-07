@@ -22,6 +22,10 @@ pub struct SelfcheckReport {
     pub apk: String,
     pub dex_count: usize,
     pub class_count: usize,
+    /// Non-empty when class enumeration was PARTIAL (a DEX or class_def had
+    /// to be skipped) — see [`crate::ClassList::warnings`]. A selfcheck on a
+    /// clean fixture must not report a partial class list as success.
+    pub class_warnings: Vec<String>,
     pub findrefs_query: String,
     pub findrefs_caller_lines: usize,
     pub findrefs_complete: bool,
@@ -44,18 +48,25 @@ pub struct SelfcheckReport {
 /// (verified to exist by `asc-cli`).
 const DEFAULT_TARGET_CLASS: &str = "Lcom/google/android/material/timepicker/ClockFaceView;";
 
-/// Default findrefs pattern — substring match against any string
-/// referenced from the chosen target.
-const DEFAULT_FINDREFS_PATTERN: &str = "ClockFace";
+/// Default findrefs pattern — substring match against the const-string
+/// payloads referenced by the DEX. This is the frozen oracle/golden
+/// query for `workload.apk` (`findrefs_string_workload` in
+/// `tests/fixtures/golden/cases.json`), which the parity suite pins at
+/// 28 result lines. It must keep matching: a selfcheck whose query
+/// returns nothing proves nothing about the scanner (the earlier
+/// `"ClockFace"` pattern returned zero hits on this fixture, so an
+/// engine that returned empty reports for everything still passed).
+const DEFAULT_FINDREFS_PATTERN: &str = "Context";
 
 /// Run the full selfcheck path against `apk`.
 ///
 /// Returns `Err` unless every engine step actually *worked*: the session
-/// must open, the class list must be non-empty, the findrefs scan must
-/// complete without per-DEX errors, and getclass must produce source.
-/// Engine failures are never flattened into a zero-count "success" — the
-/// binary turns any `Err` into a non-zero exit code, and CI relies on that
-/// (see `.github/workflows/ci.yml`'s Selfcheck step).
+/// must open, the class list must be non-empty **and complete**, the
+/// findrefs scan must complete without per-DEX errors **and find at least
+/// one match for its positive-control query**, and getclass must produce
+/// source. Engine failures are never flattened into a zero-count
+/// "success" — the binary turns any `Err` into a non-zero exit code, and
+/// CI relies on that (see `.github/workflows/ci.yml`'s Selfcheck step).
 ///
 /// Manifest absence is tolerated (the synthetic workload fixture has no
 /// `AndroidManifest.xml`); a manifest that is present but undecodable is
@@ -63,7 +74,9 @@ const DEFAULT_FINDREFS_PATTERN: &str = "ClockFace";
 pub fn run_selfcheck(apk: &Path) -> Result<SelfcheckReport, SelfcheckError> {
     let session = WorkspaceSession::open(apk)?;
     let dex_count = session.dex_entries().len();
-    let class_count = session.all_classes()?.classes.len();
+    // Keep the warnings: a partial class list must not read as success.
+    let classes = session.all_classes()?;
+    let class_count = classes.classes.len();
 
     // One findrefs: substring search. A hard engine error propagates.
     let query = Query::string(DEFAULT_FINDREFS_PATTERN);
@@ -85,6 +98,7 @@ pub fn run_selfcheck(apk: &Path) -> Result<SelfcheckReport, SelfcheckError> {
         apk: apk.display().to_string(),
         dex_count,
         class_count,
+        class_warnings: classes.warnings,
         findrefs_query: label,
         findrefs_caller_lines: find_report.total_lines(),
         findrefs_complete: find_report.complete,
@@ -130,11 +144,20 @@ impl SelfcheckReport {
         if self.class_count == 0 {
             return fail("class enumeration produced no classes");
         }
+        if !self.class_warnings.is_empty() {
+            return fail("class enumeration was partial");
+        }
         if !self.findrefs_complete {
             return fail("findrefs did not scan every DEX");
         }
         if self.findrefs_errors != 0 {
             return fail("findrefs reported per-DEX errors");
+        }
+        // `complete`/`errors` only say the scan ran; they say nothing about
+        // whether it found anything. Without this, an engine that returned
+        // empty reports for every query would look healthy.
+        if self.findrefs_caller_lines == 0 {
+            return fail("findrefs positive-control query returned no matches");
         }
         if self.decompiled_class.is_empty() || self.decompiled_source_bytes == 0 {
             return fail("getclass produced no source");
@@ -149,6 +172,16 @@ impl std::fmt::Display for SelfcheckReport {
         writeln!(f, "  apk               = {}", self.apk)?;
         writeln!(f, "  dex_count         = {}", self.dex_count)?;
         writeln!(f, "  class_count       = {}", self.class_count)?;
+        if !self.class_warnings.is_empty() {
+            writeln!(
+                f,
+                "  class_warnings    = {} (partial enumeration)",
+                self.class_warnings.len()
+            )?;
+            for w in &self.class_warnings {
+                writeln!(f, "    - {w}")?;
+            }
+        }
         writeln!(
             f,
             "  findrefs          = query={}, lines={}, complete={}, errors={}",
@@ -186,7 +219,8 @@ mod tests {
             apk: "fixture.apk".into(),
             dex_count,
             class_count,
-            findrefs_query: "string \"ClockFace\"".into(),
+            class_warnings: Vec::new(),
+            findrefs_query: "string \"Context\"".into(),
             findrefs_caller_lines: 3,
             findrefs_complete: true,
             findrefs_errors: 0,
@@ -215,6 +249,21 @@ mod tests {
         let mut r = report(1, 500);
         r.findrefs_errors = 2;
         assert!(r.verify().is_err(), "findrefs reported errors");
+
+        // `complete`/`errors` alone do not prove the scan found anything:
+        // an engine that returns an empty report for every query satisfies
+        // both. The workload's frozen positive control ("Context") has 28
+        // hits, so zero hits means the scanner is broken.
+        let mut r = report(1, 500);
+        r.findrefs_caller_lines = 0;
+        assert!(r.verify().is_err(), "positive control matched nothing");
+
+        // A partial class list (a DEX or class_def skipped) is not a
+        // complete enumeration of a clean fixture, however many classes
+        // were read.
+        let mut r = report(1, 500);
+        r.class_warnings = vec!["classes2.dex: parse failed (bad header)".into()];
+        assert!(r.verify().is_err(), "partial class enumeration");
 
         let mut r = report(1, 500);
         r.decompiled_source_bytes = 0;

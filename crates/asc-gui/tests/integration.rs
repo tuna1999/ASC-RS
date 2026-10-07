@@ -3,19 +3,43 @@
 //! Verifies the same flow the `--selfcheck` CLI flag runs: open
 //! `corpus/apk/workload.apk` → session → class list → one findrefs
 //! → one getclass → manifest parse. Skips when the corpus fixture is
-//! missing (so a fresh checkout still builds).
+//! missing (so a fresh checkout still builds) unless `ASC_REQUIRE_CORPUS`
+//! lists it, in which case a missing fixture fails.
 
-use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+
+/// `corpus/apk/workload.apk`, or `None` when it is missing — except under
+/// `ASC_REQUIRE_CORPUS`, where CI has just recreated the fixture and a
+/// missing one must FAIL instead of silently skipping (mirrors the
+/// helper in `src/app/tests.rs`; see docs/CORPUS.md).
+fn workload_apk() -> Option<PathBuf> {
+    let apk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    if !apk.exists() {
+        let required = std::env::var("ASC_REQUIRE_CORPUS").is_ok_and(|req| {
+            req.split(',').any(|f| {
+                let f = f.trim();
+                !f.is_empty()
+                    && apk
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with(f))
+            })
+        });
+        if required {
+            panic!(
+                "ASC_REQUIRE_CORPUS is set but fixture missing: {}",
+                apk.display()
+            );
+        }
+        eprintln!("corpus fixture missing; skipping");
+        return None;
+    }
+    Some(apk)
+}
 
 #[test]
 fn selfcheck_on_workload_apk() {
-    let apk = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../corpus/apk")
-        .join("workload.apk");
-    if !apk.exists() {
-        eprintln!("corpus fixture missing; skipping");
-        return;
-    }
+    let Some(apk) = workload_apk() else { return };
     let report = asc_gui::run_selfcheck(&apk).expect("selfcheck should succeed");
     assert!(report.dex_count >= 1, "expected at least one DEX");
     assert!(
@@ -23,9 +47,20 @@ fn selfcheck_on_workload_apk() {
         "expected non-empty class list, got {}",
         report.class_count
     );
+    assert!(
+        report.class_warnings.is_empty(),
+        "clean fixture: {:?}",
+        report.class_warnings
+    );
     assert_eq!(
-        report.findrefs_query, "string \"ClockFace\"",
+        report.findrefs_query, "string \"Context\"",
         "selfcheck query label changed unexpectedly"
+    );
+    // The query is the frozen golden positive control for this fixture:
+    // `findrefs_string_workload` in tests/fixtures/golden/cases.json.
+    assert!(
+        report.findrefs_caller_lines > 0,
+        "the positive-control query must match something"
     );
     // The workload corpus is synthetic (no AndroidManifest.xml), so
     // manifest fields may be None. Engine calls must still succeed.
@@ -60,13 +95,7 @@ fn selfcheck_on_workload_apk() {
 
 #[test]
 fn open_session_then_list_classes() {
-    let apk = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../corpus/apk")
-        .join("workload.apk");
-    if !apk.exists() {
-        eprintln!("corpus fixture missing; skipping");
-        return;
-    }
+    let Some(apk) = workload_apk() else { return };
     let session = asc_gui::WorkspaceSession::open(&apk).expect("open");
     assert!(!session.dex_entries().is_empty());
     let classes = session.all_classes().expect("classes");
@@ -90,13 +119,7 @@ fn open_session_then_list_classes() {
 #[test]
 fn findrefs_history_caps_at_max() {
     use asc_gui::{FindRefsHistoryEntry, MAX_FINDREFS_HISTORY, WorkspaceSession};
-    let apk = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../corpus/apk")
-        .join("workload.apk");
-    if !apk.exists() {
-        eprintln!("corpus fixture missing; skipping");
-        return;
-    }
+    let Some(apk) = workload_apk() else { return };
     let session = WorkspaceSession::open(&apk).expect("open");
     // Push more than the cap; expect the oldest to be evicted.
     for i in 0..(MAX_FINDREFS_HISTORY + 5) {
@@ -113,5 +136,30 @@ fn findrefs_history_caps_at_max() {
     assert_eq!(
         h.last().unwrap().label,
         format!("q-{}", MAX_FINDREFS_HISTORY + 4)
+    );
+}
+
+/// The exit-code seam CI's Selfcheck step depends on: `--selfcheck` must
+/// exit non-zero whenever `run_selfcheck` returns `Err`. The unit tests
+/// cover *which* reports fail `verify()`; this proves the binary really
+/// turns such a failure into a non-zero status instead of a green run.
+#[test]
+fn selfcheck_binary_exits_nonzero_on_an_unusable_artifact() {
+    let missing =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/no-such-fixture.apk");
+    let out = Command::new(env!("CARGO_BIN_EXE_asc-gui"))
+        .arg("--selfcheck")
+        .arg(&missing)
+        .output()
+        .expect("spawn asc-gui --selfcheck");
+    assert!(
+        !out.status.success(),
+        "an unreadable artifact must not pass the selfcheck (status {:?})",
+        out.status
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("selfcheck failed"),
+        "expected a diagnostic on stderr, got {stderr:?}"
     );
 }

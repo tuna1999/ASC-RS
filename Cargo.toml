@@ -17,7 +17,7 @@ members = [
 exclude = ["fuzz", "reference/asc"]
 
 [workspace.package]
-version = "0.15.3"
+version = "0.15.4"
 edition = "2024"
 # Lowest compiler that can build EVERY workspace member. 1.95 is set by
 # the egui 0.36 stack (eframe/egui/epaint/egui_kittest/… each declare
@@ -25,6 +25,12 @@ edition = "2024"
 # lower. CI's `msrv` lane pins exactly this version.
 rust-version = "1.95"
 license = "Apache-2.0"
+# Every crate here is an internal layer of the `asc-rs` / `asc-gui` binaries,
+# not a published library: no supported SemVer API is promised, and the
+# releases shipped are the binaries + source ZIP. Declaring it keeps
+# `cargo publish` from quietly succeeding and stops an added public item from
+# being read as a library-compatibility event (see AGENTS.md → Versioning).
+publish = false
 
 [workspace.dependencies]
 # internal crates

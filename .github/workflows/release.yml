@@ -37,33 +37,21 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-2022]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Build artefacts from the TAG's commit, never from whatever ref
           # the workflow happened to be dispatched on: a manual
           # workflow_dispatch from a branch would otherwise publish branch
           # HEAD under the tag's name (the version string alone does not
-          # prove the commit).
-          ref: ${{ env.RELEASE_TAG }}
+          # prove the commit). The ref is namespace-qualified because a
+          # BRANCH named `vX.Y.Z` satisfies a bare short name — both for
+          # `git rev-parse` and for actions/checkout's own lookup.
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
-      - name: Verify checkout is the release tag's commit
+      - name: Verify the checkout is the release tag's commit
         shell: bash
-        run: |
-          set -euo pipefail
-          head_sha=$(git rev-parse HEAD)
-          tag_sha=$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)
-          [ -n "$tag_sha" ] || { echo "::error::$RELEASE_TAG is not a known tag"; exit 1; }
-          [ "$head_sha" = "$tag_sha" ] || {
-            echo "::error::checked out $head_sha but $RELEASE_TAG is $tag_sha"; exit 1;
-          }
-          echo "building $RELEASE_TAG at $head_sha"
-
-      - name: Verify tag matches Cargo.toml version
-        shell: bash
-        run: |
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          [ "v$v" = "$RELEASE_TAG" ] || { echo "::error::tag $RELEASE_TAG != Cargo.toml version v$v"; exit 1; }
+        run: bash scripts/verify_release_tag.sh "$RELEASE_TAG"
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -188,24 +176,16 @@ jobs:
             bin_prefix: '.exe'
             artifact: asc-rs-windows-x64
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Same source-of-truth rule as `gates`: the published binaries
           # must be a function of the tag's commit.
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
-      - name: Verify checkout is the release tag's commit
+      - name: Verify the checkout is the release tag's commit
         shell: bash
-        run: |
-          set -euo pipefail
-          head_sha=$(git rev-parse HEAD)
-          tag_sha=$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)
-          [ -n "$tag_sha" ] || { echo "::error::$RELEASE_TAG is not a known tag"; exit 1; }
-          [ "$head_sha" = "$tag_sha" ] || {
-            echo "::error::checked out $head_sha but $RELEASE_TAG is $tag_sha"; exit 1;
-          }
-          echo "building $RELEASE_TAG at $head_sha"
+        run: bash scripts/verify_release_tag.sh "$RELEASE_TAG"
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -253,7 +233,7 @@ jobs:
           fi
 
       - name: Upload release archive
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
@@ -264,23 +244,15 @@ jobs:
     needs: gates
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The source ZIP must be the tag's tree, not the dispatching ref.
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
-      - name: Verify checkout is the release tag's commit
+      - name: Verify the checkout is the release tag's commit
         shell: bash
-        run: |
-          set -euo pipefail
-          head_sha=$(git rev-parse HEAD)
-          tag_sha=$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)
-          [ -n "$tag_sha" ] || { echo "::error::$RELEASE_TAG is not a known tag"; exit 1; }
-          [ "$head_sha" = "$tag_sha" ] || {
-            echo "::error::checked out $head_sha but $RELEASE_TAG is $tag_sha"; exit 1;
-          }
-          echo "archiving $RELEASE_TAG at $head_sha"
+        run: bash scripts/verify_release_tag.sh "$RELEASE_TAG"
 
       - name: Build byte-reproducible source ZIP
         shell: bash
@@ -293,7 +265,7 @@ jobs:
           python scripts/build_release.py "$RELEASE_TAG" --output dist
 
       - name: Upload source archive
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: source-archive
           path: |
@@ -311,7 +283,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           pattern: '*'
@@ -332,7 +304,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: ${{ env.RELEASE_TAG }}
           tag_name: ${{ env.RELEASE_TAG }}
