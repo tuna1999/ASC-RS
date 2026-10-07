@@ -601,13 +601,13 @@
       "feature": "Close others / close all / close right",
       "priority": "P1",
       "weight": 5,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
       "acceptance": "asc-gui::state::tabs::tests::close_others_close_all",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX tab context",
-      "notes": "PARTIAL: 'close others' and 'close all' are now reachable from the tab right-click context menu, but there is no 'close right' command at all — that half of the feature name is unimplemented."
+      "notes": "All three verbs ship on the tab right-click menu: Close others / Close all (bulk) and Close right (`Command::CloseRight { descriptor }` → `TabController::close_right`, per-tab). `close_others_close_all` covers the close-right semantics (only tabs right of the named one go, focus falls back to it when the active tab was closed, unknown/last tab is a no-op); `app::tests::close_right_drops_only_right_neighbours` proves the dispatch evicts the closed tabs' documents; `app::tests::tab_context_menu_close_right_closes_right_neighbours_only` drives the real right-click menu headlessly."
     },
     {
       "id": "JADX-GUI-006",
@@ -817,13 +817,13 @@
       "feature": "Used by class X inline button",
       "priority": "P2",
       "weight": 3,
-      "status": "PARTIAL",
+      "status": "COMPLETE",
       "applicable": true,
-      "acceptance": "asc-gui::app::tests::used_by_class_button_routes_to_findrefs_class",
+      "acceptance": "asc-gui::app::tests::used_by_class_inline_button_renders_and_dispatches",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "derived",
-      "notes": "PARTIAL: the capability is reachable via Analysis > Find references, but the advertised inline button does not exist — `Command::UsedByClass` has no trigger and is dispatched only by its acceptance test."
+      "notes": "The SYMBOL section now carries the inline 'used by this class' button next to the selected descriptor (renders only while a class is selected); clicking it queues `Command::UsedByClass`, which routes to the same engine path as Analysis > Find references (type query on the descriptor → REFERENCES tab). Acceptance is the render-level test (button present + click queues FindReferences); `used_by_class_button_routes_to_findrefs_class` keeps covering the dispatch."
     },
     {
       "id": "ASC-RS-GUI-003",

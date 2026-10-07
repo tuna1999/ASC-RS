@@ -170,6 +170,15 @@ impl AscApp {
                                 ui.close();
                                 bulk = Some(Command::CloseAll);
                             }
+                            // Per-tab, unlike the bulk verbs above: the
+                            // menu is opened on one tab and closes what
+                            // sits to its right.
+                            if ui.button("Close right").clicked() {
+                                ui.close();
+                                bulk = Some(Command::CloseRight {
+                                    descriptor: descriptor.clone(),
+                                });
+                            }
                             if ui.button("Pin all").clicked() {
                                 ui.close();
                                 bulk = Some(Command::PinAll);

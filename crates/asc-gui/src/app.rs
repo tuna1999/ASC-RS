@@ -1040,6 +1040,16 @@ impl AscApp {
                 }
                 self.set_status(format!("closed {} tab(s)", dropped.len()), true);
             }
+            Command::CloseRight { descriptor } => {
+                let dropped = self.tabs.close_right(&descriptor);
+                for d in &dropped {
+                    self.documents.remove(d);
+                }
+                self.set_status(
+                    format!("closed {} tab(s) to the right", dropped.len()),
+                    true,
+                );
+            }
             Command::PinTab => {
                 self.tabs.pin(None);
             }

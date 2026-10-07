@@ -1178,6 +1178,56 @@ fn close_all_empties_tab_strip() {
     assert!(app.tabs.active_descriptor().is_none());
 }
 
+/// `Command::CloseRight` drops only the tabs to the right of the named
+/// one, evicts their cached documents, keeps the survivors' documents,
+/// and hands focus to the named tab when the active tab was closed.
+/// Covers the JADX-GUI-005 close-right half through dispatch (the
+/// semantics live in `state::tabs::tests::close_others_close_all`).
+#[test]
+fn close_right_drops_only_right_neighbours() {
+    let mut app = empty_app();
+    app.tabs.open_pinned("LA;");
+    app.tabs.open_pinned("LB;");
+    app.tabs.open_pinned("LC;");
+    for d in ["LA;", "LB;", "LC;"] {
+        app.documents.put(Arc::new(Document::new(
+            d.to_string(),
+            "classes.dex".into(),
+            format!("class {d} {{}}\n"),
+        )));
+    }
+    // Active is LC (the rightmost), so the fallback is exercised.
+    let ctx = egui::Context::default();
+    app.dispatch(
+        Command::CloseRight {
+            descriptor: "LA;".into(),
+        },
+        &ctx,
+    );
+    assert_eq!(
+        app.tabs
+            .tabs()
+            .iter()
+            .map(|t| t.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        vec!["LA;"],
+        "only the tabs right of LA; go"
+    );
+    assert_eq!(active(&app).as_deref(), Some("LA;"), "focus falls back");
+    assert!(
+        app.documents.peek("LB;").is_none() && app.documents.peek("LC;").is_none(),
+        "closed tabs' documents evicted"
+    );
+    assert!(
+        app.documents.peek("LA;").is_some(),
+        "the survivor keeps its document"
+    );
+    assert_eq!(
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("closed 2 tab(s) to the right")
+    );
+}
+
 /// `Command::OpenSettings` toggles the settings dialog. Covers
 /// JADX-GUI-009 (settings dialog opens + lists themes; the
 /// dialog draws a theme list at render time).
@@ -1209,6 +1259,75 @@ fn used_by_class_button_routes_to_findrefs_class() {
             .iter()
             .any(|c| matches!(c, Command::FindReferences)),
         "FindReferences queued via UsedByClass"
+    );
+}
+
+/// JADX-GUI-005 render level: the tab right-click menu offers
+/// "Close right", and using it on a middle tab closes exactly the tabs
+/// to its right (status line proves the dispatch round-trip).
+#[test]
+fn tab_context_menu_close_right_closes_right_neighbours_only() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), empty_app());
+    h.state_mut().tabs.open_pinned("LAA;");
+    h.state_mut().tabs.open_pinned("LBB;");
+    h.state_mut().tabs.open_pinned("LCC;");
+    h.run_steps(2);
+    // Right-click the middle tab → its context menu (JADX tab context).
+    h.get_by_label_contains("BB").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Close right").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state()
+            .tabs
+            .tabs()
+            .iter()
+            .map(|t| t.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        vec!["LAA;", "LBB;"],
+        "close right must keep BB and everything left of it"
+    );
+    assert_eq!(
+        h.state().status.as_ref().map(|s| s.text.as_str()),
+        Some("closed 1 tab(s) to the right")
+    );
+}
+
+/// ASC-RS-GUI-002 render level: the SYMBOL section carries the inline
+/// "used by this class" button, it exists only while a class is
+/// selected, and *clicking* it is what drives the class-references path
+/// (the queued `FindReferences` is observable at the end of that frame;
+/// no synthetic dispatch is involved).
+#[test]
+fn used_by_class_inline_button_renders_and_dispatches() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), empty_app());
+    // No selected class → no button (it belongs to the SYMBOL section,
+    // not to the global chrome).
+    h.run_steps(2);
+    assert!(
+        h.query_by_label("used by this class").is_none(),
+        "button must not render without a selected class"
+    );
+    // Select a class → the button appears next to the descriptor.
+    h.state_mut().tabs.open_pinned("Lcom/example/Foo;");
+    h.run_steps(2);
+    h.get_by_label("used by this class").click();
+    h.run_steps(1);
+    assert!(
+        h.state()
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::FindReferences)),
+        "clicking the inline button must queue FindReferences, got {:?}",
+        h.state().commands
     );
 }
 

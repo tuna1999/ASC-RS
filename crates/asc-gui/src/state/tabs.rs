@@ -184,6 +184,31 @@ impl TabController {
         closed
     }
 
+    /// `Close right`: drop every tab positioned after `from` in the
+    /// strip. Returns the closed descriptors in strip order. The tab
+    /// the menu was opened on is never closed (a `from` that is not an
+    /// open tab closes nothing, as does the last tab). When the active
+    /// tab is among the closed, focus moves to `from` — never to a
+    /// descriptor that no longer exists.
+    pub fn close_right(&mut self, from: &str) -> Vec<String> {
+        let Some(idx) = self.index_of(from) else {
+            return Vec::new();
+        };
+        let closed: Vec<String> = self.tabs[idx + 1..]
+            .iter()
+            .map(|t| t.descriptor.clone())
+            .collect();
+        self.tabs.truncate(idx + 1);
+        if self
+            .active
+            .as_deref()
+            .is_some_and(|active| closed.iter().any(|d| d == active))
+        {
+            self.active = Some(from.to_string());
+        }
+        closed
+    }
+
     /// Filter open tabs by a needle (substring, case-insensitive
     /// against the descriptor). Powers the "open tabs" popup menu
     /// (JADX-GUI-004) and the tab-overflow menu (ASC-GUI-029).
@@ -453,8 +478,10 @@ mod tests {
     }
 
     /// Close-others: every tab except the active one is dropped; the
-    /// active descriptor remains active. Covers ASC-GUI-030 and
-    /// JADX-GUI-005.
+    /// active descriptor remains active. Close-right: only the tabs to
+    /// the right of the named one go, focus falls back to it when the
+    /// active tab was among them. Covers ASC-GUI-030 and JADX-GUI-005
+    /// (close others / close all / close right).
     #[test]
     fn close_others_close_all() {
         let mut tabs = TabController::default();
@@ -474,6 +501,35 @@ mod tests {
         assert_eq!(dropped, vec!["LC;"]);
         assert!(tabs.tabs().is_empty());
         assert!(tabs.active_descriptor().is_none());
+
+        // --- close right ---
+        let mut tabs = TabController::default();
+        tabs.open_pinned("LA;");
+        tabs.open_pinned("LB;");
+        tabs.open_pinned("LC;");
+        tabs.open_pinned("LD;");
+        // Active is LD (the rightmost). Closing right of LB drops the
+        // two to its right and refocuses LB, because LD is gone.
+        let dropped = tabs.close_right("LB;");
+        assert_eq!(dropped, vec!["LC;", "LD;"]);
+        assert_eq!(
+            tabs.tabs()
+                .iter()
+                .map(|t| t.descriptor.clone())
+                .collect::<Vec<_>>(),
+            vec!["LA;", "LB;"]
+        );
+        assert_eq!(tabs.active_descriptor(), Some("LB;"));
+        // The last tab has nothing to its right; an unknown descriptor
+        // is a no-op (never a silent close-everything).
+        assert!(tabs.close_right("LB;").is_empty());
+        assert!(tabs.close_right("LZ;").is_empty());
+        assert_eq!(tabs.tabs().len(), 2);
+        // A surviving active tab is not stolen by the fallback.
+        tabs.activate("LA;");
+        let dropped = tabs.close_right("LA;");
+        assert_eq!(dropped, vec!["LB;"]);
+        assert_eq!(tabs.active_descriptor(), Some("LA;"));
     }
 
     /// Open-tabs popup: every tab surfaces; a substring needle

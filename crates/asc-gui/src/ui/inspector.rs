@@ -52,6 +52,17 @@ impl AscApp {
                         .strong(),
                 );
                 ui.monospace(egui::RichText::new(d).small().color(T.text_secondary));
+                // ASC-RS-GUI-002: class-scoped references without a trip
+                // through Analysis ▸ Find references. Same engine path as
+                // `FindReferences` (a type query on the descriptor), with
+                // the rows landing in the REFERENCES tab.
+                if ui
+                    .button(egui::RichText::new("used by this class").small())
+                    .on_hover_text("find every reference to this class")
+                    .clicked()
+                {
+                    self.queue(Command::UsedByClass);
+                }
                 match st {
                     TabStatus::Loading => {
                         let _ = ui.spinner();

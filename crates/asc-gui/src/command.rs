@@ -88,6 +88,11 @@ pub enum Command {
     CloseOthers,
     /// Close every tab.
     CloseAll,
+    /// Close every tab positioned to the right of `descriptor` (the
+    /// tab the context menu was opened on). JADX-GUI-005.
+    CloseRight {
+        descriptor: String,
+    },
     PinTab,
     /// Pin every preview tab. Drives JADX-GUI-011.
     PinAll,
