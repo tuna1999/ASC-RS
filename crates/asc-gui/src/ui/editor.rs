@@ -297,9 +297,11 @@ impl AscApp {
                             Some(t) if t.status == TabStatus::Loading || matches!(t.status, TabStatus::Failed(_))
                         )
                     {
-                        // Evicted earlier: re-issue on demand.
+                        // Evicted earlier: re-issue the job that produced the
+                        // view (`getclass` for a class tab, `disasm` for a
+                        // Smali one), never a getclass on the synthetic key.
                         let ctx = ui.ctx().clone();
-                        self.spawn_decompile(&active, &ctx);
+                        self.reload_document(&active, &ctx);
                     }
                 }
             }

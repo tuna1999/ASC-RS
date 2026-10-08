@@ -1361,55 +1361,117 @@ fn render_exported(c: &asc_manifest::ComponentEntry) -> String {
     }
 }
 
-/// Render one filter's **pooled** match set. Pooling is the whole point:
-/// Android matches each dimension independently across every `<data>`
-/// element of the filter, so a per-`<data>` rendering would understate the
-/// attack surface (audit F1).
-fn render_effective_data(eff: &asc_manifest::EffectiveData, pooled: bool) -> String {
+/// `<data>` attribute name for a path-matcher kind (shared by the pooled
+/// match line and the raw `<uri-relative-filter-group>` lines).
+fn path_kind_name(kind: asc_manifest::PathMatchKind) -> &'static str {
     use asc_manifest::PathMatchKind;
+    match kind {
+        PathMatchKind::Exact => "path",
+        PathMatchKind::Prefix => "pathPrefix",
+        PathMatchKind::Pattern => "pathPattern",
+        PathMatchKind::AdvancedPattern => "pathAdvancedPattern",
+        PathMatchKind::Suffix => "pathSuffix",
+    }
+}
+
+/// `<data>` attribute name of a `<uri-relative-filter-group>` matcher:
+/// `path*` / `fragment*` / `query*` share the five attribute shapes, so the
+/// URI part picks the prefix and the kind the suffix.
+fn uri_part_kind_name(part: asc_manifest::UriPart, kind: asc_manifest::PathMatchKind) -> String {
+    use asc_manifest::{PathMatchKind, UriPart};
+    let prefix = match part {
+        UriPart::Path => "path",
+        UriPart::Fragment => "fragment",
+        UriPart::Query => "query",
+    };
+    let suffix = match kind {
+        PathMatchKind::Exact => "",
+        PathMatchKind::Prefix => "Prefix",
+        PathMatchKind::Pattern => "Pattern",
+        PathMatchKind::AdvancedPattern => "AdvancedPattern",
+        PathMatchKind::Suffix => "Suffix",
+    };
+    format!("{prefix}{suffix}")
+}
+
+/// `host[:port]` list.
+fn render_hosts(list: &[asc_manifest::Authority]) -> String {
+    list.iter()
+        .map(|a| match &a.port {
+            Some(port) => format!("{}:{port}", a.host),
+            None => a.host.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `path=/x,pathPrefix=/y` list.
+fn render_paths(list: &[asc_manifest::PathMatcher]) -> String {
+    list.iter()
+        .map(|m| format!("{}={}", path_kind_name(m.kind), m.value))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Render one filter's match set: the **effective** dimensions first, then
+/// (audit F1) anything that was declared but that Android never consults.
+/// Pooling is the whole point — Android matches each dimension independently
+/// across every `<data>` element of the filter — but the dimensions are
+/// *dependent*, so a host without a scheme and a path without scheme+host
+/// must never read as an active restriction. Nothing declared is dropped:
+/// inert attributes are printed and labelled instead.
+fn render_effective_data(eff: &asc_manifest::EffectiveData, pooled: bool) -> String {
+    let effective_hosts = eff.effective_authorities();
+    let effective_paths = eff.effective_paths();
+
     let mut parts = Vec::new();
     if !eff.schemes.is_empty() {
         parts.push(format!("schemes=[{}]", eff.schemes.join(",")));
     }
-    if !eff.authorities.is_empty() {
-        let hosts = eff
-            .authorities
-            .iter()
-            .map(|a| match &a.port {
-                Some(port) => format!("{}:{port}", a.host),
-                None => a.host.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        parts.push(format!("authorities=[{hosts}]"));
+    if !effective_hosts.is_empty() {
+        parts.push(format!("authorities=[{}]", render_hosts(effective_hosts)));
     }
-    if !eff.paths.is_empty() {
-        let paths = eff
-            .paths
-            .iter()
-            .map(|m| {
-                let kind = match m.kind {
-                    PathMatchKind::Exact => "path",
-                    PathMatchKind::Prefix => "pathPrefix",
-                    PathMatchKind::Pattern => "pathPattern",
-                    PathMatchKind::AdvancedPattern => "pathAdvancedPattern",
-                    PathMatchKind::Suffix => "pathSuffix",
-                };
-                format!("{kind}={}", m.value)
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        parts.push(format!("paths=[{paths}]"));
+    if !effective_paths.is_empty() {
+        parts.push(format!("paths=[{}]", render_paths(effective_paths)));
     }
     if !eff.mime_types.is_empty() {
         parts.push(format!("mimeTypes=[{}]", eff.mime_types.join(",")));
     }
-    if parts.is_empty() {
-        return "match: none".into();
-    }
-    let mut line = format!("match: {}", parts.join(" "));
+
+    let mut line = if parts.is_empty() {
+        // Nothing effective: `matchData` falls back to "no data constraint",
+        // which only matches an intent carrying neither a type nor a URI.
+        "match: none (only intents without a data URI or type can match)".to_string()
+    } else {
+        format!("match: {}", parts.join(" "))
+    };
     if pooled {
-        line.push_str(" (pooled across <data>: every scheme/host/path combination matches)");
+        line.push_str(" (pooled across <data> elements: every dimension is matched independently)");
+    }
+    if !eff.implicit_schemes().is_empty() {
+        line.push_str(" (MIME type without a scheme: content: and file: URIs also match)");
+    }
+
+    let mut ignored = Vec::new();
+    if effective_hosts.len() != eff.authorities.len() {
+        ignored.push(format!("authorities=[{}]", render_hosts(&eff.authorities)));
+    }
+    if effective_paths.len() != eff.paths.len() {
+        ignored.push(format!("paths=[{}]", render_paths(&eff.paths)));
+    }
+    if !ignored.is_empty() {
+        // Inert iff the filter declares no scheme anywhere (then hosts,
+        // ports and paths all fall away) or a scheme but no host (then ports
+        // and paths do).
+        let why = if eff.schemes.is_empty() {
+            "no android:scheme is declared, so hosts, ports and paths are ignored"
+        } else {
+            "no android:host is declared, so ports and paths are ignored"
+        };
+        line.push_str(&format!(
+            " [declared but ignored by Android: {} — {why}]",
+            ignored.join(" ")
+        ));
     }
     line
 }
@@ -1439,6 +1501,29 @@ fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter) {
             s,
             "      {}",
             render_effective_data(&f.effective_data, f.data.len() > 1)
+        );
+    }
+    // API 35 groups are preserved verbatim; the pooled line above does not
+    // model them, so say so instead of implying the filter was fully read.
+    for g in &f.uri_relative_groups {
+        let matchers = g
+            .data
+            .iter()
+            .flat_map(|d| d.parts.iter())
+            .map(|m| format!("{}={}", uri_part_kind_name(m.part, m.kind), m.value))
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            s,
+            "      {}",
+            format!("uri-relative-filter-group allow={}: {matchers}", g.allow).trim_end()
+        );
+    }
+    if f.has_uri_relative_groups() {
+        let _ = writeln!(
+            s,
+            "      warning: <uri-relative-filter-group> (API 35) is reported as declared and NOT \
+             evaluated — this filter's URI match surface is incomplete"
         );
     }
 }
@@ -1536,7 +1621,7 @@ mod tests {
     //! pinned here so a change to the output cannot silently resurrect the
     //! per-`<data>` "independent URI" reading.
 
-    use super::format_manifest_text;
+    use super::{format_manifest_text, to_json};
     use asc_manifest::{
         ComponentEntry, DataSpec, ExportedState, IntentFilter, ManifestInfo, ProviderEntry,
     };
@@ -1727,5 +1812,184 @@ mod tests {
         assert!(text.contains("providers (1):"), "{text}");
         assert!(text.contains(" [exported=true]"), "{text}");
         assert!(!text.contains("warning:"), "{text}");
+    }
+
+    /// Audit F1.1/F1.2: a declared-but-inert URI dimension is labelled, so
+    /// the output never reads as a restriction Android does not apply.
+    #[test]
+    fn manifest_text_flags_inert_uri_dimensions() {
+        // A path without a host: `https://example.com/public` still matches.
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![data(
+                    Some("https"),
+                    None,
+                    Some("/private"),
+                    None,
+                )])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains("match: schemes=[https]"),
+            "the effective scheme stays visible:\n{text}"
+        );
+        assert!(
+            text.contains(
+                "[declared but ignored by Android: paths=[pathPrefix=/private] — \
+                 no android:host is declared, so ports and paths are ignored]"
+            ),
+            "an inert path must be named, not dropped:\n{text}"
+        );
+
+        // A host without a scheme: every URI attribute is ignored.
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![data(None, Some("example.com"), None, None)])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains(
+                "match: none (only intents without a data URI or type can match) \
+                 [declared but ignored by Android: authorities=[example.com] — no android:scheme \
+                 is declared, so hosts, ports and paths are ignored]"
+            ),
+            "a host without a scheme must be named as inert:\n{text}"
+        );
+    }
+
+    /// Audit F1.3: a MIME-only filter also matches `content:` / `file:`.
+    #[test]
+    fn manifest_text_reports_implicit_content_and_file_schemes() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![data(None, None, None, Some("image/*"))])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains(
+                "match: mimeTypes=[image/*] (MIME type without a scheme: \
+                           content: and file: URIs also match)"
+            ),
+            "{text}"
+        );
+    }
+
+    /// Audit F3: an API 35 `<uri-relative-filter-group>` is reported raw
+    /// **and** warned about, in text and in JSON — never silently ignored.
+    #[test]
+    fn manifest_text_and_json_report_uri_relative_filter_groups() {
+        use asc_manifest::{
+            PathMatchKind, RelativeDataSpec, UriPart, UriPartMatcher, UriRelativeFilterGroup,
+        };
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(35),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![{
+                    let mut f = filter(vec![data(Some("https"), Some("example.com"), None, None)]);
+                    f.uri_relative_groups = vec![
+                        UriRelativeFilterGroup {
+                            allow: false,
+                            data: vec![
+                                RelativeDataSpec {
+                                    parts: vec![UriPartMatcher {
+                                        part: UriPart::Path,
+                                        kind: PathMatchKind::Exact,
+                                        value: "/private".into(),
+                                    }],
+                                },
+                                RelativeDataSpec {
+                                    parts: vec![UriPartMatcher {
+                                        part: UriPart::Query,
+                                        kind: PathMatchKind::Exact,
+                                        value: "token=1".into(),
+                                    }],
+                                },
+                            ],
+                        },
+                        UriRelativeFilterGroup::default(),
+                    ];
+                    f
+                }],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains("uri-relative-filter-group allow=false: path=/private,query=token=1"),
+            "the group's own matchers must be reported:\n{text}"
+        );
+        assert!(
+            text.contains("warning: <uri-relative-filter-group> (API 35)"),
+            "an unevaluated group must warn:\n{text}"
+        );
+        assert_eq!(
+            m.activities[0].intent_filters[0].uri_relative_groups.len(),
+            2
+        );
+
+        let json = to_json(&m);
+        assert!(json.contains("\"uri_relative_groups\""), "{json}");
+        assert!(json.contains("\"allow\": false"), "{json}");
+        assert!(json.contains("\"part\": \"query\""), "{json}");
+        assert!(
+            json.contains("\"dependency\": \"complete\""),
+            "the JSON match set must carry the dependency verdict too:\n{json}"
+        );
+    }
+
+    /// Audit F1: a JSON consumer sees the dependency verdict next to the
+    /// pools, so an inert host/path cannot be read as active.
+    #[test]
+    fn manifest_json_exposes_uri_dependency() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![data(
+                    Some("https"),
+                    None,
+                    Some("/private"),
+                    None,
+                )])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let json = to_json(&m);
+        assert!(json.contains("\"dependency\": \"no_host\""), "{json}");
+        assert_eq!(
+            m.activities[0].intent_filters[0]
+                .effective_data
+                .effective_paths()
+                .len(),
+            0
+        );
     }
 }

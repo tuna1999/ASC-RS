@@ -1187,35 +1187,204 @@ fn opening_a_smali_tab_does_not_taint_the_class_selection() {
     );
 }
 
-/// A Smali tab whose document was evicted is re-issued on demand by
-/// `draw_code_area`; that re-issue must not query the class engine with
-/// the view key (it would fail). Audit F2 sibling.
+/// Class used by the Smali-lifecycle tests: 22 methods (3 `<init>`
+/// overloads) in the frozen `workload.apk`, so a method-scoped listing is
+/// distinguishable from a whole-class one.
+const SMALI_LIFECYCLE_CLASS: &str = "Lcom/google/android/material/timepicker/ClockFaceView;";
+
+/// A loaded corpus app (audit F2 tests need a real session + engine).
+fn corpus_app(ctx: &egui::Context) -> Option<AscApp> {
+    let apk = corpus()?;
+    let mut app = AscApp::new(Some(apk));
+    for _ in 0..600 {
+        crate::app::AscApp::run_ui(ctx, |ui| app.test_frame(ui));
+        if app.session.is_some() {
+            return Some(app);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("artifact did not load");
+}
+
+/// Drive real frames until `cond` holds; `false` when the budget runs out.
+fn pump_until(app: &mut AscApp, ctx: &egui::Context, cond: impl Fn(&AscApp) -> bool) -> bool {
+    for _ in 0..900 {
+        crate::app::AscApp::run_ui(ctx, |ui| app.test_frame(ui));
+        if cond(app) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+/// Open the whole-class Smali view of `class` the way the UI does.
+fn open_smali_view(app: &mut AscApp, ctx: &egui::Context, class: &str) {
+    crate::app::AscApp::run_ui(ctx, |ui| {
+        let ctx = ui.ctx();
+        app.navigate_to(class, false, None, NavOrigin::Tree, ctx);
+        app.dispatch(Command::ShowSmali, ctx);
+    });
+}
+
+/// A second real class for the "tab went to the background" step of the
+/// eviction tests.
+const SMALI_LIFECYCLE_SECOND_CLASS: &str = "Lcom/google/android/material/timepicker/ClockHandView;";
+
+/// Model what `DocumentCache::enforce_budget` does to a **background** tab —
+/// the displayed document is never evicted, so the eviction lands on a tab
+/// the user then re-activates.
+fn evict_while_background(app: &mut AscApp, ctx: &egui::Context, key: &str) {
+    // Another tab becomes visible, so the editor stops treating `key`'s
+    // document as the active one.
+    app.tabs.open_pinned(SMALI_LIFECYCLE_SECOND_CLASS);
+    crate::app::AscApp::run_ui(ctx, |ui| app.test_frame(ui));
+    assert_ne!(
+        app.active_doc.as_ref().map(|d| d.descriptor.as_str()),
+        Some(key),
+        "the evicted view is in the background"
+    );
+    app.documents.remove(key);
+    app.tabs.activate(key);
+}
+
+/// Audit F2.2: a background Smali document evicted from the cache must be
+/// re-issued when the user comes back to the tab — as a *disasm* job for its
+/// own view key, never as a getclass job for the synthetic key, and never
+/// left on the empty state.
 #[test]
-fn evicted_smali_tab_is_not_reissued_as_getclass() {
-    let _guard = render_lock();
-    let Some(apk) = corpus() else {
+fn evicted_smali_tab_is_reissued_and_rendered_again() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
         eprintln!("corpus fixture missing; skipping");
         return;
     };
-    let session = WorkspaceSession::open(&apk).expect("open");
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(1200.0, 800.0))
-        .build_ui_state(
-            |ui, app: &mut AscApp| app.test_frame(ui),
-            AscApp::from_session(session),
-        );
-    let key = crate::task::TaskManager::smali_key("Lcom/example/Foo;", None);
-    h.state_mut().tabs.open_preview(&key);
-    // The listing landed earlier; its document is since evicted.
-    h.state_mut()
-        .tabs
-        .set_ready(&key, Some("classes.dex".into()));
-    h.run_steps(2);
-    assert_eq!(
-        h.state().tasks.in_flight_count(),
-        0,
-        "a view key must not be re-issued as a getclass job"
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, None);
+    open_smali_view(&mut app, &ctx, SMALI_LIFECYCLE_CLASS);
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the smali listing must land"
     );
+    assert!(
+        app.documents.get(&key).unwrap().source.contains(".method"),
+        "the landed document is a listing"
+    );
+
+    evict_while_background(&mut app, &ctx, &key);
+    assert!(!app.documents.contains(&key), "the document is gone");
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "an evicted smali listing must be re-issued, not left on the empty state"
+    );
+    assert!(
+        app.documents.get(&key).unwrap().source.contains(".method"),
+        "the re-issued document is the listing again"
+    );
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+    assert_eq!(
+        app.tabs
+            .tabs()
+            .iter()
+            .find(|t| t.descriptor == key)
+            .map(|t| t.status.clone()),
+        Some(crate::state::TabStatus::Ready),
+        "the reload must not leave the tab failed"
+    );
+
+    // The reload is a one-shot: while the document is cached the editor
+    // reuses it instead of re-issuing the job every frame.
+    let kept = app.documents.get(&key).unwrap();
+    for _ in 0..5 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+    }
+    assert!(
+        Arc::ptr_eq(&kept, &app.documents.get(&key).unwrap()),
+        "no reload storm once the document is back"
+    );
+}
+
+/// Audit F2.1: `Command::ToggleParanoid` drops every cached document. The
+/// active Smali tab is not a class tab, so it must still be rebuilt from its
+/// own view key instead of sitting on a stale loading message forever.
+#[test]
+fn paranoid_toggle_rebuilds_an_open_smali_tab() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, None);
+    open_smali_view(&mut app, &ctx, SMALI_LIFECYCLE_CLASS);
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+
+    // A Java tab for the same class exists alongside (pinned), but the
+    // Smali tab is the active one.
+    app.tabs.open_pinned(SMALI_LIFECYCLE_CLASS);
+    app.tabs.activate(&key);
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.dispatch(Command::ToggleParanoid, ctx);
+    });
+    assert!(
+        app.documents.is_empty(),
+        "the toggle invalidates every cached document"
+    );
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some(key.as_str()),
+        "the smali tab stays active across the toggle"
+    );
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the active smali tab must be rebuilt after the cache was cleared"
+    );
+}
+
+/// Audit F2.3: a method-scoped Smali tab (`L…;#smali#<method>`) must reload
+/// through `disasm --method`, keeping its owning class *and* its method
+/// scope — reloading it as a whole-class listing would be a silent lie.
+#[test]
+fn evicted_method_smali_tab_keeps_its_method_scope() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.navigate_to(SMALI_LIFECYCLE_CLASS, false, None, NavOrigin::Tree, ctx);
+        app.symbol_sel = Some(SymbolSelection {
+            descriptor: SMALI_LIFECYCLE_CLASS.to_string(),
+            token: "<init>".to_string(),
+            method: (0, 0),
+            occurrences: Vec::new(),
+        });
+        app.dispatch(Command::ShowSmaliMethod, ctx);
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the method listing must land"
+    );
+    let scoped = app.documents.get(&key).unwrap().source.clone();
+    assert!(scoped.contains("<init>"), "{scoped}");
+    assert!(
+        !scoped.contains("findIntersectingTextView"),
+        "a method listing must not become a whole-class listing:\n{scoped}"
+    );
+
+    evict_while_background(&mut app, &ctx, &key);
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the evicted method listing must be re-issued"
+    );
+    let reloaded = app.documents.get(&key).unwrap().source.clone();
+    assert!(reloaded.contains("<init>"), "{reloaded}");
+    assert!(
+        !reloaded.contains("findIntersectingTextView"),
+        "the reload must keep the method scope:\n{reloaded}"
+    );
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
 }
 
 /// `Command::ToggleTheme` flips the active theme. Covers

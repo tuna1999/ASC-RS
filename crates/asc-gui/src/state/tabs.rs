@@ -369,6 +369,26 @@ impl TabController {
     }
 }
 
+/// Split a Smali view key (`L…;#smali` / `L…;#smali#<method>`) into its
+/// owning class and optional method filter. `None` when the key is not a
+/// Smali view key (a plain class descriptor, a text sentinel, …).
+///
+/// Single source of truth for decoding `TaskManager::smali_key`:
+/// [`class_of_tab_key`] and the document-reload dispatch
+/// (`AscApp::reload_document`) both go through it, so `#smali` is parsed
+/// exactly once.
+pub(crate) fn smali_view_of(key: &str) -> Option<(&str, Option<&str>)> {
+    let (class, suffix) = key.split_once("#smali")?;
+    if !class.starts_with('L') || !class.ends_with(';') {
+        return None;
+    }
+    let method = match suffix {
+        "" => None,
+        suffix => Some(suffix.strip_prefix('#')?),
+    };
+    Some((class, method))
+}
+
 /// The class a tab key belongs to, or `None` when the key is not
 /// class-shaped.
 ///
@@ -379,11 +399,10 @@ impl TabController {
 /// (via `AscApp::active_class_descriptor`) instead of using the raw
 /// key, or they hand the engine a synthetic string (audit F2).
 pub(crate) fn class_of_tab_key(key: &str) -> Option<&str> {
-    let class = match key.split_once("#smali") {
-        Some((c, suffix)) if suffix.is_empty() || suffix.starts_with('#') => c,
-        _ => key,
-    };
-    (class.starts_with('L') && class.ends_with(';')).then_some(class)
+    match smali_view_of(key) {
+        Some((class, _)) => Some(class),
+        None => (key.starts_with('L') && key.ends_with(';')).then_some(key),
+    }
 }
 
 #[cfg(test)]
@@ -741,5 +760,25 @@ mod tests {
         // A near-miss suffix is not the smali marker.
         assert_eq!(class_of_tab_key("Lcom/foo;#smalix"), None);
         assert_eq!(class_of_tab_key(""), None);
+    }
+
+    /// `smali_view_of` is the single decoder for `TaskManager::smali_key`:
+    /// the reload dispatch reads the owning class *and* the method scope
+    /// from it (audit F2.1/F2.3).
+    #[test]
+    fn smali_view_of_decodes_class_and_method_scope() {
+        assert_eq!(
+            smali_view_of("Lcom/foo/Bar;#smali"),
+            Some(("Lcom/foo/Bar;", None))
+        );
+        assert_eq!(
+            smali_view_of("Lcom/foo/Bar;#smali#doThing"),
+            Some(("Lcom/foo/Bar;", Some("doThing")))
+        );
+        // A plain class descriptor is not a smali view.
+        assert_eq!(smali_view_of("Lcom/foo/Bar;"), None);
+        assert_eq!(smali_view_of("manifest"), None);
+        assert_eq!(smali_view_of("Lcom/foo;#smalix"), None);
+        assert_eq!(smali_view_of(""), None);
     }
 }

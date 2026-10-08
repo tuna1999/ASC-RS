@@ -773,7 +773,8 @@
       "acceptance": "asc-gui::app::tests::show_smali_opens_listing_tab",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
-      "reference": "JADX preview"
+      "reference": "JADX preview",
+      "notes": "Audit F2: the listing is a document like any other, so an evicted OR invalidated `#smali` view must be re-issued through `AscApp::reload_document` (disasm, keeping method scope) instead of being left on the empty state — `evicted_smali_tab_is_reissued_and_rendered_again`, `evicted_method_smali_tab_keeps_its_method_scope`, `paranoid_toggle_rebuilds_an_open_smali_tab`."
     },
     {
       "id": "JADX-GUI-019",

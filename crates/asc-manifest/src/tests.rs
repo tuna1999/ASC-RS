@@ -1995,6 +1995,253 @@ fn pooled_data_dedups_and_binds_port_to_its_host() {
 }
 
 // ---------------------------------------------------------------------------
+// Audit F1 (2nd pass): the dependency between the URI dimensions.
+// ---------------------------------------------------------------------------
+
+/// One activity with one `<intent-filter>`, whose `<data>` children are
+/// built from `data_attrs` (one attribute list per `<data>` element),
+/// plus any extra filter children (e.g. `<uri-relative-filter-group>`).
+fn single_filter_elems(children: Vec<axml::Elem>) -> IntentFilter {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "manifest",
+        vec![attr(None, "package", Val::Str("com.example.app"))],
+        vec![elem(
+            "application",
+            vec![],
+            vec![elem(
+                "activity",
+                vec![attr(Some(ANDROID_NS), "name", Val::Str(".M"))],
+                vec![elem("intent-filter", vec![], children)],
+            )],
+        )],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+    info.activities[0].intent_filters[0].clone()
+}
+
+/// [`single_filter_elems`] for `<data>`-only filters.
+fn single_filter(data_attrs: Vec<Vec<axml::Attr>>) -> IntentFilter {
+    use axml::elem;
+    single_filter_elems(
+        data_attrs
+            .into_iter()
+            .map(|attrs| elem("data", attrs, vec![]))
+            .collect(),
+    )
+}
+
+/// F1.1: a path declared without a host is **inert**. Android's `<data>`
+/// docs: "If a host isn't specified for the filter, the port attribute and
+/// all the path attributes are ignored", and AOSP `IntentFilter.matchData`
+/// runs the path loop only inside the `mDataAuthorities != null` branch. So
+/// with `scheme=https` + `pathPrefix=/private` and no host, Android matches
+/// `https://example.com/public` — the declared path must stay visible
+/// (fidelity) but must not read as an active restriction.
+#[test]
+fn path_without_host_is_declared_but_inert() {
+    use axml::{ANDROID_NS, Val, attr};
+    let f = single_filter(vec![
+        vec![attr(Some(ANDROID_NS), "scheme", Val::Str("https"))],
+        vec![attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/private"))],
+    ]);
+    assert_eq!(f.data.len(), 2, "raw <data> kept verbatim");
+    assert_eq!(f.data[1].path_prefix.as_deref(), Some("/private"));
+    assert_eq!(f.effective_data.schemes, ["https"]);
+    assert_eq!(
+        f.effective_data.paths.len(),
+        1,
+        "the declared pool is kept for fidelity"
+    );
+    assert_eq!(f.effective_data.dependency, UriDependency::NoHost);
+    assert!(
+        f.effective_data.effective_paths().is_empty(),
+        "a path without a host never matches"
+    );
+    assert!(f.effective_data.effective_authorities().is_empty());
+}
+
+/// F1.2: a host declared without a scheme is inert ("If a `scheme` isn't
+/// specified for the intent filter, all the other URI attributes are
+/// ignored"; `matchData` reaches the authority loop only under
+/// `mDataSchemes != null`).
+#[test]
+fn host_without_scheme_is_declared_but_inert() {
+    use axml::{ANDROID_NS, Val, attr};
+    let f = single_filter(vec![vec![attr(
+        Some(ANDROID_NS),
+        "host",
+        Val::Str("example.com"),
+    )]]);
+    assert_eq!(f.effective_data.authorities[0].host, "example.com");
+    assert_eq!(f.effective_data.dependency, UriDependency::NoScheme);
+    assert!(
+        f.effective_data.effective_authorities().is_empty(),
+        "a host without a scheme never matches"
+    );
+    // Same for a host+path that lost its scheme.
+    let g = single_filter(vec![
+        vec![attr(Some(ANDROID_NS), "host", Val::Str("example.com"))],
+        vec![attr(Some(ANDROID_NS), "path", Val::Str("/x"))],
+    ]);
+    assert_eq!(g.effective_data.dependency, UriDependency::NoScheme);
+    assert!(g.effective_data.effective_authorities().is_empty());
+    assert!(g.effective_data.effective_paths().is_empty());
+    assert_eq!(
+        g.effective_data.paths.len(),
+        1,
+        "declared path still reported"
+    );
+}
+
+/// F1.3: a MIME-only filter declares no URI, and Android then assumes the
+/// `content:` and `file:` schemes ("If the filter has a data type set ...
+/// but no scheme, the `content:` and `file:` schemes are assumed"). An
+/// explicit scheme, or no MIME type, suppresses the implicit match.
+#[test]
+fn mime_only_filter_implies_content_and_file_schemes() {
+    use axml::{ANDROID_NS, Val, attr};
+    let f = single_filter(vec![vec![attr(
+        Some(ANDROID_NS),
+        "mimeType",
+        Val::Str("image/*"),
+    )]]);
+    assert!(!f.effective_data.has_uri(), "a MIME type declares no URI");
+    assert_eq!(f.effective_data.mime_types, ["image/*"]);
+    assert_eq!(f.effective_data.dependency, UriDependency::NoScheme);
+    assert_eq!(f.effective_data.implicit_schemes(), ["content", "file"]);
+
+    // An explicit scheme wins: https, not content:/file:.
+    let g = single_filter(vec![
+        vec![attr(Some(ANDROID_NS), "scheme", Val::Str("https"))],
+        vec![attr(Some(ANDROID_NS), "mimeType", Val::Str("image/*"))],
+    ]);
+    assert!(
+        g.effective_data.implicit_schemes().is_empty(),
+        "a declared scheme suppresses the implicit content:/file: match"
+    );
+
+    // No MIME type → no implicit scheme.
+    let h = single_filter(vec![vec![attr(Some(ANDROID_NS), "path", Val::Str("/x"))]]);
+    assert!(h.effective_data.implicit_schemes().is_empty());
+}
+
+/// F1.4: pooling is per filter and per dimension, so a host declared on a
+/// *different* `<data>` re-enables a path declared beside no host — and
+/// dropping the only scheme just as quickly makes the whole set inert.
+#[test]
+fn pooled_host_makes_a_sibling_path_effective() {
+    use axml::{ANDROID_NS, Val, attr};
+    let f = single_filter(vec![
+        vec![attr(Some(ANDROID_NS), "scheme", Val::Str("https"))],
+        vec![attr(Some(ANDROID_NS), "host", Val::Str("example.com"))],
+        vec![attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/private"))],
+    ]);
+    assert_eq!(f.effective_data.dependency, UriDependency::Complete);
+    assert_eq!(f.effective_data.effective_authorities().len(), 1);
+    assert_eq!(f.effective_data.effective_paths().len(), 1);
+    assert!(f.effective_data.implicit_schemes().is_empty());
+
+    // Same data minus the scheme: every URI attribute is inert, but nothing
+    // is dropped from the declared pools.
+    let g = single_filter(vec![
+        vec![attr(Some(ANDROID_NS), "host", Val::Str("example.com"))],
+        vec![attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/private"))],
+    ]);
+    assert_eq!(g.effective_data.dependency, UriDependency::NoScheme);
+    assert!(g.effective_data.effective_authorities().is_empty());
+    assert!(g.effective_data.effective_paths().is_empty());
+    assert_eq!(g.effective_data.authorities.len(), 1);
+    assert_eq!(g.effective_data.paths.len(), 1);
+    assert_eq!(g.data.len(), 2);
+}
+
+/// F3: `<uri-relative-filter-group>` (API 35) is parsed and preserved —
+/// with its `android:allow` flag and its `<data>` children — instead of
+/// being dropped silently. Its AND semantics are *not* modelled, so the
+/// filter reports that its URI analysis is incomplete and the group's
+/// `<data>` elements never leak into the filter's own pooled match set.
+#[test]
+fn uri_relative_filter_group_is_preserved_not_evaluated() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let f = single_filter_elems(vec![
+        elem(
+            "data",
+            vec![
+                attr(Some(ANDROID_NS), "scheme", Val::Str("https")),
+                attr(Some(ANDROID_NS), "host", Val::Str("example.com")),
+            ],
+            vec![],
+        ),
+        elem(
+            "data",
+            vec![attr(Some(ANDROID_NS), "path", Val::Str("/direct"))],
+            vec![],
+        ),
+        elem(
+            "uri-relative-filter-group",
+            vec![attr(Some(ANDROID_NS), "allow", Val::Bool(false))],
+            vec![
+                elem(
+                    "data",
+                    vec![attr(Some(ANDROID_NS), "path", Val::Str("/private"))],
+                    vec![],
+                ),
+                elem(
+                    "data",
+                    vec![attr(Some(ANDROID_NS), "query", Val::Str("token=1"))],
+                    vec![],
+                ),
+            ],
+        ),
+        elem(
+            "uri-relative-filter-group",
+            vec![],
+            vec![elem(
+                "data",
+                vec![attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/public"))],
+                vec![],
+            )],
+        ),
+    ]);
+
+    // The group's own <data> children are not filter <data> elements.
+    assert_eq!(f.data.len(), 2, "only the direct <data> elements");
+    assert_eq!(f.data[1].path.as_deref(), Some("/direct"));
+    assert!(f.has_uri_relative_groups());
+    assert_eq!(f.uri_relative_groups.len(), 2, "declaration order kept");
+
+    let blocking = &f.uri_relative_groups[0];
+    assert!(!blocking.allow, "android:allow=false kept");
+    assert_eq!(blocking.data.len(), 2, "ANDed children kept, in order");
+    assert_eq!(
+        blocking.data[0].parts,
+        [UriPartMatcher {
+            part: UriPart::Path,
+            kind: PathMatchKind::Exact,
+            value: "/private".into(),
+        }]
+    );
+    assert_eq!(
+        blocking.data[1].parts,
+        [UriPartMatcher {
+            part: UriPart::Query,
+            kind: PathMatchKind::Exact,
+            value: "token=1".into(),
+        }]
+    );
+    let allowing = &f.uri_relative_groups[1];
+    assert!(allowing.allow, "android:allow defaults to true");
+    assert_eq!(allowing.data[0].parts[0].kind, PathMatchKind::Prefix);
+
+    // The pooled match set stays the direct-<data> one: group rules are
+    // never folded in (that would claim reachability ASC-RS cannot prove).
+    assert_eq!(f.effective_data.schemes, ["https"]);
+    assert_eq!(f.effective_data.paths.len(), 1);
+    assert_eq!(f.effective_data.paths[0].value, "/direct");
+}
+
+// ---------------------------------------------------------------------------
 // Audit F4: android:exported semantics for targetSdk >= 31.
 // ---------------------------------------------------------------------------
 

@@ -416,6 +416,29 @@ impl AscApp {
         );
     }
 
+    /// Re-issue the engine job that produces the document for `key`
+    /// (audit F2): a Smali view reloads as a *disasm* job — whole class, or
+    /// the one method it was scoped to — a class tab as a getclass job, and
+    /// any other key (a text tab) has no engine job at all.
+    ///
+    /// Every spawn is deduplicated by [`TaskManager`], so calling this
+    /// while the same job is already in flight is a no-op. The view key is
+    /// decoded once, through [`crate::state::tabs::smali_view_of`].
+    pub(crate) fn reload_document(&mut self, key: &str, ctx: &egui::Context) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let apk = session.path().to_path_buf();
+        match crate::state::tabs::smali_view_of(key) {
+            Some((class, method)) => {
+                self.tasks.spawn_disasm(&apk, class, method, ctx);
+            }
+            // A view key is never a class descriptor; `spawn_decompile`
+            // rejects everything that is not exactly a class descriptor.
+            None => self.spawn_decompile(key, ctx),
+        }
+    }
+
     /// Class identity of the current focus, for every class-scoped
     /// action (references, copy descriptor/FQN, Smali, strings, …).
     ///

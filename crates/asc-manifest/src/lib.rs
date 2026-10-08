@@ -224,28 +224,176 @@ pub struct Authority {
 /// and `IntentFilter.matchData` confirms it: the scheme list, the
 /// authority list and the path list are consulted independently.
 ///
-/// The match set is therefore the cross product of these four pools — not
-/// the list of `<data>` elements as independent URI alternatives. The pools
-/// are kept flat on purpose: materializing the cross product would explode
-/// on filters with many `<data>` elements.
+/// Pooling is not the whole story: the dimensions are *dependent*. Per the
+/// same page,
+///
+/// - "If a `scheme` isn't specified for the intent filter, all the other
+///   URI attributes are ignored."
+/// - "If a `host` isn't specified for the filter, the `port` attribute and
+///   all the path attributes are ignored."
+///
+/// which AOSP `IntentFilter.matchData` implements by nesting: the authority
+/// loop runs inside the `mDataSchemes != null` branch and the path loop
+/// inside the authority branch. So a declared host/path can be **inert**;
+/// each pool here stays verbatim (fidelity) and [`Self::dependency`] says
+/// whether the platform actually consults it. Read the pools through
+/// [`Self::effective_authorities`] / [`Self::effective_paths`] to get the
+/// live set, and never materialize the cross product: the pools are flat on
+/// purpose so a filter with many `<data>` elements cannot explode.
+///
+/// [`Self::has_uri_relative_groups`](IntentFilter::has_uri_relative_groups)
+/// reports API 35 `<uri-relative-filter-group>` children, which this struct
+/// does **not** model: when they are present the URI match surface below is
+/// incomplete.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct EffectiveData {
-    /// Pooled `android:scheme` values (Android dedupes these).
+    /// Pooled `android:scheme` values (Android dedupes these). Always
+    /// effective.
     pub schemes: Vec<String>,
     /// Pooled authorities; host and port are bound per `<data>` element.
+    /// Inert unless [`Self::dependency`] is [`UriDependency::Complete`].
     pub authorities: Vec<Authority>,
-    /// Pooled path matchers.
+    /// Pooled path matchers. Inert unless [`Self::dependency`] is
+    /// [`UriDependency::Complete`].
     pub paths: Vec<PathMatcher>,
-    /// Pooled `android:mimeType` values.
+    /// Pooled `android:mimeType` values. Always effective.
     pub mime_types: Vec<String>,
+    /// Whether Android consults this filter's hosts/ports/paths at all;
+    /// see [`UriDependency`].
+    pub dependency: UriDependency,
+}
+
+/// How a filter's URI attributes depend on each other, i.e. which of the
+/// declared hosts/ports/paths Android actually consults.
+///
+/// The three states are mutually exclusive and computed at filter level
+/// (`scheme` and `host` are looked for anywhere in the filter, not per
+/// `<data>` element).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UriDependency {
+    /// A scheme *and* a host are declared somewhere in the filter, so every
+    /// declared authority and path matcher takes effect.
+    #[default]
+    Complete,
+    /// No `android:scheme` anywhere: Android ignores hosts, ports and paths
+    /// ("all the other URI attributes are ignored"), and a MIME-typed
+    /// intent is matched through [`EffectiveData::implicit_schemes`].
+    NoScheme,
+    /// A scheme but no `android:host` anywhere: ports and all path
+    /// attributes are ignored.
+    NoHost,
 }
 
 impl EffectiveData {
-    /// Whether any URI attribute is present. When no scheme is declared
-    /// anywhere in the filter, Android ignores hosts and paths, so
-    /// `authorities` / `paths` only take effect together with a scheme.
+    /// Whether any URI attribute (scheme/host/path) is declared. When no
+    /// scheme is declared anywhere in the filter, Android ignores hosts and
+    /// paths, so `authorities` / `paths` only take effect together with a
+    /// scheme.
     pub fn has_uri(&self) -> bool {
         !self.schemes.is_empty() || !self.authorities.is_empty() || !self.paths.is_empty()
+    }
+
+    /// Authorities Android actually consults: the pooled hosts when
+    /// [`UriDependency::Complete`], otherwise nothing (a host without a
+    /// scheme never matches).
+    pub fn effective_authorities(&self) -> &[Authority] {
+        match self.dependency {
+            UriDependency::Complete => &self.authorities,
+            UriDependency::NoScheme | UriDependency::NoHost => &[],
+        }
+    }
+
+    /// Path matchers Android actually consults: the pooled paths when
+    /// [`UriDependency::Complete`], otherwise nothing (a path needs both a
+    /// scheme and a host).
+    pub fn effective_paths(&self) -> &[PathMatcher] {
+        match self.dependency {
+            UriDependency::Complete => &self.paths,
+            UriDependency::NoScheme | UriDependency::NoHost => &[],
+        }
+    }
+
+    /// Schemes Android assumes when the filter declares a `mimeType` but no
+    /// `android:scheme` anywhere: `content:` and `file:` (AOSP
+    /// `matchData`: "If the filter does not specify any schemes, it will
+    /// implicitly match intents with no scheme, or the schemes *content:* or
+    /// *file:*"). Empty in every other case — an explicit scheme, or no
+    /// MIME type, suppresses the implicit match.
+    pub fn implicit_schemes(&self) -> &'static [&'static str] {
+        if self.mime_types.is_empty() || !self.schemes.is_empty() {
+            &[]
+        } else {
+            &["content", "file"]
+        }
+    }
+}
+
+/// Which URI part a `<uri-relative-filter-group>` matcher constrains.
+/// `path*`, `fragment*` and `query*` attributes share the same five
+/// attribute shapes ([`PathMatchKind`]), hence the reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UriPart {
+    /// `android:path` / `pathPrefix` / `pathSuffix` / `pathPattern` /
+    /// `pathAdvancedPattern`.
+    Path,
+    /// `android:fragment*` (API 35).
+    Fragment,
+    /// `android:query*` (API 35).
+    Query,
+}
+
+/// One `path*` / `fragment*` / `query*` matcher declared inside a
+/// `<uri-relative-filter-group>` `<data>` child.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UriPartMatcher {
+    /// Which URI part this matcher constrains.
+    pub part: UriPart,
+    /// Which attribute shape declared it.
+    pub kind: PathMatchKind,
+    /// The declared value.
+    pub value: String,
+}
+
+/// One `<data>` child of a `<uri-relative-filter-group>`.
+///
+/// Only `path*`, `fragment*` and `query*` attributes are legal here. The
+/// `<data>` elements of one group are **ANDed** (unlike the `<data>`
+/// elements of the filter itself, which are ORed), so two `path` matchers
+/// in one group can never both match — which is exactly why ASC-RS reports
+/// a group verbatim instead of folding it into [`EffectiveData`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RelativeDataSpec {
+    /// The declared matchers, in attribute order.
+    pub parts: Vec<UriPartMatcher>,
+}
+
+/// One API 35 `<uri-relative-filter-group>` child of an `<intent-filter>`.
+///
+/// ASC-RS parses and preserves these so nothing is dropped, but it does
+/// **not** evaluate them: the allow/deny ordering, the AND semantics of the
+/// group's `<data>` children and their interaction with the filter's own
+/// `<data>` (evaluated first, in source order) are not modelled. Treat
+/// [`IntentFilter::effective_data`] as incomplete whenever
+/// [`IntentFilter::has_uri_relative_groups`] is true.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UriRelativeFilterGroup {
+    /// `android:allow` — `true` (the platform default) when a matching
+    /// group makes the filter match, `false` when it makes the filter
+    /// *not* match.
+    pub allow: bool,
+    /// The group's `<data>` children in declaration order.
+    pub data: Vec<RelativeDataSpec>,
+}
+
+impl Default for UriRelativeFilterGroup {
+    fn default() -> Self {
+        // `android:allow` defaults to true on the platform.
+        Self {
+            allow: true,
+            data: Vec::new(),
+        }
     }
 }
 
@@ -265,6 +413,10 @@ pub struct IntentFilter {
     /// so JSON consumers cannot misread `data` as independent URI
     /// alternatives.
     pub effective_data: EffectiveData,
+    /// API 35 `<uri-relative-filter-group>` children, in declaration order.
+    /// Reported raw and **not** evaluated; see
+    /// [`UriRelativeFilterGroup`].
+    pub uri_relative_groups: Vec<UriRelativeFilterGroup>,
     /// `android:autoVerify` (App Links, API 23+); `None` when undeclared.
     pub auto_verify: Option<bool>,
     /// `android:priority` (integer, may be negative); `None` when undeclared.
@@ -305,7 +457,23 @@ impl IntentFilter {
             }
             push_unique(&mut eff.mime_types, d.mime_type.as_deref());
         }
+        // `scheme` and `host` are looked for across the whole filter: a host
+        // declared beside no scheme is ignored, and a path needs both.
+        eff.dependency = if eff.schemes.is_empty() {
+            UriDependency::NoScheme
+        } else if eff.authorities.is_empty() {
+            UriDependency::NoHost
+        } else {
+            UriDependency::Complete
+        };
         eff
+    }
+
+    /// Whether this filter declares API 35 `<uri-relative-filter-group>`
+    /// children, i.e. whether [`Self::effective_data`] is an incomplete
+    /// description of the URI match surface.
+    pub fn has_uri_relative_groups(&self) -> bool {
+        !self.uri_relative_groups.is_empty()
     }
 }
 
@@ -707,6 +875,10 @@ struct Frame {
     /// If this frame is an `<intent-filter>`, the slot inside its owning
     /// component's `intent_filters` vector.
     filter_slot: Option<usize>,
+    /// If this frame is a `<uri-relative-filter-group>` (API 35), the slot
+    /// inside its owning filter's `uri_relative_groups` vector. Its nested
+    /// `<data>` children route there instead of into `IntentFilter::data`.
+    group_slot: Option<usize>,
     /// If this frame is an `<intent>` inside `<queries>`, the slot inside
     /// `queries.intents`.
     queries_intent: Option<usize>,
@@ -1128,25 +1300,28 @@ impl<'a> Parser<'a> {
                 f.name.as_str(),
                 f.component,
                 f.filter_slot,
+                f.group_slot,
                 f.queries_intent,
             )
         });
         let mut component: Option<(ComponentKind, usize)> = None;
         let mut filter_slot: Option<usize> = None;
+        let mut group_slot: Option<usize> = None;
         let mut queries_intent: Option<usize> = None;
         match parent {
             None => self.process_root_element(name, attrs)?,
-            Some(("manifest", _, _, _)) => self.process_manifest_child(name, attrs)?,
-            Some(("application", _, _, _)) => {
+            Some(("manifest", ..)) => self.process_manifest_child(name, attrs)?,
+            Some(("application", ..)) => {
                 component = self.process_application_child(name, attrs)?;
             }
-            Some(("queries", _, _, _)) => {
+            Some(("queries", ..)) => {
                 queries_intent = self.process_queries_child(name, attrs);
             }
-            Some(("intent-filter", Some((kind, comp_idx)), Some(filter_idx), _)) => {
-                // <action> / <category> / <data> inside a filter. This arm
-                // must precede the generic component arm: a filter frame
-                // also carries its owning component.
+            Some(("intent-filter", Some((kind, comp_idx)), Some(filter_idx), _, _)) => {
+                // <action> / <category> / <data> /
+                // <uri-relative-filter-group> inside a filter. This arm must
+                // precede the generic component arm: a filter frame also
+                // carries its owning component.
                 if let Some(comp) = self.component_mut(kind, comp_idx)
                     && let Some(f) = comp.intent_filters.get_mut(filter_idx)
                 {
@@ -1164,11 +1339,37 @@ impl<'a> Parser<'a> {
                         "data" => {
                             f.data.push(data_spec_from_attrs(attrs));
                         }
+                        "uri-relative-filter-group" => {
+                            f.uri_relative_groups
+                                .push(uri_relative_group_from_attrs(attrs));
+                            group_slot = Some(f.uri_relative_groups.len() - 1);
+                            // Carry the route so the group's <data> children
+                            // land in the group, not in the filter's own data.
+                            component = Some((kind, comp_idx));
+                            filter_slot = Some(filter_idx);
+                        }
                         _ => {}
                     }
                 }
             }
-            Some((_, Some((kind, comp_idx)), _, _)) => {
+            Some((
+                "uri-relative-filter-group",
+                Some((kind, comp_idx)),
+                Some(filter_idx),
+                Some(group_idx),
+                _,
+            )) => {
+                // <data> inside an API 35 <uri-relative-filter-group>: only
+                // path*/fragment*/query* attributes are legal there.
+                if name == "data"
+                    && let Some(comp) = self.component_mut(kind, comp_idx)
+                    && let Some(f) = comp.intent_filters.get_mut(filter_idx)
+                    && let Some(group) = f.uri_relative_groups.get_mut(group_idx)
+                {
+                    group.data.push(relative_data_from_attrs(attrs));
+                }
+            }
+            Some((_, Some((kind, comp_idx)), ..)) => {
                 // Direct child of a component: intent-filter (creates a
                 // slot) or meta-data; anything else is ignored.
                 match name {
@@ -1203,7 +1404,7 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
-            Some(("intent", _, _, Some(qi))) => {
+            Some(("intent", _, _, _, Some(qi))) => {
                 // <action>/<category>/<data> inside a queries <intent>.
                 if let Some(q) = self.info.queries.as_mut()
                     && let Some(f) = q.intents.get_mut(qi)
@@ -1233,6 +1434,7 @@ impl<'a> Parser<'a> {
             name: name.to_string(),
             component,
             filter_slot,
+            group_slot,
             queries_intent,
         })
     }
@@ -1483,6 +1685,67 @@ fn data_spec_from_attrs(attrs: &[XmlAttr]) -> DataSpec {
         path_suffix: attr(attrs, "pathSuffix").map(str::to_string),
         mime_type: attr(attrs, "mimeType").map(str::to_string),
     }
+}
+
+/// The `path*` / `fragment*` / `query*` attributes legal on a `<data>`
+/// child of a `<uri-relative-filter-group>`, with the URI part each one
+/// constrains (API 35).
+const URI_RELATIVE_ATTRS: &[(&str, UriPart, PathMatchKind)] = &[
+    ("path", UriPart::Path, PathMatchKind::Exact),
+    ("pathPrefix", UriPart::Path, PathMatchKind::Prefix),
+    ("pathSuffix", UriPart::Path, PathMatchKind::Suffix),
+    ("pathPattern", UriPart::Path, PathMatchKind::Pattern),
+    (
+        "pathAdvancedPattern",
+        UriPart::Path,
+        PathMatchKind::AdvancedPattern,
+    ),
+    ("fragment", UriPart::Fragment, PathMatchKind::Exact),
+    ("fragmentPrefix", UriPart::Fragment, PathMatchKind::Prefix),
+    ("fragmentSuffix", UriPart::Fragment, PathMatchKind::Suffix),
+    ("fragmentPattern", UriPart::Fragment, PathMatchKind::Pattern),
+    (
+        "fragmentAdvancedPattern",
+        UriPart::Fragment,
+        PathMatchKind::AdvancedPattern,
+    ),
+    ("query", UriPart::Query, PathMatchKind::Exact),
+    ("queryPrefix", UriPart::Query, PathMatchKind::Prefix),
+    ("querySuffix", UriPart::Query, PathMatchKind::Suffix),
+    ("queryPattern", UriPart::Query, PathMatchKind::Pattern),
+    (
+        "queryAdvancedPattern",
+        UriPart::Query,
+        PathMatchKind::AdvancedPattern,
+    ),
+];
+
+/// Build a `<uri-relative-filter-group>` from its attributes
+/// (`android:allow`, default `true`).
+fn uri_relative_group_from_attrs(attrs: &[XmlAttr]) -> UriRelativeFilterGroup {
+    UriRelativeFilterGroup {
+        allow: tri_bool_attr(attrs, "allow").unwrap_or(true),
+        data: Vec::new(),
+    }
+}
+
+/// Build one `<data>` child of a `<uri-relative-filter-group>`; only the
+/// [`URI_RELATIVE_ATTRS`] attributes are legal there, in declaration order.
+fn relative_data_from_attrs(attrs: &[XmlAttr]) -> RelativeDataSpec {
+    let parts = attrs
+        .iter()
+        .filter_map(|a| {
+            let (_, part, kind) = URI_RELATIVE_ATTRS
+                .iter()
+                .find(|(name, _, _)| *name == a.name)?;
+            Some(UriPartMatcher {
+                part: *part,
+                kind: *kind,
+                value: a.value.clone()?,
+            })
+        })
+        .collect();
+    RelativeDataSpec { parts }
 }
 
 /// Append one permission entry of the given declaration type. Shared by
