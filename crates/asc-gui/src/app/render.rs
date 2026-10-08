@@ -138,18 +138,19 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ShowSmali);
                     }
-                    let sel_ok = self.active_symbol_sel().is_some();
+                    let method_ok = self.resolved_method().is_some();
+                    let method_hint = self.method_action_block().unwrap_or("no method selected");
                     if ui
-                        .add_enabled(sel_ok, egui::Button::new("Show Smali of clicked method"))
-                        .on_disabled_hover_text("click a method identifier first")
+                        .add_enabled(method_ok, egui::Button::new("Show Smali of clicked method"))
+                        .on_disabled_hover_text(method_hint)
                         .clicked()
                     {
                         ui.close();
                         self.queue(Command::ShowSmaliMethod);
                     }
                     if ui
-                        .add_enabled(sel_ok, egui::Button::new("Show callees of clicked method"))
-                        .on_disabled_hover_text("click a method identifier first")
+                        .add_enabled(method_ok, egui::Button::new("Show callees of clicked method"))
+                        .on_disabled_hover_text(method_hint)
                         .clicked()
                     {
                         ui.close();

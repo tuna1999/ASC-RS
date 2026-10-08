@@ -587,22 +587,50 @@ fn clip_ranges_to_line(
         .collect()
 }
 
-/// Selection model for the identifier at `byte` (F24): token,
-/// enclosing-method byte range, code-state occurrences.
+/// Selection model for the identifier at `byte` (F24, audit F2): the
+/// lexical token, the enclosing method/block byte range, its code-state
+/// occurrences, and — for Smali listings — the *semantic* identity of
+/// the clicked identifier (method owning-class + proto via `.method` /
+/// `invoke-*` targets; see [`crate::semantic`]).
 pub(crate) fn symbol_selection_for(
     descriptor: &str,
     source: &str,
     byte: usize,
 ) -> Option<SymbolSelection> {
+    if crate::state::tabs::smali_view_of(descriptor).is_some() {
+        // Smali: resolve straight from the byte offset — the lexical token
+        // may not be a plain identifier (e.g. `<init>`), so it is not a gate
+        // for the selection here.
+        let (method, occurrences, resolved) =
+            crate::semantic::smali_resolve(descriptor, source, byte);
+        let method = method?;
+        let token = crate::semantic::lexical_token_at(source, byte).unwrap_or_else(|| {
+            resolved
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_default()
+        });
+        return Some(SymbolSelection {
+            descriptor: descriptor.to_string(),
+            token,
+            method,
+            occurrences,
+            resolved,
+        });
+    }
+    // Java (decompiled) source: existing lexical method range + semantic
+    // resolution that never fabricates a declaring class.
     let (s, e) = crate::source_edit::token_at(source, byte)?;
     let token = source[s..e].to_string();
     let method = crate::source_edit::find_method_range(source, byte)?;
     let occurrences = crate::source_edit::occurrences_in_range(source, method.0, method.1, &token);
+    let resolved = crate::semantic::java_resolve(descriptor, source, s, e, &token);
     Some(SymbolSelection {
         descriptor: descriptor.to_string(),
         token,
         method,
         occurrences,
+        resolved,
     })
 }
 

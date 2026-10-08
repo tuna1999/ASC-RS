@@ -40,12 +40,22 @@ pub(crate) struct StatusLine {
 /// Clicked-identifier selection (rename/comment analysis aid): the
 /// token, its enclosing method's byte range, and code-state
 /// occurrences — valid for one document version only.
+///
+/// `descriptor` is the *document key* the click happened in (anti-stale
+/// identity; audit F1). The semantic meaning of the click — what the
+/// identifier *is* and which class declares it — lives in `resolved`
+/// (audit F2) and is never re-derived from the document owner.
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolSelection {
     pub(crate) descriptor: String,
     pub(crate) token: String,
+    /// Byte range of the enclosing method/block (rename scope).
     pub(crate) method: (usize, usize),
     pub(crate) occurrences: Vec<(usize, usize)>,
+    /// Semantic identity of the clicked identifier, when the view could
+    /// prove it. `Unknown`/`None` identifiers must not dispatch member
+    /// actions.
+    pub(crate) resolved: Option<crate::semantic::ResolvedSymbol>,
 }
 
 /// Main application shell.
@@ -280,17 +290,41 @@ impl AscApp {
             .then_some(*line)
     }
 
-    /// The class descriptor + token a click-scoped action targets.
+    /// The (declaring class, method name) the active selection resolved
+    /// to, but only when it actually *is* a method with a known declaring
+    /// class (audit F2).
     ///
-    /// `None` when no selection applies to the document on screen, or
-    /// when that document has no owning class (a text tab): a `#smali`
-    /// view key is a *tab* identity, never an engine descriptor, so the
-    /// class is resolved through [`crate::state::tabs::class_of_tab_key`]
-    /// (audit F1/F2).
-    fn clicked_member(&self) -> Option<(String, String)> {
+    /// The document on screen is never used as the target class: a
+    /// `B.foo()` click in A's document resolves to `B` when the view
+    /// proves it (Smali `invoke-*`), and is refused (rather than
+    /// masqueraded as `A::foo`) when it cannot be proven.
+    pub(crate) fn resolved_method(&self) -> Option<(String, String)> {
         let sel = self.active_symbol_sel()?;
-        let class = crate::state::tabs::class_of_tab_key(&sel.descriptor)?;
-        Some((class.to_string(), sel.token.clone()))
+        let r = sel.resolved.as_ref()?;
+        if r.kind != crate::semantic::SymbolKind::Method {
+            return None;
+        }
+        let owner = r.owner.as_ref()?;
+        Some((owner.clone(), r.name.clone()))
+    }
+
+    /// Why the method-scoped actions (ShowSmaliMethod / ShowCallees) and
+    /// the method-find are currently unavailable, or `None` when a method
+    /// is resolved and may proceed.
+    pub(crate) fn method_action_block(&self) -> Option<&'static str> {
+        match self.active_symbol_sel() {
+            None => Some("click a method identifier first"),
+            Some(sel) => match &sel.resolved {
+                None => Some("selected identifier is not a method"),
+                Some(r) if r.kind != crate::semantic::SymbolKind::Method => {
+                    Some("selected identifier is not a method")
+                }
+                Some(r) if r.owner.is_none() => {
+                    Some("method's declaring class is not resolvable in this view")
+                }
+                _ => None,
+            },
+        }
     }
 
     /// The key of the document on screen, when there is one.
@@ -1008,18 +1042,15 @@ impl AscApp {
                 self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
             }
             Command::ShowSmaliMethod | Command::ShowCallees => {
-                // Both act on the clicked identifier, and only while it
-                // applies to the document on screen. The class is the
-                // click's own document class, resolved through
-                // `class_of_tab_key` (a `#smali` view key is a tab
-                // identity, never an engine descriptor — audit F1/F2).
-                let Some((descriptor, method)) = self.clicked_member() else {
-                    let msg = if self.active_symbol_sel().is_some() {
-                        "open a class first"
-                    } else {
-                        "click a method identifier first"
-                    };
-                    self.set_status(msg, false);
+                // Both act on the clicked identifier, only while it
+                // applies to the document on screen AND resolves to a
+                // method with a known declaring class (audit F2: the
+                // document on screen is never the target class).
+                let Some((descriptor, method)) = self.resolved_method() else {
+                    self.set_status(
+                        self.method_action_block().unwrap_or("no method selected"),
+                        false,
+                    );
                     return;
                 };
                 let Some(session) = &self.session else { return };
@@ -1036,14 +1067,11 @@ impl AscApp {
                 self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
             }
             Command::ShowClassStrings => {
-                // Class-scoped: the click's own document class, else the
-                // active tab / tree selection — never a `#smali` view key
-                // and never a descriptor from another document's click.
-                let descriptor = self
-                    .clicked_member()
-                    .map(|(class, _)| class)
-                    .or_else(|| self.active_class_descriptor().map(str::to_string));
-                let Some(descriptor) = descriptor else {
+                // Class-scoped: the class of the active tab / tree
+                // selection — never a `#smali` view key and never a
+                // method's declaring class (this shows *this* class's
+                // own strings).
+                let Some(descriptor) = self.active_class_descriptor().map(str::to_string) else {
                     self.set_status("select a class first", false);
                     return;
                 };
@@ -1112,15 +1140,15 @@ impl AscApp {
                 self.recompute_find_matches();
             }
             Command::FindUsagesOfClicked => {
-                // Workflow B: prefill the search bar with the clicked
-                // identifier as a method-scoped find with a class
-                // filter pinned to the click's class. The click must
-                // apply to the document on screen, and the filter is
-                // that class — never a `#smali` view key (audit F1).
-                // Falls back to global search when the click didn't
-                // target a member (still useful — same UI surface).
-                if let Some((class, token)) = self.clicked_member() {
-                    self.search.input = token;
+                // Workflow B: prefill the search bar with the *resolved*
+                // method and pin the class filter to its *declaring*
+                // class (audit F2 — never the document on screen, never a
+                // raw token that is not actually a method). A resolved
+                // method with an unknown declaring class, or a non-method
+                // identifier, falls back to a plain global search instead
+                // of masquerading as a member-method find.
+                if let Some((class, method)) = self.resolved_method() {
+                    self.search.input = method;
                     self.search.class_filter =
                         asc_core::normalize_class_name(&class).unwrap_or(class);
                     self.search.kind = SearchKind::Method;
@@ -1131,22 +1159,31 @@ impl AscApp {
                 self.queue(Command::GlobalSearch);
             }
             Command::GoToDeclaration => {
-                // Workflow D: open the class the click landed on, if
-                // any. A selection from another document does not
-                // count (audit F1). For non-class tokens we still run
-                // a search — "go to declaration" of a member in the
-                // absence of a class-keyed find is a TODO at the
-                // engine level.
-                if let Some((class, _)) = self.clicked_member() {
-                    self.queue(Command::OpenClass {
-                        descriptor: class,
-                        pin: false,
-                        line: None,
-                        origin: NavOrigin::Declaration,
-                    });
+                // Workflow D: open the class that actually *declares*
+                // the selected symbol (audit F2). A class reference opens
+                // itself; a method/field with a resolved declaring class
+                // opens that class; everything else — a local, an
+                // unresolved identifier, an owner we could not prove — is
+                // refused instead of re-opening the document on screen.
+                let sel = self.active_symbol_sel();
+                let target = match sel.and_then(|s| s.resolved.as_ref()) {
+                    Some(r) if r.kind == crate::semantic::SymbolKind::Class => Some(r.name.clone()),
+                    Some(r) if r.owner.is_some() => r.owner.clone(),
+                    _ => None,
+                };
+                let Some(descriptor) = target else {
+                    self.set_status(
+                        "go to declaration: no class/declaration target resolved for this identifier",
+                        false,
+                    );
                     return;
-                }
-                self.set_status("go to declaration: no class identifier selected", false);
+                };
+                self.queue(Command::OpenClass {
+                    descriptor,
+                    pin: false,
+                    line: None,
+                    origin: NavOrigin::Declaration,
+                });
             }
             Command::QuickOpen => {
                 self.palette = Some(PaletteMode::QuickOpen);

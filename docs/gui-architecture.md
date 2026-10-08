@@ -136,20 +136,48 @@ cache hit and a cache miss, so the first open is recorded in the history
 deduplicated, and a `#smali` view key never reaches the engine as a class
 descriptor (GUI-hardening audit F1/F2).
 
-### Click-derived state (GUI-hardening audit F1)
+### Click-derived state (GUI-hardening audit F1/F2)
 
 `symbol_sel` and `last_click` are captured from **one document version**:
 the document key it was clicked in, the token, and byte / line offsets
 into that source. Consumers read them through `AscApp::active_symbol_sel`
-/ `AscApp::clicked_line` / `clicked_member`, which refuse a value whose
-document key is not the one on screen — a document switch must never let
-class A's descriptor, token or line number drive an action in class B
-(dispatch, bookmark or line comment). A source-replacing edit drops the
-selection (its offsets are invalid); a line jump inside the same document
-keeps it. A click in a `#smali` listing resolves its owning class through
-`class_of_tab_key`, never the view key. `comment_target` carries its
-document key for the same reason: the bar applies only to the document it
-was armed for.
+/ `AscApp::clicked_line`, which refuse a value whose document key is not
+the one on screen — a document switch must never let class A's descriptor,
+token or line number drive an action in class B (dispatch, bookmark or
+line comment). A source-replacing edit drops the selection (its offsets
+are invalid); a line jump inside the same document keeps it. A click in a
+`#smali` listing resolves its owning class through `class_of_tab_key`,
+never the view key. `comment_target` carries its document key for the same
+reason: the bar applies only to the document it was armed for.
+
+**Lexical vs semantic identity (audit F2).** The document key is only an
+anti-stale identity; it is *never* used as a declaration owner.
+`SymbolSelection.resolved` (`semantic::ResolvedSymbol`) carries what the
+identifier *means* — `kind` (Class / Method / Field), its **declaring
+class** (`owner`, when the view proves it) and, for Smali, the prototype.
+Two parsers back it (`crates/asc-gui/src/semantic.rs`): a structured
+**Smali** parser (`.method…/​.end method` blocks, `invoke-*` / `iget` /
+`sget` / `.field` targets, `L…;` descriptors) and a deliberately
+conservative **Java** parser (method declarations / self-calls resolve to
+the current class; a qualified call/field access resolves `owner = None`;
+a bare identifier is not a member). Every parser fails closed — nothing
+fabricates an owner, never panics.
+
+Consumers route through semantic resolution, not the raw token:
+
+- `AscApp::resolved_method()` → `(declaring_class, name)` only when the
+  selection is actually a Method with a known owner. `ShowSmaliMethod`
+  and `ShowCallees` require it, and the class they act on is that owner —
+  never the document on screen (a `B.foo()` click resolves to `B`).
+- `GoToDeclaration` opens the selected identifier's **declaring** class: a
+  class reference opens itself, a resolved method/field owner opens that
+  class; an unresolved/local identifier is refused instead of re-opening
+  the document on screen.
+- `FindUsagesOfClicked` runs a method find pinned to the resolved
+  declaring class; a non-method identifier degrades to a plain global
+  search, never a masqueraded member find.
+- `method_action_block()` drives the disabled text of the method actions
+  (no selection / not a method / owner not resolvable).
 
 ## 5. Search (fixes F7)
 

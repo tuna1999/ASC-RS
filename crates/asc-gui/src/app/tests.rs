@@ -1110,79 +1110,112 @@ fn rename_and_comment_edit_flow() {
     assert!(doc.source.ends_with("}\n"), "tail preserved");
 }
 
-/// `Command::GoToDeclaration` on an `L...;` selection queues an
-/// `OpenClass` for the resolved owner. Covers `JADX-GUI-003`
-/// (Go to declaration of selected symbol). The test inspects
-/// the queue — `navigate_to` would need a live `WorkspaceSession`
-/// to call `spawn_decompile`, which is outside the unit-test
-/// scope (covered by `integration::selfcheck_on_workload_apk`).
+/// `Command::GoToDeclaration` opens the class that *actually declares* the
+/// selected identifier (audit F2), driven through the production click path
+/// — never the document on screen. A class-descriptor click in a Smali
+/// listing opens that class; a register (a non-member) is refused.
+/// Covers `JADX-GUI-003` (Go to declaration of selected symbol).
 #[test]
-fn go_to_declaration_jumps_to_owner() {
+fn go_to_declaration_resolves_the_declared_class() {
+    let smali = "\
+.class Lcom/foo/A;
+.super Ljava/lang/Object;
+.method public m()V
+    .registers 1
+    new-instance v0, Lcom/foo/Bar;
+    return-void
+.end method
+";
     let mut app = empty_app();
-    // The click happened in that class's document, which is on screen
-    // (audit F1: the selection is only valid for its own document).
-    app.active_doc = Some(Arc::new(Document::new(
-        "Lcom/foo/Bar;".into(),
-        "classes.dex".into(),
-        "class Bar {}\n".into(),
-    )));
-    // Simulate a click on an `Lcom/foo/Bar;` reference.
-    app.symbol_sel = Some(SymbolSelection {
-        descriptor: "Lcom/foo/Bar;".into(),
-        token: "Bar".into(),
-        method: (0, 10),
-        occurrences: vec![(0, 3)],
-    });
     let ctx = egui::Context::default();
+    app.active_doc = Some(Arc::new(Document::new(
+        "Lcom/foo/A;#smali".into(),
+        "classes.dex".into(),
+        smali.into(),
+    )));
+    app.tabs.open_pinned("Lcom/foo/A;#smali");
+    // A click on the `Lcom/foo/Bar;` class reference (real click path).
+    app.symbol_sel = Some(click_selection("Lcom/foo/A;#smali", smali, "Lcom/foo/Bar;"));
     app.dispatch(Command::GoToDeclaration, &ctx);
-    // Exactly one command queued, opening the resolved owner.
     assert_eq!(app.commands.len(), 1, "one OpenClass queued");
     match &app.commands[0] {
         Command::OpenClass {
             descriptor, origin, ..
         } => {
-            assert_eq!(descriptor, "Lcom/foo/Bar;");
+            assert_eq!(
+                descriptor, "Lcom/foo/Bar;",
+                "goes to the declared class, not the document on screen"
+            );
             assert_eq!(*origin, NavOrigin::Declaration);
         }
         other => panic!("expected OpenClass, got {other:?}"),
     }
+
+    // A click on a register (a non-member) must *not* re-open the document.
+    app.commands.clear();
+    app.symbol_sel = Some(click_selection("Lcom/foo/A;#smali", smali, "v0"));
+    app.dispatch(Command::GoToDeclaration, &ctx);
+    assert!(
+        app.commands.is_empty(),
+        "a non-member click must not masquerade as a declaration owner"
+    );
 }
 
-/// `Command::FindUsagesOfClicked` pre-fills the search bar with
-/// the click's token and a class filter pinned to the click's
-/// descriptor, then queues a `RunSearch`. Covers workflow B
-/// (`JADX-GUI-002` member-scoped find from a click).
+/// `Command::FindUsagesOfClicked` pre-fills a method search pinned to the
+/// *declared* class of a resolved method (audit F2, real click path).
+/// A local identifier (not a method) is not dispatched as a method usage —
+/// it degrades to a plain global search instead.
 #[test]
 fn find_usages_method_query_via_click() {
+    let src = "class A {\n  void m() {\n    doThing();\n  }\n}\n";
     let mut app = empty_app();
-    // The click happened in that class's document, which is on screen.
-    app.active_doc = Some(Arc::new(Document::new(
-        "Lcom/foo/Bar;".into(),
-        "classes.dex".into(),
-        "class Bar {}\n".into(),
-    )));
-    app.symbol_sel = Some(SymbolSelection {
-        descriptor: "Lcom/foo/Bar;".into(),
-        token: "doThing".into(),
-        method: (0, 10),
-        occurrences: vec![(0, 8)],
-    });
     let ctx = egui::Context::default();
+    app.active_doc = Some(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        src.into(),
+    )));
+    app.tabs.open_pinned("LA;");
+    app.symbol_sel = Some(click_selection("LA;", src, "doThing"));
     app.dispatch(Command::FindUsagesOfClicked, &ctx);
-    // The search controller was retargeted before RunSearch was
-    // queued.
     assert_eq!(app.search.kind, SearchKind::Method);
     assert_eq!(app.search.input, "doThing");
     assert!(
-        app.search.class_filter.contains("Bar"),
-        "class filter pinned to click descriptor: {:?}",
+        app.search.class_filter.contains("A"),
+        "class filter pinned to the declared class: {:?}",
         app.search.class_filter
     );
-    // RunSearch is queued (its execution depends on a live
-    // session, asserted at integration level).
     assert!(
         app.commands.iter().any(|c| matches!(c, Command::RunSearch)),
         "RunSearch queued"
+    );
+    assert!(
+        !app.commands
+            .iter()
+            .any(|c| matches!(c, Command::GlobalSearch)),
+        "a resolved method never degrades to global search"
+    );
+
+    // A local is not a method: it must not prefill a method search.
+    let src2 = "class A {\n  void m() {\n    int foo = 0;\n  }\n}\n";
+    app.commands.clear();
+    app.search.input.clear();
+    app.active_doc = Some(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        src2.into(),
+    )));
+    app.symbol_sel = Some(click_selection("LA;", src2, "int foo"));
+    app.dispatch(Command::FindUsagesOfClicked, &ctx);
+    assert!(
+        app.search.input.is_empty(),
+        "a local must not prefill the bar with itself as a method"
+    );
+    assert!(
+        app.commands
+            .iter()
+            .any(|c| matches!(c, Command::GlobalSearch)),
+        "a non-method identifier degrades to global search, not a method find"
     );
 }
 
@@ -1395,6 +1428,55 @@ fn open_smali_view(app: &mut AscApp, ctx: &egui::Context, class: &str) {
     });
 }
 
+/// Drive the *production* selection path (the same `symbol_selection_for`
+/// the editor's click handler calls) on `descriptor`'s source at `needle`,
+/// asserting a selection is produced. Audit F2: acceptance tests for click
+/// features must never hand-build `SymbolSelection`.
+fn click_selection(descriptor: &str, source: &str, needle: &str) -> crate::app::SymbolSelection {
+    let byte = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("needle {needle:?} absent"));
+    crate::ui::editor::symbol_selection_for(descriptor, source, byte)
+        .expect("the production click path must produce a selection")
+}
+
+/// A manual `SymbolSelection` for *dispatch-level* unit tests (rename,
+/// navigation reload, stale-document guards) that are not the acceptance
+/// for a click feature. Callers state the resolved method identity explicitly.
+fn manual_method_selection(
+    descriptor: &str,
+    owner: &str,
+    name: &str,
+) -> crate::app::SymbolSelection {
+    crate::app::SymbolSelection {
+        descriptor: descriptor.to_string(),
+        token: name.to_string(),
+        method: (0, 0),
+        occurrences: Vec::new(),
+        resolved: Some(crate::semantic::ResolvedSymbol {
+            kind: crate::semantic::SymbolKind::Method,
+            owner: Some(owner.to_string()),
+            name: name.to_string(),
+            proto: None,
+        }),
+    }
+}
+
+/// Click the declaring class's **own** constructor signature in a real Smali
+/// listing (`…` `.method public constructor <init>(…)`), via the production
+/// path. `source.find("<init>()V")` is deliberately NOT used — that also
+/// matches `invoke …;-><init>()V` cross-class calls, which would resolve to
+/// the *invoked* class rather than the declaring one.
+fn click_class_ctor(descriptor: &str, source: &str) -> crate::app::SymbolSelection {
+    let marker = "constructor <init>(";
+    let off = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("{marker:?} absent"))
+        + "constructor ".len();
+    crate::ui::editor::symbol_selection_for(descriptor, source, off)
+        .expect("the production ctor-signature click must produce a selection")
+}
+
 /// A second real class for the "tab went to the background" step of the
 /// eviction tests.
 const SMALI_LIFECYCLE_SECOND_CLASS: &str = "Lcom/google/android/material/timepicker/ClockHandView;";
@@ -1535,13 +1617,13 @@ fn evicted_method_smali_tab_keeps_its_method_scope() {
         "the class document must be on screen for its click to apply (audit F1)"
     );
     crate::app::AscApp::run_ui(&ctx, |ui| {
-        // The click that selects the method identifier, in that document.
-        app.symbol_sel = Some(SymbolSelection {
-            descriptor: SMALI_LIFECYCLE_CLASS.to_string(),
-            token: "<init>".to_string(),
-            method: (0, 0),
-            occurrences: Vec::new(),
-        });
+        // A click that selects the method identifier (dispatch/reload test,
+        // not a click acceptance: we state the resolved method explicitly).
+        app.symbol_sel = Some(manual_method_selection(
+            SMALI_LIFECYCLE_CLASS,
+            SMALI_LIFECYCLE_CLASS,
+            "<init>",
+        ));
         app.dispatch(Command::ShowSmaliMethod, ui.ctx());
     });
     assert!(
@@ -1712,13 +1794,12 @@ fn navigation_history_restores_evicted_method_smali() {
         "the class document must be on screen for its click to apply (audit F1)"
     );
     crate::app::AscApp::run_ui(&ctx, |ui| {
-        // The click that selects the method identifier, in that document.
-        app.symbol_sel = Some(SymbolSelection {
-            descriptor: SMALI_LIFECYCLE_CLASS.to_string(),
-            token: "<init>".to_string(),
-            method: (0, 0),
-            occurrences: Vec::new(),
-        });
+        // A click that selects the method identifier (dispatch/nav test).
+        app.symbol_sel = Some(manual_method_selection(
+            SMALI_LIFECYCLE_CLASS,
+            SMALI_LIFECYCLE_CLASS,
+            "<init>",
+        ));
         app.dispatch(Command::ShowSmaliMethod, ui.ctx());
     });
     assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
@@ -2283,12 +2364,11 @@ fn frame_shortcut_n_routes_to_rename() {
         "classes.dex".into(),
         "class A { void foo() {} }\n".into(),
     )));
-    app.symbol_sel = Some(SymbolSelection {
-        descriptor: "LA;".into(),
-        token: "foo".into(),
-        method: (0, 4),
-        occurrences: vec![(0, 3)],
-    });
+    app.symbol_sel = Some(click_selection(
+        "LA;",
+        "class A {\n  void foo() {}\n}\n",
+        "foo()",
+    ));
     let ctx = egui::Context::default();
     app.dispatch(Command::BeginRenameSymbol, &ctx);
     assert!(app.show_rename, "rename bar opened");
@@ -2731,39 +2811,27 @@ fn overlay_windows_render() {
 
 /// ASC-RS-GUI-004 + ASC-RS-GUI-001: method-scoped Smali opens a
 /// `#smali#method` tab; one-hop callees land in the REFERENCES tab.
-/// Corpus-gated.
+/// Corpus-gated. The clicks go through the *production* selection path
+/// (a real click in the Smali listing resolves the method + its class) —
+/// no `symbol_sel` is hand-built (audit F2).
 #[test]
 fn method_smali_and_callees_e2e() {
-    let Some(apk) = corpus() else {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
         eprintln!("corpus fixture missing; skipping");
         return;
     };
-    let ctx = egui::Context::default();
-    let mut app = AscApp::new(Some(apk));
-    for _ in 0..600 {
-        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
-        if app.session.is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(app.session.is_some(), "artifact loaded");
     let descriptor = "Lcom/google/android/material/timepicker/ClockFaceView;";
-    // The class must be on screen before its click can apply (audit F1).
-    crate::app::AscApp::run_ui(&ctx, |ui| {
-        app.navigate_to(descriptor, false, None, NavOrigin::Tree, ui.ctx());
-    });
+    let full = crate::task::TaskManager::smali_key(descriptor, None);
+    open_smali_view(&mut app, &ctx, descriptor);
     assert!(
-        pump_until(&mut app, &ctx, |a| a.documents.contains(descriptor)),
-        "the class document must land"
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&full)),
+        "the smali listing must land"
     );
-    // Simulate the click that selects a method identifier, in it.
-    app.symbol_sel = Some(crate::app::SymbolSelection {
-        descriptor: descriptor.into(),
-        token: "<init>".into(),
-        method: (0, 0),
-        occurrences: vec![],
-    });
+    let source = app.documents.get(&full).unwrap().source.clone();
+    // A real click on the `.method public constructor <init>(…)` signature.
+    let sel = click_class_ctor(&full, &source);
+    app.symbol_sel = Some(sel);
     crate::app::AscApp::run_ui(&ctx, |ui| {
         app.dispatch(Command::ShowCallees, ui.ctx());
     });
@@ -2797,20 +2865,20 @@ fn method_smali_and_callees_e2e() {
     }
     let doc = app.documents.get(&key).expect("method smali landed");
     assert!(doc.source.contains(".method"), "method smali shape");
-    let full = crate::task::TaskManager::smali_key(descriptor, None);
-    assert!(
-        !app.documents.contains(&full),
-        "class listing must not have been requested"
+    // The method listing is a distinct, scoped document — it must not be a
+    // re-emission of the whole-class listing already on screen.
+    let full_source = app.documents.get(&full).expect("listing").source.clone();
+    assert_ne!(
+        doc.source, full_source,
+        "the method listing must be scoped, not the whole-class listing"
     );
+
     // Regression: a click inside the `#smali#method` listing (its own
-    // document key) must still resolve the real class — the shot
-    // suite caught the view key being handed to the engine.
-    app.symbol_sel = Some(crate::app::SymbolSelection {
-        descriptor: key.clone(),
-        token: "<init>".into(),
-        method: (0, 0),
-        occurrences: vec![],
-    });
+    // document key) must still resolve the real class — the shot suite
+    // caught the view key being handed to the engine.
+    let method_source = app.documents.get(&key).unwrap().source.clone();
+    let sel = click_class_ctor(&key, &method_source);
+    app.symbol_sel = Some(sel);
     crate::app::AscApp::run_ui(&ctx, |ui| {
         app.references = None;
         app.dispatch(Command::ShowCallees, ui.ctx());
@@ -3029,13 +3097,27 @@ fn visual_shots_v090_features() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    h.state_mut().symbol_sel = Some(crate::app::SymbolSelection {
-        descriptor: descriptor.into(),
-        token: "<init>".into(),
-        method: (0, 0),
-        occurrences: vec![],
-    });
+    // Open the whole-class Smali view, then click the `<init>` method there
+    // — the honest real flow (a Smali click resolves the method + its class).
+    let full = crate::task::TaskManager::smali_key(descriptor, None);
+    h.state_mut().queue(Command::ShowSmali);
+    for _ in 0..300 {
+        h.step();
+        if h.state().documents.contains(&full) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let key = crate::task::TaskManager::smali_key(descriptor, Some("<init>"));
+    let src = h
+        .state_mut()
+        .documents
+        .get(&full)
+        .expect("listing")
+        .source
+        .clone();
+    let sel = click_class_ctor(&full, &src);
+    h.state_mut().symbol_sel = Some(sel);
     h.state_mut().queue(Command::ShowSmaliMethod);
     for _ in 0..300 {
         h.step();
@@ -3050,14 +3132,17 @@ fn visual_shots_v090_features() {
     assert!(h.state().documents.contains(&key), "method smali landed");
     save(&mut h, "09_method_smali");
 
-    // Callees of the same method → REFERENCES rows. The click that
-    // drives it now lands in the listing on screen (audit F1).
-    h.state_mut().symbol_sel = Some(crate::app::SymbolSelection {
-        descriptor: key.clone(),
-        token: "<init>".into(),
-        method: (0, 0),
-        occurrences: vec![],
-    });
+    // Callees of the same method → REFERENCES rows. The click that drives
+    // it lands in the listing on screen (audit F1), resolving the class.
+    let msrc = h
+        .state_mut()
+        .documents
+        .get(&key)
+        .expect("method listing")
+        .source
+        .clone();
+    let sel = click_class_ctor(&key, &msrc);
+    h.state_mut().symbol_sel = Some(sel);
     h.state_mut().queue(Command::ShowCallees);
     for _ in 0..300 {
         h.step();
@@ -3202,6 +3287,7 @@ fn stale_symbol_selection_does_not_open_method_smali_or_callees() {
         token: "<init>".into(),
         method: (0, 0),
         occurrences: Vec::new(),
+        resolved: None,
     });
     // Switch to another document (cached, so it is really on screen).
     app.documents.put(Arc::new(Document::new(
@@ -3258,6 +3344,7 @@ fn stale_symbol_selection_does_not_scan_or_search_the_old_class() {
         token: "<init>".into(),
         method: (0, 0),
         occurrences: Vec::new(),
+        resolved: None,
     });
     app.documents.put(Arc::new(Document::new(
         "LB;".into(),
@@ -3307,6 +3394,7 @@ fn stale_symbol_selection_does_not_queue_navigation_or_rename() {
         token: "Bar".into(),
         method: (0, 10),
         occurrences: vec![(0, 3)],
+        resolved: None,
     });
 
     app.dispatch(Command::GoToDeclaration, &ctx);
@@ -3369,13 +3457,9 @@ fn smali_view_click_resolves_the_owning_class() {
     let key = crate::task::TaskManager::smali_key(a, None);
     open_smali_view(&mut app, &ctx, a);
     assert!(pump_until(&mut app, &ctx, |x| x.documents.contains(&key)));
-    // The click record the editor writes inside the listing.
-    app.symbol_sel = Some(SymbolSelection {
-        descriptor: key.clone(),
-        token: "<init>".into(),
-        method: (0, 0),
-        occurrences: Vec::new(),
-    });
+    // A real click on the `<init>` method in the listing (production path).
+    let src = app.documents.get(&key).unwrap().source.clone();
+    app.symbol_sel = Some(click_class_ctor(&key, &src));
 
     app.dispatch(Command::ShowCallees, &ctx);
     let label = format!("{a}-><init>");
@@ -3469,12 +3553,7 @@ fn first_method_smali_open_enters_navigation_history() {
     let key = crate::task::TaskManager::smali_key(a, Some("<init>"));
     app.navigate_to(a, false, None, NavOrigin::Tree, &ctx);
     assert!(pump_until(&mut app, &ctx, |x| x.documents.contains(a)));
-    app.symbol_sel = Some(SymbolSelection {
-        descriptor: a.into(),
-        token: "<init>".into(),
-        method: (0, 0),
-        occurrences: Vec::new(),
-    });
+    app.symbol_sel = Some(manual_method_selection(a, a, "<init>"));
     crate::app::AscApp::run_ui(&ctx, |ui| {
         let ctx = ui.ctx();
         app.dispatch(Command::ShowSmaliMethod, ctx);

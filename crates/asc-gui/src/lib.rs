@@ -31,6 +31,7 @@ pub mod highlight;
 pub mod icons;
 pub mod package_tree;
 pub mod selfcheck;
+pub mod semantic;
 pub mod session;
 pub mod source_edit;
 pub mod state;

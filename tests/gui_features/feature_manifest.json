@@ -559,29 +559,29 @@
     },
     {
       "id": "JADX-GUI-002",
-      "feature": "Find usages of selected symbol (engine-backed)",
+      "feature": "Find usages of selected method (engine-backed)",
       "priority": "P1",
       "weight": 5,
-      "status": "COMPLETE",
+      "status": "PARTIAL",
       "applicable": true,
       "acceptance": "asc-gui::app::tests::find_usages_method_query_via_click",
       "test_kind": "cargo_test_new",
-      "blocking_engine_change": false,
+      "blocking_engine_change": true,
       "reference": "JADX Find Usages",
-      "notes": "Reachable: bare `X` over the code surface queues Command::FindUsagesOfClicked, pre-filling the member-scoped search (the bottom panel is also usable by hand). Trigger covered by `bare_x_finds_usages_of_the_clicked_identifier`."
+      "notes": "Audit F2: the clicked identifier is resolved as a method (production click path — Smali `.method`/`invoke-*`, Java self-call/declaration), and the method search is pinned to its *declaring* class; a non-method identifier (local/register) degrades to a plain global search and is never dispatched as a member-method find. PARTIAL: only method usages are covered — field/class usages and cross-class declaring-class resolution from decompiled-Java simple names are not (the engine has no declaration resolver). Trigger covered by `bare_x_finds_usages_of_the_clicked_identifier`."
     },
     {
       "id": "JADX-GUI-003",
       "feature": "Go to declaration of selected symbol",
       "priority": "P1",
       "weight": 5,
-      "status": "COMPLETE",
+      "status": "PARTIAL",
       "applicable": true,
-      "acceptance": "asc-gui::app::tests::go_to_declaration_jumps_to_owner",
+      "acceptance": "asc-gui::app::tests::go_to_declaration_resolves_the_declared_class",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
       "reference": "JADX click on identifier",
-      "notes": "Reachable: Ctrl+D queues Command::GoToDeclaration. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
+      "notes": "Audit F2: GoToDeclaration opens the class that actually *declares* the identifier (production click path) — a class reference (`L…;`, Smali) opens itself, a resolved method/field owner (Smali `invoke-*`/`.field`) opens its declaring class; an unresolved/local identifier is refused rather than re-opening the document on screen. PARTIAL: no line-level member-declaration navigation, decompiled-Java qualified calls resolve no owner, and there is no engine declaration resolver. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
     },
     {
       "id": "JADX-GUI-004",
