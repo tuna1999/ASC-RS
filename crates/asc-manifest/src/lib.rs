@@ -1937,6 +1937,7 @@ pub(crate) fn render_typed_value_str(
 // ---------------------------------------------------------------------------
 
 pub mod axml;
+pub mod uri_match;
 // ---------------------------------------------------------------------------
 // Display impl for ManifestInfo — a compact one-line summary, mainly for
 // the GUI status bar / tests.

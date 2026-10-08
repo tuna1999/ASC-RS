@@ -1,8 +1,9 @@
 # API 35 `<uri-relative-filter-group>` — AOSP semantics, evidence, roadmap
 
-Date: 2026-10-08 · branch `master` @ `9c6b90d` · status: **research +
-5.1 acceptance criteria added (fixture table below); 5.2–5.6 not
-implemented.**
+Date: 2026-10-08 · branch `master` · status: **5.1 acceptance criteria
+added; 5.2+5.3 evaluator implemented (`asc-manifest::uri_match`); 5.4
+synthetic tests written from the T-table; 5.5 CLI/GUI surface and the 5.4
+AOSP-oracle differential pending.**
 
 ASC-RS today parses `<uri-relative-filter-group>` children of an
 `<intent-filter>` and reports them verbatim (`asc-manifest`
@@ -254,6 +255,20 @@ consulted.
 **Three doc examples mapped:** AND vs OR → T24 (+T3/T4); block-before-allow
 → T6/T7; sibling path overriding a block group → T9/T10. Flag-off variant →
 T19–T21.
+
+**Implementation status (2026-10-08).** 5.2+5.3 shipped as
+`asc-manifest::uri_match::evaluate_filter_uri(filter, uri, assume_flag_on)`
+→ three-valued `Verdict`, plus the 5.4 synthetic suite (`uri_match::tests`).
+It reuses `UriPartMatcher` (no new stored model, no reordering) and returns
+`CannotMatch`/`Matches`/`Unknown` exactly per the table: the deterministic
+rules (order, AND, empty-group, host dependency, sibling-path OR, allow/
+block, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`, flag-off) are decided;
+**`Pattern`/`AdvancedPattern` matchers and query content containing `+`
+return `Unknown`** because their semantics are the §6.3/§6.4 oracle open
+questions. `assumed_flag_on` is reported on every verdict. Exceeding an
+§4 bound (64 groups / 64 data / 256 parts / 1 MiB URI) yields `Unknown`.
+Not yet done: the 5.5 CLI/GUI surface and the 5.4 AOSP-oracle differential
+(the exact glob/decoding rows stay `Unknown` until the oracle runs).
 
 
 **5.2 Data-model design.** Keep `UriRelativeFilterGroup { allow, data }`
