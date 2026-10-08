@@ -75,7 +75,9 @@ Shared flags (`-o/--output`, `--threads N`, `--debug`, `--format text|json`, `--
 
 ## Development
 
-Minimum supported Rust version: **1.93** (set by `droidsaw-dex 2.0.0`).
+Minimum supported Rust version: **1.95** (the `[workspace.package] rust-version`
+floor; set by the egui 0.36 stack — eframe/egui/epaint/… each declare
+`rust-version = 1.95`. CI's `msrv` lane pins exactly `1.95.0`).
 
 ```bash
 cargo build --release

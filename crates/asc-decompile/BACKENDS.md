@@ -29,7 +29,7 @@ quality + perf comparison against the Python oracle's
 | Latest version | 2.0.0 (2026-06-11) — **adopted**, see §2.2 |
 | Earlier usable | 1.0.0 (2026-05-25) |
 | Rust edition | 2024 |
-| rust-version | 1.93 (workspace MSRV 1.93; 1.97 stable here, OK) |
+| rust-version | 1.93 (workspace MSRV 1.95; 1.97 stable here, OK) |
 | Direct deps | `scroll`, `thiserror`, `adler2`, `sha1` 0.11, `serde`, `rustc-hash`, `droidsaw-common` |
 
 ### 2.1 Maturity
@@ -58,9 +58,9 @@ Upgrading 1.0.0 → 2.0.0 was safe for our call sites: the three
 functions and the `find_class` method this adapter uses kept their
 signatures, and the module list is unchanged apart from additions
 (`spr` — structure-preserving representation). The `droidsaw-common`
-1.x → 2.x break and the Rust 1.93 floor do not surface here because
+1.x → 2.x break and the Rust MSRV floor do not surface here because
 we never import `droidsaw-common` directly and the workspace MSRV
-was raised to 1.93 in the same change.
+was raised to 1.95 in the same change.
 
 Upstream still advertises no SemVer-stability statement, so a future
 minor must be treated as potentially breaking: re-run

@@ -82,6 +82,11 @@ pub struct AscApp {
     pub(crate) find_input: String,
     pub(crate) find_matches: Vec<usize>,
     pub(crate) find_index: Option<usize>,
+    /// Descriptor of the document the current `find_matches` were
+    /// computed for. Identity key: when the active document changes,
+    /// [`Self::reconcile_find_to_document`] rebinds (F2) so results
+    /// never belong to another document.
+    pub(crate) find_for_descriptor: Option<String>,
     pub(crate) show_rename: bool,
     pub(crate) rename_input: String,
     /// Line the pending line-comment targets (0-based).
@@ -172,6 +177,7 @@ impl AscApp {
             find_input: String::new(),
             find_matches: Vec::new(),
             find_index: None,
+            find_for_descriptor: None,
             show_rename: false,
             rename_input: String::new(),
             comment_target: None,
@@ -281,6 +287,11 @@ impl AscApp {
         self.pending_scroll = None;
         self.symbol_sel = None;
         self.last_clicked_line = None;
+        // Session swap: drop find results that belonged to the old
+        // artifact's documents (F2).
+        self.find_matches.clear();
+        self.find_index = None;
+        self.find_for_descriptor = None;
         self.show_open_tabs = false;
         self.open_tabs_filter.clear();
         self.show_rename = false;
@@ -309,6 +320,12 @@ impl AscApp {
         self.active_doc = Some(doc.clone());
         self.documents.put(doc);
         self.symbol_sel = None;
+        // The source changed under the same descriptor, so cached find
+        // match offsets are stale (F2): drop them and defer a rebind to
+        // the next reconciliation.
+        self.find_matches.clear();
+        self.find_index = None;
+        self.find_for_descriptor = None;
     }
 
     /// Apply a method-scoped rename of the selected symbol (F25).
@@ -390,6 +407,17 @@ impl AscApp {
         }
         if self.documents.contains(descriptor) {
             self.active_doc = self.documents.get(descriptor);
+            // F1: the tab may have been freshly recreated as `Loading`
+            // by `open_preview`/`open_pinned` (e.g. reopened right after
+            // close while the document is still cached). With a cached
+            // doc no worker is spawned, so restore `Ready` from the
+            // document itself — otherwise the spinner would persist
+            // forever. A cached doc only exists after a successful
+            // decompile, so this is never a false `Ready`.
+            self.tabs.set_ready(
+                descriptor,
+                self.active_doc.as_ref().map(|d| d.dex_name.clone()),
+            );
         } else {
             self.active_doc = None;
             // Re-issue the engine job that produces this *view*: a class
@@ -400,6 +428,10 @@ impl AscApp {
             // tab on Loading forever (audit F1).
             self.reload_document(descriptor, ctx);
         }
+        // Rebind find results to the (possibly changed) active document
+        // (F2) before the navigation scroll target is set below, so the
+        // rebind's own scroll hint is overridden by the explicit target.
+        self.reconcile_find_to_document();
         // Scroll target persists until the document is visible.
         self.pending_scroll = Some(line.unwrap_or(0));
     }
@@ -501,8 +533,10 @@ impl AscApp {
         self.find_matches.clear();
         self.find_index = None;
         let Some(doc) = self.active_doc.clone() else {
+            self.find_for_descriptor = None;
             return;
         };
+        self.find_for_descriptor = Some(doc.descriptor.clone());
         let needle = self.find_input.trim().to_ascii_lowercase();
         if needle.is_empty() {
             return;
@@ -515,6 +549,30 @@ impl AscApp {
             }
         }
         self.find_step(true);
+    }
+
+    /// Keep find results bound to the active document (F2).
+    ///
+    /// When the active document's identity differs from the one the
+    /// cached [`Self::find_matches`] were computed for, recompute them
+    /// against the current document. Preserves [`Self::pending_scroll`]
+    /// so a rebind never overrides an explicit navigation target.
+    ///
+    /// Cheap after the first frame: the descriptor match short-circuits
+    /// before any scan, so this is not a per-frame full-document rescan.
+    pub(crate) fn reconcile_find_to_document(&mut self) {
+        let Some(doc) = self.active_doc.clone() else {
+            self.find_for_descriptor = None;
+            self.find_matches.clear();
+            self.find_index = None;
+            return;
+        };
+        if self.find_for_descriptor.as_deref() == Some(doc.descriptor.as_str()) {
+            return;
+        }
+        let saved_scroll = self.pending_scroll;
+        self.recompute_find_matches();
+        self.pending_scroll = saved_scroll;
     }
 
     pub(crate) fn find_step(&mut self, forward: bool) {

@@ -310,6 +310,9 @@ impl AscApp {
         }
 
         let doc = self.active_doc.clone();
+        // Rebind find results whenever the active document changed this
+        // frame (belt-and-suspenders with `navigate_to`).
+        self.reconcile_find_to_document();
         let Some(doc) = doc else {
             self.draw_editor_empty_state(ui);
             return;

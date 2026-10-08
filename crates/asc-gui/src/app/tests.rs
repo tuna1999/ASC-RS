@@ -122,6 +122,158 @@ fn older_failure_does_not_clear_newer_intent() {
     );
 }
 
+/// F1: reopening a tab whose document is still cached must restore
+/// `Ready`, not recreate a `Loading` tab that no worker will ever
+/// complete (a cached doc needs no new worker, so the spinner would
+/// otherwise persist forever).
+#[test]
+fn reopen_cached_document_is_ready_not_loading() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    // Open A (cache miss -> Loading tab), land the document.
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.apply_task(fake_task(1, "LA;", decompiled("LA;")));
+    assert_eq!(
+        app.tabs.tabs()[0].status,
+        crate::state::TabStatus::Ready,
+        "landed doc must mark the tab ready"
+    );
+    // Close tab A; the document stays cached.
+    app.close_tab("LA;");
+    assert!(app.documents.contains("LA;"), "close keeps the doc cached");
+    let in_flight_before = app.tasks.in_flight_count();
+    // Reopen A: cached hit, no worker should be spawned.
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.tasks.in_flight_count(),
+        in_flight_before,
+        "cached hit must not spawn a decompile worker"
+    );
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some("LA;"),
+        "reopened tab is active"
+    );
+    assert_eq!(
+        app.tabs.tabs()[0].status,
+        crate::state::TabStatus::Ready,
+        "cached document must restore Ready, not Loading"
+    );
+}
+
+/// F2: switching the active document with Find open rebinds results to
+/// the new document (positions from the previous doc must never leak).
+#[test]
+fn find_rebinds_to_switched_document() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    // Seed both documents so navigation is a cache hit (no worker).
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A {}\nfoo on A line 1\n".into(),
+    )));
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        "class B {}\nno match\nfoo on B line 2\n".into(),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.show_find = true;
+    app.find_input = "foo".into();
+    app.recompute_find_matches();
+    assert_eq!(app.find_matches, vec![1], "A: foo on line 1");
+    assert_eq!(app.find_for_descriptor.as_deref(), Some("LA;"));
+    // Switch to B with an explicit scroll target; Find stays open.
+    app.navigate_to("LB;", false, Some(2), NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.find_for_descriptor.as_deref(),
+        Some("LB;"),
+        "find results must follow the active document"
+    );
+    assert_eq!(
+        app.find_matches,
+        vec![2],
+        "must be B's line 2, never A's line 1"
+    );
+    assert_eq!(
+        app.pending_scroll,
+        Some(2),
+        "navigation scroll target must not be clobbered by the find rebind"
+    );
+}
+
+/// F2 / Scenario C: a session swap must drop find results that
+/// belonged to the old artifact's documents.
+#[test]
+fn find_results_cleared_on_session_change() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A {}\nsecret token\n".into(),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.show_find = true;
+    app.find_input = "secret".into();
+    app.recompute_find_matches();
+    assert_eq!(app.find_matches, vec![1]);
+    use crate::task::LoadedArtifact;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    let Ok(s) = crate::session::WorkspaceSession::open(&path) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let artifact = LoadedArtifact {
+        session: s,
+        classes: Vec::new(),
+        dex_counts: Vec::new(),
+        manifest: None,
+        manifest_error: None,
+        warnings: Vec::new(),
+    };
+    app.apply_artifact(artifact);
+    assert!(
+        app.find_matches.is_empty(),
+        "no stale match positions may survive a session swap"
+    );
+    assert_eq!(app.find_for_descriptor, None);
+}
+
+/// F2 / Scenario D: editing a document's source invalidates find
+/// result offsets (they are line positions in the superseded source).
+#[test]
+fn find_invalidated_on_source_edit() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A {}\ntoken foo\n".into(),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.show_find = true;
+    app.find_input = "foo".into();
+    app.recompute_find_matches();
+    assert_eq!(app.find_matches, vec![1]);
+    // Replace the source under the same descriptor.
+    app.replace_active_document(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A {}\nbar baz\n".into(),
+    );
+    assert!(
+        app.find_matches.is_empty(),
+        "stale offsets must be dropped after a source edit"
+    );
+    assert_eq!(app.find_for_descriptor, None);
+    // Recompute against the fresh source.
+    app.find_input = "bar".into();
+    app.recompute_find_matches();
+    assert_eq!(app.find_matches, vec![1]);
+}
+
 /// Old-APK job completes after a new artifact loaded → ignored
 /// (generation gate).
 #[test]
@@ -1434,6 +1586,72 @@ fn navigation_history_restores_evicted_class_smali() {
             .map(|t| t.status.clone()),
         Some(crate::state::TabStatus::Ready),
         "the restored tab must reach Ready, not stick at Loading"
+    );
+}
+
+/// F4: driving the real Back/Forward command dispatch must move the
+/// history cursor, restore the exact location, and never push extra
+/// entries or start workers for documents that are already cached —
+/// the end-to-end behaviors a bare `navigate_to(..., History)` call
+/// does not exercise.
+#[test]
+fn navigation_back_forward_dispatch_is_cursor_safe() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let a = SMALI_LIFECYCLE_CLASS.to_string();
+    let b = SMALI_LIFECYCLE_SECOND_CLASS.to_string();
+    app.navigate_to(&a, false, None, NavOrigin::Tree, &ctx);
+    assert!(
+        pump_until(&mut app, &ctx, |x| x.documents.contains(&a)),
+        "A's document must land (so a later Back is a cache hit)"
+    );
+    app.navigate_to(&b, false, Some(9), NavOrigin::Tree, &ctx);
+    assert_eq!(app.nav.position(), (1, 2), "history: [A, B], cursor at B");
+
+    // Back through the real dispatch path.
+    let in_flight = app.tasks.in_flight_count();
+    app.dispatch(Command::NavigateBack, &ctx);
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some(a.as_str()),
+        "Back restores A"
+    );
+    assert_eq!(app.nav.position(), (0, 2), "cursor walked to index 0");
+    assert_eq!(
+        app.nav.len(),
+        2,
+        "a History restore must not push a new entry"
+    );
+    assert_eq!(
+        app.tasks.in_flight_count(),
+        in_flight,
+        "Back to a cached document must not spawn a decompile worker"
+    );
+
+    // Forward through the real dispatch path.
+    app.dispatch(Command::NavigateForward, &ctx);
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some(b.as_str()),
+        "Forward restores B"
+    );
+    assert_eq!(app.nav.position(), (1, 2), "cursor walked forward");
+    assert_eq!(
+        app.nav.len(),
+        2,
+        "a Forward restore must not push a new entry"
+    );
+
+    // Repeated Back/Forward must not corrupt the active selection.
+    app.dispatch(Command::NavigateBack, &ctx);
+    app.dispatch(Command::NavigateForward, &ctx);
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some(b.as_str()),
+        "selection survives repeated walks"
     );
 }
 
