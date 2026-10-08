@@ -377,6 +377,9 @@ pub struct RelativeDataSpec {
 /// `<data>` (evaluated first, in source order) are not modelled. Treat
 /// [`IntentFilter::effective_data`] as incomplete whenever
 /// [`IntentFilter::has_uri_relative_groups`] is true.
+///
+/// The AOSP semantics and the implementation roadmap live in
+/// `docs/research/uri-relative-filter-groups.md`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UriRelativeFilterGroup {
     /// `android:allow` — `true` (the platform default) when a matching
