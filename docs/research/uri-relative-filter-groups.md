@@ -1,7 +1,8 @@
 # API 35 `<uri-relative-filter-group>` — AOSP semantics, evidence, roadmap
 
-Date: 2026-10-08 · branch `master` @ `799f5b9` (v0.18.2) · status: **research
-only, nothing implemented**.
+Date: 2026-10-08 · branch `master` @ `9c6b90d` · status: **research +
+5.1 acceptance criteria added (fixture table below); 5.2–5.6 not
+implemented.**
 
 ASC-RS today parses `<uri-relative-filter-group>` children of an
 `<intent-filter>` and reports them verbatim (`asc-manifest`
@@ -195,6 +196,65 @@ without its gate.
 table: (manifest fragment, URI, expected verdict, reason) covering R1–R10,
 including the three doc examples (AND vs OR, block-before-allow, sibling
 path overriding a block group) and the flag-off variant.
+
+#### 5.1.1 Acceptance fixture table (R1–R10)
+
+Verdict is three-valued — `matches` / `cannot match` / `unknown` (§4). The
+expected verdicts below are **derived from the AOSP source and platform
+docs cited in §2**; they are acceptance criteria, *not* verified byte-for-byte
+yet. They become the unit-test input in 5.4, after the AOSP (API 35) oracle
+harness confirms each one. Wherever a case is flag-sensitive it is listed as
+its own row and the assumed flag state is stated, never footnoted.
+
+Unless a row says otherwise, every filter declares
+`<data android:scheme="https" android:host="example.com" />` so the
+authority branch runs (R4 `UriDependency::Complete`) and the group layer is
+consulted.
+
+| Row | Rule | Manifest fragment (scheme+host always present unless noted) | URI | Expected verdict | Reason |
+|---|---|---|---|---|---|
+| T1 | R1+R6 order | filter with `allow` group P (`path="/1"`) **then** group Q (`path="/2"`), both after the scheme/host `<data>` | `https://example.com/2` | matches | Parse/eval keeps declaration order: Q is consulted and, matching, is allowed. If order were pooled/reversed, P would be consulted first and not match, but the result is the same here; T6 exercises the order that actually flips the verdict. |
+| T2 | R1 (sibling OR) | filter-level `<data path="/direct"/>` declared **before** a group; group G (`allow=false`, `path="/blocked"`) | `https://example.com/direct` | matches | Sibling path matcher is in the same OR-set as the group layer (R5): `/direct` matches the filter-level path regardless of the block group. |
+| T3 | R3 (AND within group) | one `allow=true` group with two `<data>`: `path="/a/b"`, `query="token=1"` | `https://example.com/a/b?token=1` | matches | Every matcher in the group matches → the group matches → allow. |
+| T4 | R3 (AND fails) | same manifest as T3 | `https://example.com/a/b?other=2` | cannot match | The group's `query="token=1"` matcher fails → the group (ANDed) fails; no sibling path → path layer empty. |
+| T5 | R3 (empty group never matches) | one `allow=true` group with **no** `<data>` child | any | cannot match | `UriRelativeFilterGroup.matchData` returns false for zero filters; no other matcher → path layer empty. |
+| T6 | R6 block-before-allow | group1 `allow=false path="/x"`, **then** group2 `allow=true pathPrefix="/x"` | `https://example.com/x` | cannot match | First matching group decides: group1's exact `/x` matches and is a block; group2 is never consulted. This is the doc's block-narrows-allow rule. |
+| T7 | R6 order reversal | group1 `allow=true pathPrefix="/x"` **then** group2 `allow=false path="/x"` | `https://example.com/x` | matches | First matching group decides: group1 (prefix) matches and allows; group2 not consulted. Declaring order is semantic. |
+| T8 | R4 host dependency | filter with scheme `https`, **no host**, and an `allow=true` group (`path="/a/b"`, `query="token=1"`) | `https://example.com/a/b?token=1` | unknown | The group layer is inert (R4: it sits inside the host-matched authority branch, and no host is declared → `UriDependency::NoHost`), so the group contributes nothing. Whether a scheme-only filter matches this URI is an intent-resolution question outside the path verdict (§6.5), so the evaluator reports `unknown`, never a fabricated `cannot match`; the oracle confirms in 5.4. |
+| T9 | R5 sibling path overrides block | filter-level `<data path="/public"/>` **plus** group `allow=false path="/private"` | `https://example.com/public` | matches | `/public` matches the filter-level path, which is outside the block group (§2.1 documented example). |
+| T10 | R5 block hits | same manifest as T9 | `https://example.com/private` | cannot match | Sibling `/public` doesn't match; the block group matches `/private` → path layer fails. |
+| T11 | R7 (PATH whole-part) | one `allow=true` group `path="/a"` (Exact) | `https://example.com/a/` | cannot match | Whole-part match: `/a/` ≠ `/a`. |
+| T12 | R7 (FRAGMENT whole-part + absent) | one `allow=true` group `fragment="sec"` | `https://example.com/a#sec` | matches | Whole fragment equals `sec`. |
+| T13 | R7 (FRAGMENT absent) | same manifest as T12 | `https://example.com/a` | cannot match | `Uri.getFragment()` is null → `PatternMatcher.match(null)` is false. |
+| T14 | R8 (QUERY single param, `&`) | one `allow=true` group `query="token=1"` | `https://example.com/a?token=1&x=2` | matches | QUERY splits on `&` and matches any single parameter: `token=1`. |
+| T15 | R8 (QUERY single param, `;` fallback) | same manifest as T14 | `https://example.com/a?x=2;token=1` | matches | No `&` → split on `;` → `x=2`, `token=1`; the single parameter `token=1` matches. |
+| T15b | R8 (no param matches) | same manifest as T14 | `https://example.com/a?token=0&x=2` | cannot match | No single parameter equals `token=1`. |
+| T16 | R9 (simple glob) | one `allow=true` group `pathPattern="/a/.*"` | `https://example.com/a/123` | matches | `.*` greedy, single-pass: the literal `/a/` prefix with `.*` rest matches. |
+| T17 | R9 (glob no match) | same manifest as T16 | `https://example.com/ab` | cannot match | Weak path does not start with literal `/a/`. |
+| T18 | R9 (advanced glob) | one `allow=true` group `pathAdvancedPattern="/a/[0-9]+"` | `https://example.com/a/42` | matches | Regex-like char class + `+` on the advanced form. |
+| T19 | R10 flag OFF (only source of match is a group) | `allow=true` group (`path="/a/b"`) **with flag off** | `https://example.com/a/b` | cannot match | `Flags.relativeReferenceIntentFilters()` false → groups ignored → behaves as if the path layer were absent (no sibling path). |
+| T20 | R10 flag OFF (sibling still matches) | filter-level `<data path="/public"/>` + `allow=false` group, **flag off** | `https://example.com/public` | matches | Groups ignored, but the sibling path still matches (R5 unaffected by the flag). |
+| T21 | R10 flag OFF (block inert) | filter-level `<data path="/public"/>` + `allow=false` group (`path="/private"`), **flag off** | `https://example.com/private` | cannot match | Block group ignored; `/private` is not a sibling path → no path match. |
+| T22 | §4 unknown (unsupported/unevaluable) | a group whose `pathAdvancedPattern` uses a construct §5.4 marks unsupported (e.g. a lookahead) | `https://example.com/x` | unknown | Unevaluable construct → `unknown` with reason, never `matches` (§4). Final classification orbited by the 5.4 oracle. |
+| T23 | R2 (pooled filter data) | two filter-level `<data scheme="https" host="example.com" path="/a"/>` and `<data scheme="https" host="example.com" path="/b"/>` | `https://example.com/b` | matches | Filter-level `<data>` are pooled/ORed (existing `EffectiveData`), a path matches. Group layer irrelevant here. |
+| T24 | R3/§2.1 doc example (AND vs OR) | filter-level `<data path="/path"/>` + `allow=false` group whose **two** `<data>` (`path="/excluded"`, `query="token=secret"`) are ANDed; URI `?query` carries `token=secret` | `https://project.example.com/path?token=secret` | matches | The sibling `path="/path"` matches (OR), so the filter accepts even though the block group's ANDed matchers would also be satisfied — matches the documented example. |
+
+**Accompanying invariants (asserted at 5.4, not per-row):**
+
+- **R1** parse order is retained across `data` (`DataSpec`), group vector
+  (`uri_relative_groups`) and each group's `data` / `parts` — no pooling or
+  reordering anywhere that would change `matchGroupsToUri` first-match.
+- **R2** filter-level `<data>` stay pooled/ORed (`EffectiveData`) exactly as
+  today; group evaluation is additive and never rewrites them.
+- **§4** every `unknown` row must come with a non-empty reason list, and no
+  path may silently truncate a matcher/group that exceeds the §4 bounds.
+- **Flag rows** (T19–T21) each state `assumed flag = off`; the verdict API
+  must expose the flag state it assumed.
+
+**Three doc examples mapped:** AND vs OR → T24 (+T3/T4); block-before-allow
+→ T6/T7; sibling path overriding a block group → T9/T10. Flag-off variant →
+T19–T21.
+
 
 **5.2 Data-model design.** Keep `UriRelativeFilterGroup { allow, data }`
 as parsed. Add an evaluation view (no reordering): ordered groups →
