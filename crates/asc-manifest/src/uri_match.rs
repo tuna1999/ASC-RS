@@ -247,24 +247,39 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
         }
     }
 
-    // R4: the authority branch must run for any path/group layer.
-    let host_ok = match (eff.dependency, &p.host) {
-        (UriDependency::NoScheme, _) | (UriDependency::NoHost, _) => false,
-        (UriDependency::Complete, None) => false,
-        (UriDependency::Complete, Some(h)) => eff.authorities.iter().any(|a| {
-            a.host == *h
-                && match &a.port {
-                    Some(fp) => p.port.as_deref() == Some(fp.as_str()),
-                    None => true,
-                }
-        }),
-    };
-    if !host_ok {
-        return verdict(
-            UriMatchVerdict::Unknown,
-            on,
-            vec!["no matching authority; host/path/group layer inert (R4)".to_string()],
-        );
+    // R4: the authority branch must run for any path/group layer. A
+    // declared-but-unmatched host is a definite rejection; a filter with no
+    // scheme/host leaves the layer inert (other URI dimensions are out of
+    // scope → unknown).
+    match eff.dependency {
+        UriDependency::NoScheme | UriDependency::NoHost => {
+            return verdict(
+                UriMatchVerdict::Unknown,
+                on,
+                vec![
+                    "scheme/host not fully declared; host/path/group layer inert (R4)".to_string(),
+                ],
+            );
+        }
+        UriDependency::Complete => {
+            let host_ok = match &p.host {
+                None => false,
+                Some(h) => eff.authorities.iter().any(|a| {
+                    a.host == *h
+                        && match &a.port {
+                            Some(fp) => p.port.as_deref() == Some(fp.as_str()),
+                            None => true,
+                        }
+                }),
+            };
+            if !host_ok {
+                return verdict(
+                    UriMatchVerdict::CannotMatch,
+                    on,
+                    vec!["declared host does not match the URI authority (R4)".to_string()],
+                );
+            }
+        }
     }
 
     // R5: sibling path matcher (OR) — deterministic first.

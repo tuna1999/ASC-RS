@@ -47,8 +47,13 @@ const EXIT_INTERNAL: u8 = 2;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Cmd::Manifest { apk } = &cli.cmd {
-        return run_manifest_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
+    if let Cmd::Manifest { apk, match_uri } = &cli.cmd {
+        return run_manifest_cmd(
+            apk,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+            match_uri.as_deref(),
+        );
     }
     if let Cmd::Cert { apk } = &cli.cmd {
         return run_cert_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
@@ -244,6 +249,12 @@ enum Cmd {
     Manifest {
         /// Path to the APK.
         apk: PathBuf,
+        /// Also evaluate every intent filter's (API 35) URI-relative match
+        /// surface against this URI — a component may have a reachable
+        /// deep-link surface its declared scheme/host alone does not show.
+        /// Verdicts are three-valued: matches / cannot match / unknown.
+        #[arg(long = "match-uri")]
+        match_uri: Option<String>,
     },
     /// Inventory an APK/DEX and report packer signals and anomalies.
     Inspect {
@@ -832,6 +843,7 @@ fn run_manifest_cmd(
     apk: &std::path::Path,
     output: Option<&std::path::Path>,
     format: OutputFormat,
+    match_uri: Option<&str>,
 ) -> ExitCode {
     let m = match asc_manifest::parse_from_apk(apk) {
         Ok(m) => m,
@@ -841,8 +853,11 @@ fn run_manifest_cmd(
         }
     };
     let text = match format {
-        OutputFormat::Text => format_manifest_text(&m),
-        OutputFormat::Json => to_json(&m),
+        OutputFormat::Text => format_manifest_text(&m, match_uri),
+        OutputFormat::Json => match match_uri {
+            Some(uri) => to_json(&format_manifest_match_json(&m, uri)),
+            None => to_json(&m),
+        },
     };
     match output {
         Some(p) => {
@@ -1133,7 +1148,7 @@ fn to_json<T: serde::Serialize>(v: &T) -> String {
     s
 }
 
-fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
+fn format_manifest_text(m: &asc_manifest::ManifestInfo, match_uri: Option<&str>) -> String {
     use std::fmt::Write as _;
     let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
     let num = |v: Option<u32>| v.map_or_else(|| "-".into(), |n| n.to_string());
@@ -1292,7 +1307,7 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
     ] {
         let _ = writeln!(s, "{label} ({}):", list.len());
         for c in list {
-            write_component(&mut s, c);
+            write_component(&mut s, c, match_uri);
         }
     }
     let _ = writeln!(s, "activity-alias ({}):", m.activity_aliases.len());
@@ -1310,7 +1325,7 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
         }
         let _ = writeln!(s);
         for f in &c.intent_filters {
-            write_filter(&mut s, f);
+            write_filter(&mut s, f, match_uri);
         }
         for md in &c.meta_data {
             write_meta_data(&mut s, "    ", md);
@@ -1476,7 +1491,25 @@ fn render_effective_data(eff: &asc_manifest::EffectiveData, pooled: bool) -> Str
     line
 }
 
-fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter) {
+/// One-line render of a three-valued match verdict with its reasons.
+fn match_verdict_line(uri: &str, v: &asc_manifest::uri_match::Verdict) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!(
+        "match-uri {uri}: {} (assumed flag={})",
+        match v.outcome {
+            asc_manifest::uri_match::UriMatchVerdict::Matches => "matches",
+            asc_manifest::uri_match::UriMatchVerdict::CannotMatch => "cannot match",
+            asc_manifest::uri_match::UriMatchVerdict::Unknown => "unknown",
+        },
+        if v.assumed_flag_on { "on" } else { "off" }
+    );
+    if !v.reasons.is_empty() {
+        let _ = write!(out, " — {}", v.reasons.join("; "));
+    }
+    out
+}
+
+fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter, match_uri: Option<&str>) {
     use std::fmt::Write as _;
     let mut flags = Vec::new();
     if let Some(v) = f.auto_verify {
@@ -1519,16 +1552,26 @@ fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter) {
             format!("uri-relative-filter-group allow={}: {matchers}", g.allow).trim_end()
         );
     }
-    if f.has_uri_relative_groups() {
-        let _ = writeln!(
-            s,
-            "      warning: <uri-relative-filter-group> (API 35) is reported as declared and NOT \
-             evaluated — this filter's URI match surface is incomplete"
-        );
+    match match_uri {
+        Some(uri) => {
+            // A concrete URI converts the "NOT evaluated" warning into a
+            // verdict (research doc §4), defaulting to the platform group
+            // flag ON (the API 35 feature enabled).
+            let v = asc_manifest::uri_match::evaluate_filter_uri(f, uri, true);
+            let _ = writeln!(s, "      {}", match_verdict_line(uri, &v));
+        }
+        None if f.has_uri_relative_groups() => {
+            let _ = writeln!(
+                s,
+                "      warning: <uri-relative-filter-group> (API 35) is reported as declared and \
+                 NOT evaluated — this filter's URI match surface is incomplete"
+            );
+        }
+        None => {}
     }
 }
 
-fn write_component(s: &mut String, c: &asc_manifest::ComponentEntry) {
+fn write_component(s: &mut String, c: &asc_manifest::ComponentEntry, match_uri: Option<&str>) {
     use std::fmt::Write as _;
     let _ = write!(s, "  {}{}", c.name, render_exported(c));
     if let Some(p) = &c.permission {
@@ -1542,7 +1585,7 @@ fn write_component(s: &mut String, c: &asc_manifest::ComponentEntry) {
     }
     let _ = writeln!(s);
     for f in &c.intent_filters {
-        write_filter(s, f);
+        write_filter(s, f, match_uri);
     }
     for md in &c.meta_data {
         write_meta_data(s, "    ", md);
@@ -1562,6 +1605,76 @@ fn write_meta_data(s: &mut String, indent: &str, md: &asc_manifest::MetaDataEntr
         .map(|r| format!(" resource={r}"))
         .unwrap_or_default();
     let _ = writeln!(s, "{indent}meta-data: {}{value}{resource}", md.name);
+}
+
+/// Additive JSON for `manifest --match-uri <uri>`: the full parsed manifest
+/// (every existing key, unchanged) plus a new top-level `uri_match` report.
+/// Existing consumers that read the manifest keys are not affected.
+#[derive(serde::Serialize)]
+struct ManifestMatchJson<'a> {
+    #[serde(flatten)]
+    info: &'a asc_manifest::ManifestInfo,
+    uri_match: MatchReport<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct MatchReport<'a> {
+    uri: &'a str,
+    /// The assumed value of `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS`.
+    assumed_flag_on: bool,
+    /// One entry per intent filter of every activity/service/receiver, in
+    /// document order.
+    results: Vec<MatchReportEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct MatchReportEntry {
+    component: String,
+    filter_index: usize,
+    verdict: &'static str,
+    reasons: Vec<String>,
+}
+
+fn match_report_entry(
+    c_component: &str,
+    f: &asc_manifest::IntentFilter,
+    i: usize,
+    uri: &str,
+) -> MatchReportEntry {
+    let v = asc_manifest::uri_match::evaluate_filter_uri(f, uri, true);
+    MatchReportEntry {
+        component: c_component.to_string(),
+        filter_index: i,
+        verdict: match v.outcome {
+            asc_manifest::uri_match::UriMatchVerdict::Matches => "matches",
+            asc_manifest::uri_match::UriMatchVerdict::CannotMatch => "cannot_match",
+            asc_manifest::uri_match::UriMatchVerdict::Unknown => "unknown",
+        },
+        reasons: v.reasons,
+    }
+}
+
+/// `--match-uri` JSON payload builder (activities / services / receivers).
+fn format_manifest_match_json<'a>(
+    m: &'a asc_manifest::ManifestInfo,
+    uri: &'a str,
+) -> ManifestMatchJson<'a> {
+    let mut results = Vec::new();
+    for list in [&m.activities, &m.services, &m.receivers] {
+        for c in list {
+            for (i, f) in c.intent_filters.iter().enumerate() {
+                results.push(match_report_entry(&c.name, f, i, uri));
+            }
+        }
+    }
+    ManifestMatchJson {
+        info: m,
+        uri_match: MatchReport {
+            uri,
+            assumed_flag_on: true,
+            results,
+        },
+    }
 }
 
 /// Translate the CLI `FindRefsKind` into an [`Query`]. For method/field
@@ -1621,7 +1734,7 @@ mod tests {
     //! pinned here so a change to the output cannot silently resurrect the
     //! per-`<data>` "independent URI" reading.
 
-    use super::{format_manifest_text, to_json};
+    use super::{format_manifest_match_json, format_manifest_text, to_json};
     use asc_manifest::{
         ComponentEntry, DataSpec, ExportedState, IntentFilter, ManifestInfo, ProviderEntry,
     };
@@ -1694,7 +1807,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains(
                 "match: schemes=[https,myapp] authorities=[a.example.com,b.example.com] \
@@ -1731,7 +1844,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains("match: schemes=[https] authorities=[a.example.com]"),
             "{text}"
@@ -1754,7 +1867,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains("android:exported required for targetSdk>=31"),
             "component marker missing:\n{text}"
@@ -1783,7 +1896,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(text.contains("[exported=true(auto)]"), "{text}");
         assert!(!text.contains("invalid"), "{text}");
     }
@@ -1808,7 +1921,7 @@ mod tests {
             }],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(text.contains("providers (1):"), "{text}");
         assert!(text.contains(" [exported=true]"), "{text}");
         assert!(!text.contains("warning:"), "{text}");
@@ -1835,7 +1948,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains("match: schemes=[https]"),
             "the effective scheme stays visible:\n{text}"
@@ -1860,7 +1973,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains(
                 "match: none (only intents without a data URI or type can match) \
@@ -1885,7 +1998,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains(
                 "match: mimeTypes=[image/*] (MIME type without a scheme: \
@@ -1938,7 +2051,7 @@ mod tests {
             )],
             ..ManifestInfo::default()
         };
-        let text = format_manifest_text(&m);
+        let text = format_manifest_text(&m, None);
         assert!(
             text.contains("uri-relative-filter-group allow=false: path=/private,query=token=1"),
             "the group's own matchers must be reported:\n{text}"
@@ -1991,5 +2104,75 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// Audit F2 (roadmap 5.5): `manifest --match-uri <uri>` evaluates the
+    /// filter's path/group layer through the production evaluator and emits
+    /// three-valued verdict lines (text) and an additive `uri_match` JSON
+    /// report; the "NOT evaluated" warning is suppressed once a URI decides.
+    #[test]
+    fn manifest_match_uri_emits_verdicts_and_additive_json() {
+        use asc_manifest::{
+            PathMatchKind, RelativeDataSpec, UriPart, UriPartMatcher, UriRelativeFilterGroup,
+        };
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(35),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![{
+                    let mut f = filter(vec![
+                        data(Some("https"), Some("example.com"), None, None),
+                        data(None, None, Some("/public"), None), // sibling pathPrefix
+                    ]);
+                    f.uri_relative_groups = vec![UriRelativeFilterGroup {
+                        allow: false,
+                        data: vec![RelativeDataSpec {
+                            parts: vec![UriPartMatcher {
+                                part: UriPart::Path,
+                                kind: PathMatchKind::Exact,
+                                value: "/private".into(),
+                            }],
+                        }],
+                    }];
+                    f
+                }],
+            )],
+            ..ManifestInfo::default()
+        };
+
+        // Sibling <data pathPrefix=/public> matches in the OR (R5) →
+        // matches even with the block group present.
+        let text = format_manifest_text(&m, Some("https://example.com/public"));
+        assert!(
+            text.contains("match-uri https://example.com/public: matches (assumed flag=on)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("NOT evaluated"),
+            "the warning is replaced by a verdict:\n{text}"
+        );
+
+        // A bare /private hits the allow=false group → cannot match.
+        let text2 = format_manifest_text(&m, Some("https://example.com/private"));
+        assert!(
+            text2.contains("match-uri https://example.com/private: cannot match (assumed flag=on) — first matching group has android:allow=false"),
+            "{text2}"
+        );
+
+        // JSON is additive: existing manifest keys + a new `uri_match` report.
+        let json = to_json(&format_manifest_match_json(
+            &m,
+            "https://example.com/public",
+        ));
+        assert!(json.contains("\"uri_match\""), "{json}");
+        assert!(json.contains("\"verdict\": \"matches\""), "{json}");
+        assert!(
+            json.contains("\"component\": \"com.example.Main\""),
+            "{json}"
+        );
+        assert!(json.contains("\"assumed_flag_on\": true"), "{json}");
     }
 }

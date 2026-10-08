@@ -1,9 +1,10 @@
 # API 35 `<uri-relative-filter-group>` — AOSP semantics, evidence, roadmap
 
-Date: 2026-10-08 · branch `master` · status: **5.1 acceptance criteria
-added; 5.2+5.3 evaluator implemented (`asc-manifest::uri_match`); 5.4
-synthetic tests written from the T-table; 5.5 CLI/GUI surface and the 5.4
-AOSP-oracle differential pending.**
+Date: 2026-10-08 · branch `master` · status: **5.1–5.5 shipped in
+`asc-rs manifest --match-uri <uri>` (text + additive JSON), evaluator in
+`asc-manifest::uri_match`; the 5.4 AOSP-oracle differential and real-APK
+fixtures (aapt2) remain pending — underlying glob/decoding rows stay
+`unknown` until the oracle runs.**
 
 ASC-RS today parses `<uri-relative-filter-group>` children of an
 `<intent-filter>` and reports them verbatim (`asc-manifest`
@@ -267,8 +268,11 @@ block, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`, flag-off) are decided;
 return `Unknown`** because their semantics are the §6.3/§6.4 oracle open
 questions. `assumed_flag_on` is reported on every verdict. Exceeding an
 §4 bound (64 groups / 64 data / 256 parts / 1 MiB URI) yields `Unknown`.
-Not yet done: the 5.5 CLI/GUI surface and the 5.4 AOSP-oracle differential
-(the exact glob/decoding rows stay `Unknown` until the oracle runs).
+Not yet done: the 5.4 AOSP-oracle differential and real-APK fixtures (aapt2)
+— until the oracle runs, `pathPattern`/`pathAdvancedPattern` matchers and
+query `+` stay `unknown`. 5.5's CLI surface shipped as `asc-rs manifest
+--match-uri <uri>` (text verdict lines + additive `uri_match` JSON); the
+GUI inspector surface was not added.
 
 
 **5.2 Data-model design.** Keep `UriRelativeFilterGroup { allow, data }`
