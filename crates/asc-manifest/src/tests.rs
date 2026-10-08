@@ -1289,18 +1289,33 @@ fn full_manifest_fixture_extracts_p0_fields() {
     assert_eq!(a.process.as_deref(), Some(":remote"));
     assert_eq!(a.exported_explicit, None, "exported not declared");
     assert!(a.exported, "inferred exported from filters");
+    assert_eq!(
+        a.exported_state,
+        ExportedState::MissingRequired,
+        "target 35 + filter + no android:exported is install-invalid"
+    );
+    assert!(info.has_invalid_exported());
     assert_eq!(a.intent_filters.len(), 2);
     assert_eq!(a.intent_filters[0].auto_verify, Some(true));
     assert_eq!(a.intent_filters[0].priority, Some(10));
     let f1 = &a.intent_filters[1];
     assert_eq!(f1.priority, Some(-10), "negative INT_DEC priority");
     assert_eq!(f1.categories.len(), 2, "categories preserved");
-    assert_eq!(f1.data.len(), 2, "two <data> elements stay separate");
+    assert_eq!(f1.data.len(), 2, "raw <data> elements preserved verbatim");
     assert_eq!(f1.data[0].scheme.as_deref(), Some("https"));
     assert_eq!(f1.data[0].host.as_deref(), Some("example.com"));
     assert_eq!(f1.data[0].port.as_deref(), Some("8443"));
     assert_eq!(f1.data[0].path_prefix.as_deref(), Some("/app"));
     assert_eq!(f1.data[1].mime_type.as_deref(), Some("image/*"));
+    // ... but Android pools them into one match set.
+    assert_eq!(f1.effective_data.schemes, ["https"]);
+    assert_eq!(f1.effective_data.authorities[0].host, "example.com");
+    assert_eq!(
+        f1.effective_data.authorities[0].port.as_deref(),
+        Some("8443")
+    );
+    assert_eq!(f1.effective_data.paths[0].kind, PathMatchKind::Prefix);
+    assert_eq!(f1.effective_data.mime_types, ["image/*"]);
     assert_eq!(a.meta_data.len(), 1);
     assert_eq!(a.meta_data[0].resource.as_deref(), Some("@0x7f020001"));
 
@@ -1796,4 +1811,409 @@ fn permission_declaration_types_are_kept_apart() {
         "all four declarations survive with their types: {:?}",
         perms
     );
+}
+
+// ---------------------------------------------------------------------------
+// Audit F1: <data> pooling. Android pools every <data> element of one
+// intent-filter per attribute dimension, so a scheme declared in one
+// element matches a host declared in another. The raw `data` vector must
+// not be read as independent URI alternatives.
+// ---------------------------------------------------------------------------
+
+/// The Android docs' own equivalence example: scheme/host/path spread over
+/// separate `<data>` elements is the same filter as one element per
+/// dimension. Raw elements are preserved; the effective set pools.
+#[test]
+fn data_elements_of_one_filter_are_pooled_not_alternatives() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "manifest",
+        vec![attr(None, "package", Val::Str("com.example.app"))],
+        vec![
+            elem(
+                "uses-sdk",
+                vec![attr(Some(ANDROID_NS), "targetSdkVersion", Val::IntDec(30))],
+                vec![],
+            ),
+            elem(
+                "application",
+                vec![],
+                vec![
+                    elem(
+                        "activity",
+                        vec![attr(Some(ANDROID_NS), "name", Val::Str(".Main"))],
+                        vec![elem(
+                            "intent-filter",
+                            vec![attr(Some(ANDROID_NS), "autoVerify", Val::Bool(true))],
+                            vec![
+                                elem(
+                                    "action",
+                                    vec![attr(
+                                        Some(ANDROID_NS),
+                                        "name",
+                                        Val::Str("android.intent.action.VIEW"),
+                                    )],
+                                    vec![],
+                                ),
+                                elem(
+                                    "data",
+                                    vec![
+                                        attr(Some(ANDROID_NS), "scheme", Val::Str("https")),
+                                        attr(Some(ANDROID_NS), "host", Val::Str("a.example.com")),
+                                    ],
+                                    vec![],
+                                ),
+                                elem(
+                                    "data",
+                                    vec![
+                                        attr(Some(ANDROID_NS), "scheme", Val::Str("myapp")),
+                                        attr(Some(ANDROID_NS), "host", Val::Str("b.example.com")),
+                                        attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/deep")),
+                                    ],
+                                    vec![],
+                                ),
+                                // Path + mimeType only, no scheme/host: still
+                                // pools into the same filter.
+                                elem(
+                                    "data",
+                                    vec![
+                                        attr(Some(ANDROID_NS), "mimeType", Val::Str("image/*")),
+                                        attr(Some(ANDROID_NS), "pathPattern", Val::Str("/img/.*")),
+                                    ],
+                                    vec![],
+                                ),
+                            ],
+                        )],
+                    ),
+                    // A second filter must NOT pool with the first.
+                    elem(
+                        "activity",
+                        vec![attr(Some(ANDROID_NS), "name", Val::Str(".Other"))],
+                        vec![elem(
+                            "intent-filter",
+                            vec![],
+                            vec![elem(
+                                "data",
+                                vec![
+                                    attr(Some(ANDROID_NS), "scheme", Val::Str("ftp")),
+                                    attr(Some(ANDROID_NS), "host", Val::Str("c.example.com")),
+                                ],
+                                vec![],
+                            )],
+                        )],
+                    ),
+                ],
+            ),
+        ],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+
+    let f = &info.activities[0].intent_filters[0];
+    assert_eq!(
+        f.data.len(),
+        3,
+        "raw <data> elements are preserved verbatim"
+    );
+    let eff = &f.effective_data;
+    assert_eq!(eff.schemes, ["https", "myapp"], "schemes pool (dedup)");
+    assert_eq!(
+        eff.authorities
+            .iter()
+            .map(|a| a.host.as_str())
+            .collect::<Vec<_>>(),
+        ["a.example.com", "b.example.com"],
+        "hosts from different <data> elements pool together: https://b.example.com \
+         and myapp://a.example.com both match"
+    );
+    assert_eq!(eff.paths.len(), 2, "path and pathPattern pool too");
+    assert_eq!(eff.paths[0].kind, PathMatchKind::Prefix);
+    assert_eq!(eff.paths[0].value, "/deep");
+    assert_eq!(eff.paths[1].kind, PathMatchKind::Pattern);
+    assert_eq!(eff.paths[1].value, "/img/.*");
+    assert_eq!(eff.mime_types, ["image/*"]);
+    assert!(eff.has_uri());
+    // The stored field (JSON) mirrors the on-demand helper.
+    assert_eq!(&f.effective_data(), eff);
+    assert_eq!(f.auto_verify, Some(true), "filter-level attr untouched");
+
+    // A separate filter is its own match set.
+    let g = &info.activities[1].intent_filters[0];
+    assert_eq!(g.effective_data.schemes, ["ftp"]);
+    assert_eq!(g.effective_data.authorities.len(), 1);
+    assert_eq!(g.effective_data.authorities[0].host, "c.example.com");
+    assert!(g.effective_data.paths.is_empty());
+    assert!(g.effective_data.mime_types.is_empty());
+}
+
+/// Duplicate values across `<data>` elements collapse; a port stays bound to
+/// the host declared on the same element.
+#[test]
+fn pooled_data_dedups_and_binds_port_to_its_host() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let doc = elem(
+        "manifest",
+        vec![attr(None, "package", Val::Str("com.example.app"))],
+        vec![elem(
+            "application",
+            vec![],
+            vec![elem(
+                "activity",
+                vec![attr(Some(ANDROID_NS), "name", Val::Str(".M"))],
+                vec![elem(
+                    "intent-filter",
+                    vec![],
+                    vec![
+                        elem(
+                            "data",
+                            vec![
+                                attr(Some(ANDROID_NS), "scheme", Val::Str("https")),
+                                attr(Some(ANDROID_NS), "host", Val::Str("x.example.com")),
+                                attr(Some(ANDROID_NS), "port", Val::Str("8443")),
+                            ],
+                            vec![],
+                        ),
+                        elem(
+                            "data",
+                            vec![
+                                attr(Some(ANDROID_NS), "scheme", Val::Str("https")),
+                                attr(Some(ANDROID_NS), "host", Val::Str("x.example.com")),
+                            ],
+                            vec![],
+                        ),
+                    ],
+                )],
+            )],
+        )],
+    );
+    let info = parse_manifest(&axml::build(&doc)).expect("parse");
+    let eff = &info.activities[0].intent_filters[0].effective_data;
+    assert_eq!(eff.schemes, ["https"], "duplicate scheme collapses");
+    // Same host with a port and without are distinct authorities.
+    assert_eq!(eff.authorities.len(), 2);
+    assert_eq!(eff.authorities[0].port.as_deref(), Some("8443"));
+    assert_eq!(eff.authorities[1].port, None);
+}
+
+// ---------------------------------------------------------------------------
+// Audit F4: android:exported semantics for targetSdk >= 31.
+// ---------------------------------------------------------------------------
+
+/// One-component manifest with an optional intent filter and optional
+/// explicit `android:exported`, at a chosen targetSdkVersion.
+fn component_manifest(
+    sdk: u32,
+    tag: &'static str,
+    with_filter: bool,
+    exported: Option<bool>,
+) -> ManifestInfo {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let mut attrs = vec![attr(Some(ANDROID_NS), "name", Val::Str(".Comp"))];
+    if let Some(v) = exported {
+        attrs.push(attr(Some(ANDROID_NS), "exported", Val::Bool(v)));
+    }
+    if tag == "activity-alias" {
+        attrs.push(attr(Some(ANDROID_NS), "targetActivity", Val::Str(".Comp")));
+    }
+    let children = if with_filter {
+        vec![elem(
+            "intent-filter",
+            vec![],
+            vec![elem(
+                "action",
+                vec![attr(
+                    Some(ANDROID_NS),
+                    "name",
+                    Val::Str("android.intent.action.VIEW"),
+                )],
+                vec![],
+            )],
+        )]
+    } else {
+        Vec::new()
+    };
+    let doc = elem(
+        "manifest",
+        vec![attr(None, "package", Val::Str("com.example.app"))],
+        vec![
+            elem(
+                "uses-sdk",
+                vec![attr(Some(ANDROID_NS), "targetSdkVersion", Val::IntDec(sdk))],
+                vec![],
+            ),
+            elem("application", vec![], vec![elem(tag, attrs, children)]),
+        ],
+    );
+    parse_manifest(&axml::build(&doc)).expect("parse")
+}
+
+fn component_of<'a>(info: &'a ManifestInfo, tag: &str) -> &'a ComponentEntry {
+    match tag {
+        "activity" => &info.activities[0],
+        "service" => &info.services[0],
+        "receiver" => &info.receivers[0],
+        "activity-alias" => &info.activity_aliases[0].component,
+        other => panic!("unknown component tag {other}"),
+    }
+}
+
+/// Audit F4: with an intent filter and no explicit `android:exported`,
+/// targetSdk 31+ (Android 12) is an install-invalid manifest — reported as
+/// such, never as a usable `(auto)` inference.
+#[test]
+fn missing_exported_is_install_invalid_for_target_31_plus() {
+    // targetSdk < 31 admits the legacy inference.
+    let a = component_manifest(30, "activity", true, None);
+    let ca = component_of(&a, "activity");
+    assert_eq!(ca.exported_state, ExportedState::LegacyInferred);
+    assert!(ca.exported, "filter implies exported below API 31");
+    assert!(!a.has_invalid_exported());
+
+    // targetSdk >= 31 + filter + no declaration: install-invalid.
+    for sdk in [31, 35] {
+        let m = component_manifest(sdk, "activity", true, None);
+        let c = component_of(&m, "activity");
+        assert_eq!(
+            c.exported_state,
+            ExportedState::MissingRequired,
+            "sdk {sdk}"
+        );
+        assert!(
+            c.exported,
+            "legacy value kept for backwards compatibility (sdk {sdk})"
+        );
+        assert_eq!(c.exported_explicit, None);
+        assert!(m.has_invalid_exported(), "sdk {sdk}");
+    }
+
+    // targetSdk >= 31 without a filter: the platform default applies; valid.
+    let d = component_manifest(35, "activity", false, None);
+    let cd = component_of(&d, "activity");
+    assert_eq!(cd.exported_state, ExportedState::LegacyInferred);
+    assert!(!cd.exported);
+    assert!(!d.has_invalid_exported());
+
+    // An explicit declaration is always valid and wins.
+    let e = component_manifest(31, "activity", true, Some(true));
+    let ce = component_of(&e, "activity");
+    assert_eq!(ce.exported_state, ExportedState::Explicit);
+    assert!(ce.exported);
+    assert!(!e.has_invalid_exported());
+
+    let f = component_manifest(31, "activity", true, Some(false));
+    let cf = component_of(&f, "activity");
+    assert_eq!(cf.exported_state, ExportedState::Explicit);
+    assert!(!cf.exported, "declared false beats filter inference");
+    assert!(!f.has_invalid_exported());
+}
+
+/// The API 31 requirement covers exactly the filter-bearing kinds:
+/// activity, activity-alias, service, receiver — with a filter only.
+#[test]
+fn exported_requirement_covers_filter_bearing_component_kinds() {
+    for tag in ["activity", "activity-alias", "service", "receiver"] {
+        let filtered = component_manifest(33, tag, true, None);
+        assert_eq!(
+            component_of(&filtered, tag).exported_state,
+            ExportedState::MissingRequired,
+            "filtered {tag}"
+        );
+        assert!(filtered.has_invalid_exported(), "filtered {tag}");
+        let unfiltered = component_manifest(33, tag, false, None);
+        assert_eq!(
+            component_of(&unfiltered, tag).exported_state,
+            ExportedState::LegacyInferred,
+            "unfiltered {tag}"
+        );
+        assert!(!unfiltered.has_invalid_exported(), "unfiltered {tag}");
+    }
+}
+
+/// Regression: providers carry no intent filters, so the API 31 rule never
+/// applies; their own target-SDK default (>= 17 → false) stands and they are
+/// never reported install-invalid.
+#[test]
+fn provider_exported_rule_stays_separate_from_the_api_31_requirement() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    for (sdk, expected) in [(16u32, true), (17, false), (33, false)] {
+        let doc = elem(
+            "manifest",
+            vec![attr(None, "package", Val::Str("com.example.app"))],
+            vec![
+                elem(
+                    "uses-sdk",
+                    vec![attr(Some(ANDROID_NS), "targetSdkVersion", Val::IntDec(sdk))],
+                    vec![],
+                ),
+                elem(
+                    "application",
+                    vec![],
+                    vec![elem(
+                        "provider",
+                        vec![
+                            attr(Some(ANDROID_NS), "name", Val::Str(".P")),
+                            attr(Some(ANDROID_NS), "authorities", Val::Str("com.example.p")),
+                        ],
+                        vec![],
+                    )],
+                ),
+            ],
+        );
+        let info = parse_manifest(&axml::build(&doc)).expect("parse");
+        let p = &info.providers[0];
+        assert_eq!(p.exported_explicit, None, "sdk {sdk}");
+        assert_eq!(p.exported, expected, "provider default at sdk {sdk}");
+        assert!(!info.has_invalid_exported(), "sdk {sdk}: provider exempt");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security defaults keyed on the *effective* target SDK.
+// ---------------------------------------------------------------------------
+
+/// `usesCleartextTraffic`'s platform default is `effective target SDK < 28`.
+/// An app that declares only `minSdkVersion` targets that level, so a
+/// minSdk-28+ manifest must not report cleartext as allowed (false positive
+/// that inverts the conclusion an analyst draws).
+#[test]
+fn cleartext_default_keys_off_the_effective_target_sdk() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let build = |min: u32, target: Option<u32>, cleartext: Option<bool>| {
+        let mut sdk_attrs = vec![attr(Some(ANDROID_NS), "minSdkVersion", Val::IntDec(min))];
+        if let Some(t) = target {
+            sdk_attrs.push(attr(Some(ANDROID_NS), "targetSdkVersion", Val::IntDec(t)));
+        }
+        let mut app_attrs = Vec::new();
+        if let Some(v) = cleartext {
+            app_attrs.push(attr(Some(ANDROID_NS), "usesCleartextTraffic", Val::Bool(v)));
+        }
+        let doc = elem(
+            "manifest",
+            vec![attr(None, "package", Val::Str("com.example.app"))],
+            vec![
+                elem("uses-sdk", sdk_attrs, vec![]),
+                elem("application", app_attrs, vec![]),
+            ],
+        );
+        parse_manifest(&axml::build(&doc)).expect("parse")
+    };
+
+    // No targetSdkVersion: the effective target is minSdkVersion.
+    let a = build(30, None, None);
+    assert_eq!(a.target_sdk, None);
+    assert_eq!(a.effective_target_sdk(), 30);
+    assert!(
+        !a.effective_uses_cleartext_traffic(),
+        "effective target 30 → cleartext denied by default"
+    );
+
+    // Same shape below API 28 keeps the pre-P default (allowed).
+    assert!(build(27, None, None).effective_uses_cleartext_traffic());
+
+    // An explicit targetSdkVersion wins over minSdkVersion.
+    assert!(!build(21, Some(30), None).effective_uses_cleartext_traffic());
+    assert!(build(30, Some(21), None).effective_uses_cleartext_traffic());
+
+    // A declared value overrides the default in both directions.
+    assert!(build(33, None, Some(true)).effective_uses_cleartext_traffic());
+    assert!(!build(21, None, Some(false)).effective_uses_cleartext_traffic());
 }

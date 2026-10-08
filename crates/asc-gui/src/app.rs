@@ -370,7 +370,12 @@ impl AscApp {
         origin: NavOrigin,
         ctx: &egui::Context,
     ) {
-        self.selected_class = Some(descriptor.to_string());
+        // A view key (`L…;#smali…`) identifies a tab, not a class: it must
+        // not taint the class selection, or a later class-scoped action
+        // would fall back to a synthetic descriptor (audit F2).
+        if crate::state::tabs::class_of_tab_key(descriptor) == Some(descriptor) {
+            self.selected_class = Some(descriptor.to_string());
+        }
         if pin {
             self.tabs.open_pinned(descriptor);
         } else {
@@ -394,13 +399,37 @@ impl AscApp {
     }
 
     /// Spawn a decompile task for `descriptor` (deduplicated).
+    ///
+    /// Only a class descriptor maps to a `getclass` job: a view key
+    /// (`L…;#smali…`, produced by [`TaskManager::spawn_disasm`]) or a text
+    /// sentinel must not be sent to the engine. One guard at the single
+    /// decompile entry point covers every caller (audit F2).
     pub(crate) fn spawn_decompile(&mut self, descriptor: &str, ctx: &egui::Context) {
+        if crate::state::tabs::class_of_tab_key(descriptor) != Some(descriptor) {
+            return;
+        }
         self.tasks.spawn_decompile(
             self.session.as_ref().expect("session").path(),
             descriptor,
             self.paranoid,
             ctx,
         );
+    }
+
+    /// Class identity of the current focus, for every class-scoped
+    /// action (references, copy descriptor/FQN, Smali, strings, …).
+    ///
+    /// Tab keys are *view* identities — `L…;#smali` / `L…;#smali#<m>` for
+    /// Smali listings, a non-`L…;` sentinel for a text tab — so a
+    /// class-scoped command must never use `tabs.active_descriptor()`
+    /// raw (audit F2: the synthetic key reached the engine and produced a
+    /// false-negative search). Resolution: the active tab's owning class
+    /// when the tab is class-shaped, else the tree selection.
+    pub(crate) fn active_class_descriptor(&self) -> Option<&str> {
+        self.tabs
+            .active_descriptor()
+            .and_then(crate::state::tabs::class_of_tab_key)
+            .or(self.selected_class.as_deref())
     }
 
     fn nav_back(&mut self, ctx: &egui::Context) {
@@ -788,11 +817,7 @@ impl AscApp {
                 // References to the active class: an engine type-query
                 // keyed on the full descriptor, routed to the
                 // REFERENCES tab.
-                let descriptor = self
-                    .tabs
-                    .active_descriptor()
-                    .or(self.selected_class.as_deref())
-                    .map(str::to_string);
+                let descriptor = self.active_class_descriptor().map(str::to_string);
                 if let (Some(session), Some(descriptor)) = (&self.session, descriptor) {
                     let apk = session.path().to_path_buf();
                     self.tasks.spawn_findrefs_class(&apk, &descriptor, ctx);
@@ -808,12 +833,7 @@ impl AscApp {
                 // Smali listing of the active class, opened as a
                 // `#smali`-keyed document/tab. Cached listings reuse
                 // the normal navigation path.
-                let descriptor = self
-                    .tabs
-                    .active_descriptor()
-                    .filter(|d| !d.contains("#smali"))
-                    .or(self.selected_class.as_deref())
-                    .map(str::to_string);
+                let descriptor = self.active_class_descriptor().map(str::to_string);
                 let Some(descriptor) = descriptor else {
                     self.set_status("open a class first", false);
                     return;
@@ -842,19 +862,7 @@ impl AscApp {
                     .as_ref()
                     .map(|s| s.descriptor.clone())
                     .filter(|d| !d.is_empty())
-                    .or_else(|| {
-                        // Prefer the active tab's class, but never a
-                        // `#smali` view key: filter the active descriptor
-                        // BEFORE falling back to the tree selection, so a
-                        // smali tab active over a selected class still
-                        // resolves the class (`.or(..).filter(..)` would
-                        // pick the smali key, then drop it to `None`).
-                        self.tabs
-                            .active_descriptor()
-                            .filter(|d| !d.contains("#smali"))
-                            .or(self.selected_class.as_deref())
-                            .map(str::to_string)
-                    });
+                    .or_else(|| self.active_class_descriptor().map(str::to_string));
                 let method = self.symbol_sel.as_ref().map(|s| s.token.clone());
                 let (Some(descriptor), Some(method)) = (descriptor, method) else {
                     let msg = if self.symbol_sel.is_some() {
@@ -895,19 +903,7 @@ impl AscApp {
                     .as_ref()
                     .map(|s| s.descriptor.clone())
                     .filter(|d| !d.is_empty())
-                    .or_else(|| {
-                        // Prefer the active tab's class, but never a
-                        // `#smali` view key: filter the active descriptor
-                        // BEFORE falling back to the tree selection, so a
-                        // smali tab active over a selected class still
-                        // resolves the class (`.or(..).filter(..)` would
-                        // pick the smali key, then drop it to `None`).
-                        self.tabs
-                            .active_descriptor()
-                            .filter(|d| !d.contains("#smali"))
-                            .or(self.selected_class.as_deref())
-                            .map(str::to_string)
-                    });
+                    .or_else(|| self.active_class_descriptor().map(str::to_string));
                 let Some(descriptor) = descriptor else {
                     self.set_status("select a class first", false);
                     return;
@@ -1026,8 +1022,8 @@ impl AscApp {
                     self.close_tab(&d);
                 }
             }
-            Command::CloseOthers => {
-                let dropped = self.tabs.close_others(None);
+            Command::CloseOthers { descriptor } => {
+                let dropped = self.tabs.close_others(descriptor.as_deref());
                 for d in &dropped {
                     self.documents.remove(d);
                 }
@@ -1080,7 +1076,7 @@ impl AscApp {
                 self.documents.clear();
                 self.active_doc = None;
                 if self.session.is_some()
-                    && let Some(d) = self.tabs.active_descriptor().map(str::to_string)
+                    && let Some(d) = self.active_class_descriptor().map(str::to_string)
                 {
                     self.spawn_decompile(&d, ctx);
                 }
@@ -1133,11 +1129,7 @@ impl AscApp {
                 self.set_status("search cancelled", false);
             }
             Command::CopyDescriptor => {
-                let descriptor = self
-                    .tabs
-                    .active_descriptor()
-                    .or(self.selected_class.as_deref())
-                    .map(str::to_string);
+                let descriptor = self.active_class_descriptor().map(str::to_string);
                 let Some(d) = descriptor else {
                     self.set_status("copy descriptor: no active class", false);
                     return;
@@ -1147,11 +1139,7 @@ impl AscApp {
                 self.set_status(format!("copied descriptor: {d}"), true);
             }
             Command::CopyFqn => {
-                let descriptor = self
-                    .tabs
-                    .active_descriptor()
-                    .or(self.selected_class.as_deref())
-                    .map(str::to_string);
+                let descriptor = self.active_class_descriptor().map(str::to_string);
                 let Some(d) = descriptor else {
                     self.set_status("copy FQN: no active class", false);
                     return;

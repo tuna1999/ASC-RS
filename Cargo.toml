@@ -17,7 +17,7 @@ members = [
 exclude = ["fuzz", "reference/asc"]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 # Lowest compiler that can build EVERY workspace member. 1.95 is set by
 # the egui 0.36 stack (eframe/egui/epaint/egui_kittest/… each declare

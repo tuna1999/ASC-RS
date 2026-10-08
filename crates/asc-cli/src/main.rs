@@ -1152,6 +1152,13 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
         num(m.target_sdk),
         num(m.compile_sdk)
     );
+    if m.has_invalid_exported() {
+        let _ = writeln!(
+            s,
+            "warning: android:exported missing on a filtered component — targetSdk>=31 \
+             (Android 12+) rejects this manifest at install time"
+        );
+    }
     // Split markers (only when the manifest declares any).
     let mut split = Vec::new();
     let push_split = |out: &mut Vec<String>, k: &str, v: &Option<String>| {
@@ -1267,8 +1274,12 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
             for c in &f.categories {
                 let _ = write!(s, " category {c}");
             }
-            for d in &f.data {
-                let _ = write!(s, " {}", render_data(d));
+            if f.effective_data.has_uri() || !f.effective_data.mime_types.is_empty() {
+                let _ = write!(
+                    s,
+                    " {}",
+                    render_effective_data(&f.effective_data, f.data.len() > 1)
+                );
             }
             let _ = writeln!(s);
         }
@@ -1325,8 +1336,8 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo) -> String {
     s
 }
 
-/// `[exported=…]` annotation that keeps declared vs inferred traceable:
-/// `(auto)` marks Android's inference, not a manifest declaration.
+/// `[exported=…]` annotation for a provider (no intent filters, so the
+/// API 31 explicit-attribute rule never applies).
 fn render_exported_raw(exported: bool, explicit: Option<bool>) -> String {
     match explicit {
         Some(_) => format!(" [exported={exported}]"),
@@ -1335,27 +1346,72 @@ fn render_exported_raw(exported: bool, explicit: Option<bool>) -> String {
     }
 }
 
+/// `[exported=…]` annotation for a filter-bearing component, driven by the
+/// parse-time [`asc_manifest::ExportedState`] so an install-invalid
+/// manifest is never reported as a usable `(auto)` inference.
 fn render_exported(c: &asc_manifest::ComponentEntry) -> String {
-    render_exported_raw(c.exported, c.exported_explicit)
+    use asc_manifest::ExportedState;
+    match c.exported_state {
+        ExportedState::Explicit => format!(" [exported={}]", c.exported),
+        ExportedState::LegacyInferred if c.exported => " [exported=true(auto)]".into(),
+        ExportedState::LegacyInferred => String::new(),
+        ExportedState::MissingRequired => {
+            " [exported=? invalid: android:exported required for targetSdk>=31]".into()
+        }
+    }
 }
 
-fn render_data(d: &asc_manifest::DataSpec) -> String {
+/// Render one filter's **pooled** match set. Pooling is the whole point:
+/// Android matches each dimension independently across every `<data>`
+/// element of the filter, so a per-`<data>` rendering would understate the
+/// attack surface (audit F1).
+fn render_effective_data(eff: &asc_manifest::EffectiveData, pooled: bool) -> String {
+    use asc_manifest::PathMatchKind;
     let mut parts = Vec::new();
-    let mut push = |k: &str, v: &Option<String>| {
-        if let Some(v) = v {
-            parts.push(format!("{k}={v}"));
-        }
-    };
-    push("scheme", &d.scheme);
-    push("host", &d.host);
-    push("port", &d.port);
-    push("path", &d.path);
-    push("pathPrefix", &d.path_prefix);
-    push("pathPattern", &d.path_pattern);
-    push("pathAdvancedPattern", &d.path_advanced_pattern);
-    push("pathSuffix", &d.path_suffix);
-    push("mimeType", &d.mime_type);
-    format!("data {}", parts.join(" "))
+    if !eff.schemes.is_empty() {
+        parts.push(format!("schemes=[{}]", eff.schemes.join(",")));
+    }
+    if !eff.authorities.is_empty() {
+        let hosts = eff
+            .authorities
+            .iter()
+            .map(|a| match &a.port {
+                Some(port) => format!("{}:{port}", a.host),
+                None => a.host.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("authorities=[{hosts}]"));
+    }
+    if !eff.paths.is_empty() {
+        let paths = eff
+            .paths
+            .iter()
+            .map(|m| {
+                let kind = match m.kind {
+                    PathMatchKind::Exact => "path",
+                    PathMatchKind::Prefix => "pathPrefix",
+                    PathMatchKind::Pattern => "pathPattern",
+                    PathMatchKind::AdvancedPattern => "pathAdvancedPattern",
+                    PathMatchKind::Suffix => "pathSuffix",
+                };
+                format!("{kind}={}", m.value)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("paths=[{paths}]"));
+    }
+    if !eff.mime_types.is_empty() {
+        parts.push(format!("mimeTypes=[{}]", eff.mime_types.join(",")));
+    }
+    if parts.is_empty() {
+        return "match: none".into();
+    }
+    let mut line = format!("match: {}", parts.join(" "));
+    if pooled {
+        line.push_str(" (pooled across <data>: every scheme/host/path combination matches)");
+    }
+    line
 }
 
 fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter) {
@@ -1378,8 +1434,12 @@ fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter) {
     for c in &f.categories {
         let _ = writeln!(s, "      category {c}");
     }
-    for d in &f.data {
-        let _ = writeln!(s, "      {}", render_data(d));
+    if f.effective_data.has_uri() || !f.effective_data.mime_types.is_empty() {
+        let _ = writeln!(
+            s,
+            "      {}",
+            render_effective_data(&f.effective_data, f.data.len() > 1)
+        );
     }
 }
 
@@ -1467,4 +1527,205 @@ fn build_query(kind: &FindRefsKind) -> Result<Query, CoreError> {
         }
     };
     Ok(q)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Manifest text rendering: the pooled match set (audit F1) and the
+    //! install-invalid `android:exported` marker (audit F4). Rendering is
+    //! pinned here so a change to the output cannot silently resurrect the
+    //! per-`<data>` "independent URI" reading.
+
+    use super::format_manifest_text;
+    use asc_manifest::{
+        ComponentEntry, DataSpec, ExportedState, IntentFilter, ManifestInfo, ProviderEntry,
+    };
+
+    fn data(
+        scheme: Option<&str>,
+        host: Option<&str>,
+        path_prefix: Option<&str>,
+        mime: Option<&str>,
+    ) -> DataSpec {
+        DataSpec {
+            scheme: scheme.map(str::to_string),
+            host: host.map(str::to_string),
+            path_prefix: path_prefix.map(str::to_string),
+            mime_type: mime.map(str::to_string),
+            ..DataSpec::default()
+        }
+    }
+
+    /// Build a filter and pool it the way `parse_manifest` does.
+    fn filter(data: Vec<DataSpec>) -> IntentFilter {
+        let mut f = IntentFilter {
+            actions: vec!["android.intent.action.VIEW".into()],
+            data,
+            ..IntentFilter::default()
+        };
+        f.effective_data = f.effective_data();
+        f
+    }
+
+    fn activity(
+        name: &str,
+        state: ExportedState,
+        exported: bool,
+        filters: Vec<IntentFilter>,
+    ) -> ComponentEntry {
+        ComponentEntry {
+            name: name.into(),
+            exported,
+            exported_explicit: (state == ExportedState::Explicit).then_some(exported),
+            exported_state: state,
+            permission: None,
+            label: None,
+            process: None,
+            intent_filters: filters,
+            meta_data: Vec::new(),
+        }
+    }
+
+    /// Audit F1: two `<data>` elements render as one pooled match set, never
+    /// as two independent URIs.
+    #[test]
+    fn manifest_text_pools_filter_data() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![
+                    data(Some("https"), Some("a.example.com"), None, None),
+                    data(
+                        Some("myapp"),
+                        Some("b.example.com"),
+                        Some("/deep"),
+                        Some("image/*"),
+                    ),
+                ])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains(
+                "match: schemes=[https,myapp] authorities=[a.example.com,b.example.com] \
+                 paths=[pathPrefix=/deep] mimeTypes=[image/*]"
+            ),
+            "pooled match line missing/incomplete:\n{text}"
+        );
+        assert!(
+            text.contains("pooled across <data>"),
+            "pooling must be called out when the filter has >1 <data>:\n{text}"
+        );
+        assert!(
+            !text.contains("data scheme="),
+            "raw per-<data> lines imply alternatives and must be gone:\n{text}"
+        );
+    }
+
+    /// A single `<data>` needs no pooling caveat.
+    #[test]
+    fn manifest_text_single_data_has_no_pooling_note() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![data(
+                    Some("https"),
+                    Some("a.example.com"),
+                    None,
+                    None,
+                )])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains("match: schemes=[https] authorities=[a.example.com]"),
+            "{text}"
+        );
+        assert!(!text.contains("pooled across <data>"), "{text}");
+    }
+
+    /// Audit F4: targetSdk>=31 + filter + no explicit exported renders as
+    /// install-invalid, not as a usable `(auto)` inference.
+    #[test]
+    fn manifest_text_flags_missing_required_exported() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(31),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::MissingRequired,
+                true,
+                vec![filter(vec![data(Some("https"), None, None, None)])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(
+            text.contains("android:exported required for targetSdk>=31"),
+            "component marker missing:\n{text}"
+        );
+        assert!(
+            text.contains("warning: android:exported missing"),
+            "summary warning missing:\n{text}"
+        );
+        assert!(
+            !text.contains("exported=true(auto)"),
+            "must not read as installable:\n{text}"
+        );
+    }
+
+    /// Below API 31 the legacy `(auto)` inference renders as before.
+    #[test]
+    fn manifest_text_keeps_legacy_auto_below_api_31() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![data(Some("https"), None, None, None)])],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(text.contains("[exported=true(auto)]"), "{text}");
+        assert!(!text.contains("invalid"), "{text}");
+    }
+
+    /// Providers keep their own rule (no intent filters → never invalid).
+    #[test]
+    fn manifest_text_provider_exported_rendering_unchanged() {
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(33),
+            providers: vec![ProviderEntry {
+                name: "com.example.P".into(),
+                authorities: Some("com.example.p".into()),
+                exported: true,
+                exported_explicit: Some(true),
+                permission: None,
+                read_permission: None,
+                write_permission: None,
+                grant_uri_permissions: false,
+                label: None,
+                meta_data: Vec::new(),
+            }],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m);
+        assert!(text.contains("providers (1):"), "{text}");
+        assert!(text.contains(" [exported=true]"), "{text}");
+        assert!(!text.contains("warning:"), "{text}");
+    }
 }

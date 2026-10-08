@@ -1042,6 +1042,182 @@ fn copy_fqn_writes_clipboard() {
     assert_eq!(app.last_clipboard.as_deref(), Some("com.foo.Bar"));
 }
 
+/// A `#smali` view tab is a *view* identity, not a class identity.
+/// Class-scoped actions must resolve the owning class, never pass the
+/// synthetic tab key to the engine (audit F2: the tab key reached
+/// `spawn_findrefs_class` and produced a false-negative search).
+#[test]
+fn copy_descriptor_from_smali_tab_copies_owning_class() {
+    let mut app = empty_app();
+    let class = "Lcom/example/Foo;";
+    app.tabs.open_pinned(class);
+    app.tabs
+        .open_preview(&crate::task::TaskManager::smali_key(class, None));
+    assert_eq!(
+        active(&app).as_deref(),
+        Some("Lcom/example/Foo;#smali"),
+        "smali view tab is active"
+    );
+    let ctx = egui::Context::default();
+    app.dispatch(Command::CopyDescriptor, &ctx);
+    assert_eq!(
+        app.last_clipboard.as_deref(),
+        Some(class),
+        "descriptor must be the owning class, not the view key"
+    );
+}
+
+/// Same for a method-scoped Smali tab (`Lclass;#smali#method`) and the
+/// FQN form.
+#[test]
+fn copy_fqn_from_method_smali_tab_copies_owning_class() {
+    let mut app = empty_app();
+    let class = "Lcom/example/Foo;";
+    app.tabs.open_pinned(class);
+    app.tabs
+        .open_preview(&crate::task::TaskManager::smali_key(class, Some("doThing")));
+    assert_eq!(
+        active(&app).as_deref(),
+        Some("Lcom/example/Foo;#smali#doThing")
+    );
+    let ctx = egui::Context::default();
+    app.dispatch(Command::CopyFqn, &ctx);
+    assert_eq!(app.last_clipboard.as_deref(), Some("com.example.Foo"));
+}
+
+/// `FindReferences` with a Smali tab active must query the owning class
+/// (observable through the status line the dispatch writes).
+#[test]
+fn find_references_from_smali_tab_targets_owning_class() {
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let session = WorkspaceSession::open(&apk).expect("open");
+    let mut app = AscApp::from_session(session);
+    let ctx = egui::Context::default();
+    let class = "Lcom/example/Foo;";
+    app.tabs.open_pinned(class);
+    app.tabs
+        .open_preview(&crate::task::TaskManager::smali_key(class, None));
+    app.dispatch(Command::FindReferences, &ctx);
+    assert_eq!(
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("references: Lcom/example/Foo;"),
+        "references must target the owning class, not the #smali view key"
+    );
+}
+
+/// A text tab is not class-shaped: with no tree selection the
+/// class-scoped actions resolve nothing (they must never hand the text
+/// key to the engine).
+#[test]
+fn copy_descriptor_from_text_tab_without_class_is_a_noop() {
+    let mut app = empty_app();
+    app.tabs.tabs_mut().push(crate::state::Tab {
+        descriptor: "manifest".into(),
+        dex_name: None,
+        kind: crate::state::TabKind::Text,
+        status: crate::state::TabStatus::Ready,
+    });
+    app.tabs.activate("manifest");
+    let ctx = egui::Context::default();
+    app.dispatch(Command::CopyDescriptor, &ctx);
+    assert_eq!(app.last_clipboard, None, "no class resolved");
+    assert_eq!(
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("copy descriptor: no active class")
+    );
+}
+
+/// ... but a text tab still falls back to the tree selection rather than
+/// the text key.
+#[test]
+fn copy_descriptor_from_text_tab_falls_back_to_tree_selection() {
+    let mut app = empty_app();
+    app.tabs.tabs_mut().push(crate::state::Tab {
+        descriptor: "manifest".into(),
+        dex_name: None,
+        kind: crate::state::TabKind::Text,
+        status: crate::state::TabStatus::Ready,
+    });
+    app.tabs.activate("manifest");
+    app.selected_class = Some("Lcom/example/Foo;".into());
+    let ctx = egui::Context::default();
+    app.dispatch(Command::CopyDescriptor, &ctx);
+    assert_eq!(app.last_clipboard.as_deref(), Some("Lcom/example/Foo;"));
+}
+
+/// ASC-RS-GUI-002 render level: the class-scoped button never renders
+/// when the current context resolves no class.
+#[test]
+fn used_by_class_button_absent_for_text_tab_without_class() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), empty_app());
+    h.state_mut().tabs.tabs_mut().push(crate::state::Tab {
+        descriptor: "manifest".into(),
+        dex_name: None,
+        kind: crate::state::TabKind::Text,
+        status: crate::state::TabStatus::Ready,
+    });
+    h.state_mut().tabs.activate("manifest");
+    h.run_steps(2);
+    assert!(
+        h.query_by_label("used by this class").is_none(),
+        "no class in context → no class-scoped action"
+    );
+}
+
+/// Opening a view key (as a tab click does) must not taint the class
+/// selection: otherwise a later class-scoped action would fall back to
+/// the `#smali` descriptor.
+#[test]
+fn opening_a_smali_tab_does_not_taint_the_class_selection() {
+    let mut app = empty_app();
+    let key = crate::task::TaskManager::smali_key("Lcom/example/Foo;", None);
+    let ctx = egui::Context::default();
+    app.navigate_to(&key, false, None, NavOrigin::Tab, &ctx);
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+    assert!(
+        app.selected_class.is_none(),
+        "a view key must never become the class selection"
+    );
+}
+
+/// A Smali tab whose document was evicted is re-issued on demand by
+/// `draw_code_area`; that re-issue must not query the class engine with
+/// the view key (it would fail). Audit F2 sibling.
+#[test]
+fn evicted_smali_tab_is_not_reissued_as_getclass() {
+    let _guard = render_lock();
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let session = WorkspaceSession::open(&apk).expect("open");
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut AscApp| app.test_frame(ui),
+            AscApp::from_session(session),
+        );
+    let key = crate::task::TaskManager::smali_key("Lcom/example/Foo;", None);
+    h.state_mut().tabs.open_preview(&key);
+    // The listing landed earlier; its document is since evicted.
+    h.state_mut()
+        .tabs
+        .set_ready(&key, Some("classes.dex".into()));
+    h.run_steps(2);
+    assert_eq!(
+        h.state().tasks.in_flight_count(),
+        0,
+        "a view key must not be re-issued as a getclass job"
+    );
+}
+
 /// `Command::ToggleTheme` flips the active theme. Covers
 /// `ASC-GUI-025` (settings dialog theme picker). The full
 /// settings dialog is still TODO; the theme toggle is the
@@ -1294,6 +1470,43 @@ fn tab_context_menu_close_right_closes_right_neighbours_only() {
     assert_eq!(
         h.state().status.as_ref().map(|s| s.text.as_str()),
         Some("closed 1 tab(s) to the right")
+    );
+}
+
+/// JADX-GUI-005 render level: "Close others" acts on the tab the menu
+/// was opened on, not on whichever tab happens to be active. Audit F3:
+/// the context menu dropped the descriptor, so right-clicking B while A
+/// was active kept A and closed B.
+#[test]
+fn tab_context_menu_close_others_keeps_right_clicked_tab() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), empty_app());
+    h.state_mut().tabs.open_pinned("LAA;");
+    h.state_mut().tabs.open_pinned("LBB;");
+    h.state_mut().tabs.open_pinned("LCC;");
+    // Active is LCC; right-click the middle tab instead.
+    h.run_steps(2);
+    h.get_by_label_contains("BB").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Close others").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state()
+            .tabs
+            .tabs()
+            .iter()
+            .map(|t| t.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        vec!["LBB;"],
+        "close others must keep the right-clicked tab"
+    );
+    assert_eq!(
+        active(h.state()).as_deref(),
+        Some("LBB;"),
+        "focus lands on the survivor"
     );
 }
 

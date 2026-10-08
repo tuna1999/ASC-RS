@@ -159,20 +159,24 @@ impl AscApp {
                             })
                             .response
                             .interact(egui::Sense::click());
-                        // Right-click a tab: the bulk operations that
-                        // have no other surface (JADX-GUI-005/011).
+                        // Right-click a tab: the tab-scoped bulk
+                        // operations that have no other surface
+                        // (JADX-GUI-005/011). Every verb acts on the tab
+                        // the menu was opened on — only "Close all" is
+                        // global.
                         tab_resp.context_menu(|ui| {
                             if ui.button("Close others").clicked() {
                                 ui.close();
-                                bulk = Some(Command::CloseOthers);
+                                bulk = Some(Command::CloseOthers {
+                                    descriptor: Some(descriptor.clone()),
+                                });
                             }
                             if ui.button("Close all").clicked() {
                                 ui.close();
                                 bulk = Some(Command::CloseAll);
                             }
-                            // Per-tab, unlike the bulk verbs above: the
-                            // menu is opened on one tab and closes what
-                            // sits to its right.
+                            // The menu is opened on one tab and closes
+                            // what sits to its right.
                             if ui.button("Close right").clicked() {
                                 ui.close();
                                 bulk = Some(Command::CloseRight {

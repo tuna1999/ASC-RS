@@ -369,6 +369,23 @@ impl TabController {
     }
 }
 
+/// The class a tab key belongs to, or `None` when the key is not
+/// class-shaped.
+///
+/// A tab key is a **view** identity, not necessarily a class one:
+/// `TaskManager::smali_key` builds `L…;#smali` and `L…;#smali#<method>`
+/// for Smali listings, and a future text tab uses a non-`L…;`
+/// sentinel. Class-scoped actions must resolve through this function
+/// (via `AscApp::active_class_descriptor`) instead of using the raw
+/// key, or they hand the engine a synthetic string (audit F2).
+pub(crate) fn class_of_tab_key(key: &str) -> Option<&str> {
+    let class = match key.split_once("#smali") {
+        Some((c, suffix)) if suffix.is_empty() || suffix.starts_with('#') => c,
+        _ => key,
+    };
+    (class.starts_with('L') && class.ends_with(';')).then_some(class)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,5 +721,25 @@ mod tests {
         // `clear_recent_artifacts` empties the list.
         tabs.clear_recent_artifacts();
         assert!(tabs.recent_artifacts().is_empty());
+    }
+
+    /// View keys resolve to their owning class; non-class keys resolve
+    /// to `None` so a synthetic tab key can never reach the engine.
+    #[test]
+    fn class_of_tab_key_classifies_view_keys() {
+        assert_eq!(class_of_tab_key("Lcom/foo/Bar;"), Some("Lcom/foo/Bar;"));
+        assert_eq!(
+            class_of_tab_key("Lcom/foo/Bar;#smali"),
+            Some("Lcom/foo/Bar;")
+        );
+        assert_eq!(
+            class_of_tab_key("Lcom/foo/Bar;#smali#doThing"),
+            Some("Lcom/foo/Bar;")
+        );
+        // A non-class sentinel (future text tab) is not a class.
+        assert_eq!(class_of_tab_key("manifest"), None);
+        // A near-miss suffix is not the smali marker.
+        assert_eq!(class_of_tab_key("Lcom/foo;#smalix"), None);
+        assert_eq!(class_of_tab_key(""), None);
     }
 }

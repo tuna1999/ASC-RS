@@ -603,11 +603,11 @@
       "weight": 5,
       "status": "COMPLETE",
       "applicable": true,
-      "acceptance": "asc-gui::state::tabs::tests::close_others_close_all",
+      "acceptance": "asc-gui::app::tests::tab_context_menu_close_others_keeps_right_clicked_tab",
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX tab context",
-      "notes": "All three verbs ship on the tab right-click menu: Close others / Close all (bulk) and Close right (`Command::CloseRight { descriptor }` → `TabController::close_right`, per-tab). `close_others_close_all` covers the close-right semantics (only tabs right of the named one go, focus falls back to it when the active tab was closed, unknown/last tab is a no-op); `app::tests::close_right_drops_only_right_neighbours` proves the dispatch evicts the closed tabs' documents; `app::tests::tab_context_menu_close_right_closes_right_neighbours_only` drives the real right-click menu headlessly."
+      "notes": "All three verbs ship on the tab right-click menu. Audit F3: `Close others` / `Close right` are per-tab — the menu passes the right-clicked descriptor (`Command::CloseOthers { descriptor }` / `Command::CloseRight { descriptor }`), so right-clicking B while A is active keeps B, not A; only `Close all` is global. Acceptance drives the real menu headlessly: `tab_context_menu_close_others_keeps_right_clicked_tab` (right-click B → Close others → only B survives, focused) and `tab_context_menu_close_right_closes_right_neighbours_only` (right-click B → Close right → B and everything left survive). Controller trio: `state::tabs::tests::close_others_close_all` (close-right focus fallback, unknown/last-tab no-op, close-all). Dispatch level: `app::tests::close_right_drops_only_right_neighbours` proves the closed tabs' documents are evicted; `close_all_empties_tab_strip` covers close-all."
     },
     {
       "id": "JADX-GUI-006",
@@ -620,7 +620,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX standard action",
-      "notes": "Reachable: Ctrl+C queues Command::CopyDescriptor. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
+      "notes": "Reachable: Ctrl+C queues Command::CopyDescriptor. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`. Audit F2: the class is resolved through `AscApp::active_class_descriptor`, so a `#smali` view tab copies the owning class (`copy_descriptor_from_smali_tab_copies_owning_class`), a text tab with no class is a no-op (`copy_descriptor_from_text_tab_without_class_is_a_noop`) and with a tree selection falls back to it (`copy_descriptor_from_text_tab_falls_back_to_tree_selection`)."
     },
     {
       "id": "JADX-GUI-007",
@@ -737,7 +737,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "JADX right-click Copy",
-      "notes": "Reachable: Ctrl+Shift+C queues Command::CopyFqn. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`."
+      "notes": "Reachable: Ctrl+Shift+C queues Command::CopyFqn. Trigger covered by `frame_shortcuts_wires_the_previously_dead_bindings`. Audit F2: resolves through `AscApp::active_class_descriptor` — a method-Smali tab (`Lclass;#smali#method`) copies the owning class's FQN (`copy_fqn_from_method_smali_tab_copies_owning_class`)."
     },
     {
       "id": "JADX-GUI-016",
@@ -823,7 +823,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "derived",
-      "notes": "The SYMBOL section now carries the inline 'used by this class' button next to the selected descriptor (renders only while a class is selected); clicking it queues `Command::UsedByClass`, which routes to the same engine path as Analysis > Find references (type query on the descriptor → REFERENCES tab). Acceptance is the render-level test (button present + click queues FindReferences); `used_by_class_button_routes_to_findrefs_class` keeps covering the dispatch."
+      "notes": "The SYMBOL section now carries the inline 'used by this class' button next to the selected descriptor (renders only while a class is selected); clicking it queues `Command::UsedByClass`, which routes to the same engine path as Analysis > Find references (type query on the descriptor → REFERENCES tab). Acceptance is the render-level test (button present + click queues FindReferences); `used_by_class_button_routes_to_findrefs_class` keeps covering the dispatch. Audit F2: the button renders only when `AscApp::active_class_descriptor` resolves a class (`used_by_class_button_absent_for_text_tab_without_class`) and the engine query always targets the owning class, never a `#smali` view key (`find_references_from_smali_tab_targets_owning_class`)."
     },
     {
       "id": "ASC-RS-GUI-003",

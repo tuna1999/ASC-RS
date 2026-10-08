@@ -37,6 +37,9 @@ impl AscApp {
             .iter()
             .find(|t| Some(t.descriptor.as_str()) == active.as_deref())
             .map(|t| t.status.clone());
+        // The action is class-scoped: render it only when the current
+        // context resolves a class (never a synthetic view key).
+        let class_ok = self.active_class_descriptor().is_some();
         egui::CollapsingHeader::new(
             egui::RichText::new("SYMBOL")
                 .small()
@@ -56,10 +59,11 @@ impl AscApp {
                 // through Analysis ▸ Find references. Same engine path as
                 // `FindReferences` (a type query on the descriptor), with
                 // the rows landing in the REFERENCES tab.
-                if ui
-                    .button(egui::RichText::new("used by this class").small())
-                    .on_hover_text("find every reference to this class")
-                    .clicked()
+                if class_ok
+                    && ui
+                        .button(egui::RichText::new("used by this class").small())
+                        .on_hover_text("find every reference to this class")
+                        .clicked()
                 {
                     self.queue(Command::UsedByClass);
                 }
@@ -162,16 +166,15 @@ impl AscApp {
                         }
                     }
                 });
-            if let Some(line) = jump {
-                let descriptor = self.tabs.active_descriptor().map(str::to_string);
-                if let Some(descriptor) = descriptor {
-                    self.queue(Command::OpenClass {
-                        descriptor,
-                        pin: false,
-                        line: Some(line),
-                        origin: NavOrigin::Outline,
-                    });
-                }
+            if let Some(line) = jump
+                && let Some(descriptor) = self.active_class_descriptor().map(str::to_string)
+            {
+                self.queue(Command::OpenClass {
+                    descriptor,
+                    pin: false,
+                    line: Some(line),
+                    origin: NavOrigin::Outline,
+                });
             }
         });
         let _ = header;
@@ -413,6 +416,7 @@ mod tests {
                 name: "com.example.app.Main".into(),
                 exported: true,
                 exported_explicit: None,
+                exported_state: asc_manifest::ExportedState::LegacyInferred,
                 permission: None,
                 process: None,
                 label: None,
@@ -423,6 +427,7 @@ mod tests {
                 name: "com.example.app.Svc".into(),
                 exported: false,
                 exported_explicit: None,
+                exported_state: asc_manifest::ExportedState::LegacyInferred,
                 permission: None,
                 process: None,
                 label: None,
@@ -433,6 +438,7 @@ mod tests {
                 name: "com.example.app.R".into(),
                 exported: true,
                 exported_explicit: None,
+                exported_state: asc_manifest::ExportedState::LegacyInferred,
                 permission: None,
                 process: None,
                 label: None,

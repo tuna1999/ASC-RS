@@ -151,9 +151,13 @@ pub struct PermissionEntry {
 }
 
 /// One `<data>` element of an `<intent-filter>` / queries `<intent>`.
-/// Every field is `None` when the element did not declare it; multiple
-/// `<data>` elements stay separate entries (they are OR-ed by Android,
-/// never merged).
+/// Every field is `None` when the element did not declare it.
+///
+/// This is the **raw** representation, kept verbatim for fidelity. It is
+/// *not* a list of independent URI alternatives: Android pools every
+/// `<data>` element of one filter per attribute dimension, so a scheme
+/// declared here can match a host declared on a *different* `<data>` of
+/// the same filter — see [`IntentFilter::effective_data`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct DataSpec {
     /// `android:scheme` (e.g. `https`).
@@ -176,6 +180,75 @@ pub struct DataSpec {
     pub mime_type: Option<String>,
 }
 
+/// Which `<data>` path attribute a [`PathMatcher`] came from; the match
+/// semantics differ per kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathMatchKind {
+    /// `android:path` — the whole path must equal the value.
+    Exact,
+    /// `android:pathPrefix` — the value must prefix the path.
+    Prefix,
+    /// `android:pathPattern` — simple-glob pattern (API 1+).
+    Pattern,
+    /// `android:pathAdvancedPattern` — regex-like pattern (API 31+).
+    AdvancedPattern,
+    /// `android:pathSuffix` — the value must suffix the path (API 31+).
+    Suffix,
+}
+
+/// One pooled path matcher.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PathMatcher {
+    pub kind: PathMatchKind,
+    pub value: String,
+}
+
+/// One pooled authority (`android:host` plus the `android:port` declared on
+/// the same `<data>`; `None` = any port).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Authority {
+    pub host: String,
+    pub port: Option<String>,
+}
+
+/// Android's *effective* URI match set for one `<intent-filter>`.
+///
+/// Every `<data>` element of a filter contributes to the **same** filter:
+/// Android pools the attributes per dimension and matches each dimension
+/// independently, so a scheme declared in one `<data>` matches a host
+/// declared in another. The Android docs state the equivalence directly
+/// ("All the `<data>` elements contained within the same `<intent-filter>`
+/// element contribute to the same filter",
+/// <https://developer.android.com/guide/topics/manifest/data-element>),
+/// and `IntentFilter.matchData` confirms it: the scheme list, the
+/// authority list and the path list are consulted independently.
+///
+/// The match set is therefore the cross product of these four pools — not
+/// the list of `<data>` elements as independent URI alternatives. The pools
+/// are kept flat on purpose: materializing the cross product would explode
+/// on filters with many `<data>` elements.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct EffectiveData {
+    /// Pooled `android:scheme` values (Android dedupes these).
+    pub schemes: Vec<String>,
+    /// Pooled authorities; host and port are bound per `<data>` element.
+    pub authorities: Vec<Authority>,
+    /// Pooled path matchers.
+    pub paths: Vec<PathMatcher>,
+    /// Pooled `android:mimeType` values.
+    pub mime_types: Vec<String>,
+}
+
+impl EffectiveData {
+    /// Whether any URI attribute is present. When no scheme is declared
+    /// anywhere in the filter, Android ignores hosts and paths, so
+    /// `authorities` / `paths` only take effect together with a scheme.
+    pub fn has_uri(&self) -> bool {
+        !self.schemes.is_empty() || !self.authorities.is_empty() || !self.paths.is_empty()
+    }
+}
+
 /// One intent filter attached to a component (also reused for `<intent>`
 /// entries inside `<queries>`, where `auto_verify` / `priority` stay
 /// `None`).
@@ -185,12 +258,66 @@ pub struct IntentFilter {
     pub actions: Vec<String>,
     /// Category names (e.g. `android.intent.category.LAUNCHER`).
     pub categories: Vec<String>,
-    /// `<data>` elements in source order.
+    /// The **raw** `<data>` elements in source order (fidelity only — read
+    /// [`Self::effective_data`] for the match set Android actually uses).
     pub data: Vec<DataSpec>,
+    /// The pooled match set (see [`EffectiveData`]); computed at parse time
+    /// so JSON consumers cannot misread `data` as independent URI
+    /// alternatives.
+    pub effective_data: EffectiveData,
     /// `android:autoVerify` (App Links, API 23+); `None` when undeclared.
     pub auto_verify: Option<bool>,
     /// `android:priority` (integer, may be negative); `None` when undeclared.
     pub priority: Option<i32>,
+}
+
+impl IntentFilter {
+    /// Pool this filter's `<data>` elements into Android's match set.
+    pub fn effective_data(&self) -> EffectiveData {
+        let mut eff = EffectiveData::default();
+        for d in &self.data {
+            push_unique(&mut eff.schemes, d.scheme.as_deref());
+            if let Some(host) = &d.host {
+                let authority = Authority {
+                    host: host.clone(),
+                    port: d.port.clone(),
+                };
+                if !eff.authorities.contains(&authority) {
+                    eff.authorities.push(authority);
+                }
+            }
+            for (kind, value) in [
+                (PathMatchKind::Exact, &d.path),
+                (PathMatchKind::Prefix, &d.path_prefix),
+                (PathMatchKind::Pattern, &d.path_pattern),
+                (PathMatchKind::AdvancedPattern, &d.path_advanced_pattern),
+                (PathMatchKind::Suffix, &d.path_suffix),
+            ] {
+                if let Some(value) = value {
+                    let matcher = PathMatcher {
+                        kind,
+                        value: value.clone(),
+                    };
+                    if !eff.paths.contains(&matcher) {
+                        eff.paths.push(matcher);
+                    }
+                }
+            }
+            push_unique(&mut eff.mime_types, d.mime_type.as_deref());
+        }
+        eff
+    }
+}
+
+/// Push `value` when `Some` and not already present (Android also dedupes
+/// pooled schemes; de-duplicating the other dimensions keeps the match set
+/// small without changing it).
+fn push_unique(out: &mut Vec<String>, value: Option<&str>) {
+    if let Some(value) = value
+        && !out.iter().any(|v| v == value)
+    {
+        out.push(value.to_string());
+    }
 }
 
 /// One `<meta-data>` element (application level or inside a component).
@@ -202,6 +329,24 @@ pub struct MetaDataEntry {
     pub value: Option<String>,
     /// `android:resource` (rendered `@0x…` reference).
     pub resource: Option<String>,
+}
+
+/// How a component's effective `android:exported` was determined, and
+/// whether that determination is installable for the app's target SDK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportedState {
+    /// `android:exported` was declared; `exported` is that value.
+    Explicit,
+    /// The attribute is absent and the manifest is valid: the platform
+    /// default applies, so the component is exported iff it declares an
+    /// intent filter.
+    LegacyInferred,
+    /// The attribute is absent on a component that declares an intent
+    /// filter while the app targets API 31+ (Android 12): the manifest is
+    /// invalid and Android 12+ refuses to install it. `exported` keeps the
+    /// legacy inference (`true`) for backwards compatibility.
+    MissingRequired,
 }
 
 /// One activity / service / receiver declaration.
@@ -216,6 +361,9 @@ pub struct ComponentEntry {
     /// The explicitly declared `android:exported`; `None` when the
     /// attribute is absent (so `exported` above was inferred).
     pub exported_explicit: Option<bool>,
+    /// How `exported` was determined / whether it is installable; see
+    /// [`ExportedState::MissingRequired`].
+    pub exported_state: ExportedState,
     /// `android:permission` attribute (optional).
     pub permission: Option<String>,
     /// Optional human-readable label.
@@ -386,27 +534,38 @@ impl ManifestInfo {
         self.application.allow_backup.unwrap_or(true)
     }
 
+    /// Android's *effective* target SDK: `targetSdkVersion` when declared,
+    /// else `minSdkVersion`, else 1 (the platform's own fallback — an app
+    /// that omits `targetSdkVersion` is treated as targeting `minSdkVersion`).
+    /// Every target-SDK-dependent default below keys off this, not off
+    /// `target_sdk` alone.
+    pub fn effective_target_sdk(&self) -> u32 {
+        self.target_sdk.or(self.min_sdk).unwrap_or(1)
+    }
+
     /// Effective `usesCleartextTraffic`: declared value, else the platform
-    /// default (allowed only when targetSdk < 28).
+    /// default (allowed only when the effective target SDK is < 28).
     pub fn effective_uses_cleartext_traffic(&self) -> bool {
         self.application
             .uses_cleartext_traffic
-            .unwrap_or_else(|| self.target_sdk.is_none_or(|t| t < 28))
+            .unwrap_or(self.effective_target_sdk() < 28)
     }
 
-    /// Whether any component's `exported` is Android's inference rather
-    /// than a manifest declaration (targetSdk 31+ requires the explicit
-    /// attribute whenever intent filters are present).
-    pub fn has_inferred_exported(&self) -> bool {
-        let mut comps = self
-            .activities
-            .iter()
-            .chain(&self.services)
-            .chain(&self.receivers)
-            .chain(self.activity_aliases.iter().map(|a| &a.component));
-        comps.any(|c| c.exported_explicit.is_none())
-            || self.providers.iter().any(|p| p.exported_explicit.is_none())
+    /// Whether any component is missing the `android:exported` attribute
+    /// that its target SDK (31+) requires alongside an intent filter: such
+    /// a manifest is rejected by Android 12+ at install time.
+    pub fn has_invalid_exported(&self) -> bool {
+        components(self).any(|c| c.exported_state == ExportedState::MissingRequired)
     }
+}
+
+/// Every filter-bearing component in manifest order.
+fn components(info: &ManifestInfo) -> impl Iterator<Item = &ComponentEntry> {
+    info.activities
+        .iter()
+        .chain(&info.services)
+        .chain(&info.receivers)
+        .chain(info.activity_aliases.iter().map(|a| &a.component))
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +579,7 @@ pub fn parse_manifest(axml: &[u8]) -> Result<ManifestInfo, ManifestError> {
     parser.run()?;
     let mut info = parser.info;
     finalize_exported(&mut info);
+    finalize_effective_data(&mut info);
     Ok(info)
 }
 
@@ -442,31 +602,77 @@ pub fn parse_from_apk(path: impl AsRef<Path>) -> Result<ManifestInfo, ManifestEr
     parse_manifest(bytes.as_slice())
 }
 
-/// Fill in effective `exported` values from the declared tri-state:
+/// Fill in effective `exported` / `exported_state` from the declared
+/// tri-state:
 ///
-/// - activity / service / receiver / activity-alias: `true` when the
-///   component declares any intent filter, else `false`
+/// - activity / service / receiver / activity-alias: the declared value,
+///   else `true` when the component declares any intent filter
 ///   (`PackageParser.setDefaultActivityAlias` / `setExported` semantics).
+///   When the effective target SDK is >= 31 (Android 12) and the component
+///   has intent filters, the absent attribute is *not* a usable default:
+///   Android rejects the manifest at install time, so the state records
+///   [`ExportedState::MissingRequired`] instead of pretending the legacy
+///   inference is installable.
 /// - provider: `false` only when the effective target SDK is >= 17;
-///   otherwise `true`.
+///   otherwise `true`. Providers have no intent filters, so the API 31
+///   requirement never applies and their rule stays separate.
 fn finalize_exported(info: &mut ManifestInfo) {
-    let infer = |comps: &mut Vec<ComponentEntry>| {
-        for c in comps {
-            c.exported = c.exported_explicit.unwrap_or(!c.intent_filters.is_empty());
-        }
-    };
-    infer(&mut info.activities);
-    infer(&mut info.services);
-    infer(&mut info.receivers);
-    for a in &mut info.activity_aliases {
-        a.component.exported = a
-            .component
-            .exported_explicit
-            .unwrap_or(!a.component.intent_filters.is_empty());
+    let effective_target = info.effective_target_sdk();
+    let require_explicit = effective_target >= 31; // Build.VERSION_CODES.S
+    for c in info
+        .activities
+        .iter_mut()
+        .chain(info.services.iter_mut())
+        .chain(info.receivers.iter_mut())
+        .chain(info.activity_aliases.iter_mut().map(|a| &mut a.component))
+    {
+        finalize_component(c, require_explicit);
     }
-    let effective_target = info.target_sdk.or(info.min_sdk).unwrap_or(1);
     for p in &mut info.providers {
         p.exported = p.exported_explicit.unwrap_or(effective_target < 17);
+    }
+}
+
+/// Effective `exported` + state for one filter-bearing component.
+fn finalize_component(c: &mut ComponentEntry, require_explicit: bool) {
+    let filtered = !c.intent_filters.is_empty();
+    match c.exported_explicit {
+        Some(declared) => {
+            c.exported = declared;
+            c.exported_state = ExportedState::Explicit;
+        }
+        None if require_explicit && filtered => {
+            // The legacy default would be `true`, but the app is not
+            // installable on Android 12+. Keep `true` (backwards
+            // compatible) and flag the invalid declaration.
+            c.exported = true;
+            c.exported_state = ExportedState::MissingRequired;
+        }
+        None => {
+            c.exported = filtered;
+            c.exported_state = ExportedState::LegacyInferred;
+        }
+    }
+}
+
+/// Recompute the pooled per-filter match set from the raw `<data>`
+/// elements, for every filter in the manifest (components and `<queries>`
+/// `<intent>` entries alike).
+fn finalize_effective_data(info: &mut ManifestInfo) {
+    let mut filters = info
+        .activities
+        .iter_mut()
+        .chain(info.services.iter_mut())
+        .chain(info.receivers.iter_mut())
+        .chain(info.activity_aliases.iter_mut().map(|a| &mut a.component))
+        .flat_map(|c| c.intent_filters.iter_mut());
+    for f in &mut filters {
+        f.effective_data = f.effective_data();
+    }
+    if let Some(q) = info.queries.as_mut() {
+        for f in &mut q.intents {
+            f.effective_data = f.effective_data();
+        }
     }
 }
 
@@ -1339,6 +1545,7 @@ fn component_from_attrs(name: &str, attrs: &[XmlAttr]) -> ComponentEntry {
         name: name.to_string(),
         exported: false, // finalize_exported computes the effective value
         exported_explicit: tri_bool_attr(attrs, "exported"),
+        exported_state: ExportedState::LegacyInferred, // ditto
         permission: attr(attrs, "permission").map(str::to_string),
         label: attr(attrs, "label").map(str::to_string),
         process: attr(attrs, "process").map(str::to_string),

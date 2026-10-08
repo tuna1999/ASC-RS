@@ -112,16 +112,10 @@ impl eframe::App for AscApp {
                 });
                 ui.menu_button("Analysis", |ui| {
                     let target = self
-                        .tabs
-                        .active_descriptor()
-                        .or(self.selected_class.as_deref())
+                        .active_class_descriptor()
                         .map(crate::ui::short_name)
                         .unwrap_or_else(|| "—".to_string());
-                    let has_target = self
-                        .tabs
-                        .active_descriptor()
-                        .or(self.selected_class.as_deref())
-                        .is_some();
+                    let has_target = self.active_class_descriptor().is_some();
                     if ui
                         .add_enabled(
                             has_target,
@@ -166,8 +160,7 @@ impl eframe::App for AscApp {
                         .as_ref()
                         .map(|s| !s.descriptor.is_empty())
                         .unwrap_or(false)
-                        || self.tabs.active_descriptor().is_some()
-                        || self.selected_class.is_some();
+                        || self.active_class_descriptor().is_some();
                     if ui
                         .add_enabled(class_ok, egui::Button::new("Strings used by this class"))
                         .on_disabled_hover_text("select a class first")

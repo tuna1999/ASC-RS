@@ -84,8 +84,13 @@ pub enum Command {
 
     // --- tabs ---
     CloseTab,
-    /// Close every tab except the active one.
-    CloseOthers,
+    /// Close every tab except `descriptor` (the tab the context menu was
+    /// opened on). `None` keeps the active tab — reserved for a future
+    /// global action; the tab context menu always names its tab so
+    /// right-clicking B closes A and C, not the active tab.
+    CloseOthers {
+        descriptor: Option<String>,
+    },
     /// Close every tab.
     CloseAll,
     /// Close every tab positioned to the right of `descriptor` (the
