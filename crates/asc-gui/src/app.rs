@@ -89,12 +89,21 @@ pub struct AscApp {
     pub(crate) find_for_descriptor: Option<String>,
     pub(crate) show_rename: bool,
     pub(crate) rename_input: String,
-    /// Line the pending line-comment targets (0-based).
-    pub(crate) comment_target: Option<usize>,
+    /// Document key + 0-based line the pending line-comment targets.
+    /// The key is the document identity the bar was armed for (audit
+    /// F1): a document switch while the bar is open must not append
+    /// the note to the new document at the old line.
+    pub(crate) comment_target: Option<(String, usize)>,
     pub(crate) comment_input: String,
-    /// Last line clicked in the code area (comment anchor).
-    pub(crate) last_clicked_line: Option<usize>,
+    /// Document key + 0-based line of the last code click. A line
+    /// number is only meaningful against the document it was clicked
+    /// in (audit F1), so the anchor carries its document identity.
+    pub(crate) last_click: Option<(String, usize)>,
     /// Identifier selection from the last code click (rename anchor).
+    /// [`SymbolSelection::descriptor`] is the *document key* the click
+    /// happened in — both the validity identity and the source of the
+    /// class an action resolves to. Read it through
+    /// [`Self::active_symbol_sel`].
     pub(crate) symbol_sel: Option<SymbolSelection>,
     /// Pointer over the code surface this frame (bare-key scope).
     pub(crate) code_hovered: bool,
@@ -182,7 +191,7 @@ impl AscApp {
             rename_input: String::new(),
             comment_target: None,
             comment_input: String::new(),
-            last_clicked_line: None,
+            last_click: None,
             symbol_sel: None,
             code_hovered: false,
             bottom_tab: BottomTab::Results,
@@ -244,6 +253,52 @@ impl AscApp {
     }
 
     // ----------------------------------------------------------------
+    // click-derived state (audit F1)
+    // ----------------------------------------------------------------
+
+    /// The clicked-identifier selection, but only while it still
+    /// belongs to the document on screen.
+    ///
+    /// A [`SymbolSelection`] is captured from one document version:
+    /// its descriptor is that document's key, its `method` range and
+    /// `occurrences` are byte offsets into that document's source.
+    /// Acting on it after a document switch would dispatch the
+    /// previous document's descriptor and token (audit F1), so every
+    /// consumer reads it through here.
+    pub(crate) fn active_symbol_sel(&self) -> Option<&SymbolSelection> {
+        let sel = self.symbol_sel.as_ref()?;
+        let doc = self.active_doc.as_ref()?;
+        (sel.descriptor == doc.descriptor).then_some(sel)
+    }
+
+    /// The clicked line, but only while the click belongs to the
+    /// document on screen (audit F1: a bookmark or comment must never
+    /// land on another document's line number).
+    pub(crate) fn clicked_line(&self) -> Option<usize> {
+        let (doc, line) = self.last_click.as_ref()?;
+        (Some(doc.as_str()) == self.active_doc.as_ref().map(|d| d.descriptor.as_str()))
+            .then_some(*line)
+    }
+
+    /// The class descriptor + token a click-scoped action targets.
+    ///
+    /// `None` when no selection applies to the document on screen, or
+    /// when that document has no owning class (a text tab): a `#smali`
+    /// view key is a *tab* identity, never an engine descriptor, so the
+    /// class is resolved through [`crate::state::tabs::class_of_tab_key`]
+    /// (audit F1/F2).
+    fn clicked_member(&self) -> Option<(String, String)> {
+        let sel = self.active_symbol_sel()?;
+        let class = crate::state::tabs::class_of_tab_key(&sel.descriptor)?;
+        Some((class.to_string(), sel.token.clone()))
+    }
+
+    /// The key of the document on screen, when there is one.
+    fn active_doc_key(&self) -> Option<&str> {
+        self.active_doc.as_ref().map(|d| d.descriptor.as_str())
+    }
+
+    // ----------------------------------------------------------------
     // artifact lifecycle
     // ----------------------------------------------------------------
 
@@ -286,7 +341,8 @@ impl AscApp {
         self.active_doc = None;
         self.pending_scroll = None;
         self.symbol_sel = None;
-        self.last_clicked_line = None;
+        self.last_click = None;
+        self.comment_target = None;
         // Session swap: drop find results that belonged to the old
         // artifact's documents (F2).
         self.find_matches.clear();
@@ -341,6 +397,9 @@ impl AscApp {
             return;
         };
         if doc.descriptor != sel.descriptor {
+            // The selection was captured in another document (audit F1):
+            // its byte range does not belong to this source.
+            self.set_status("rename: the selection belongs to another document", false);
             return;
         }
         if let Some(src) = crate::source_edit::rename_in_range(
@@ -541,11 +600,20 @@ impl AscApp {
         if needle.is_empty() {
             return;
         }
+        // One reused buffer for the lowercased line: a scan over a
+        // 500 KiB source is tens of thousands of lines, and a fresh
+        // `String` per line is pure allocator churn (audit F3). Same
+        // comparison as before — `make_ascii_lowercase` leaves
+        // non-ASCII bytes untouched, exactly like `to_ascii_lowercase`.
+        let mut lowered = String::new();
         for idx in 0..doc.line_count() {
-            if let Some(line) = doc.line(idx)
-                && line.to_ascii_lowercase().contains(&needle)
-            {
-                self.find_matches.push(idx);
+            if let Some(line) = doc.line(idx) {
+                lowered.clear();
+                lowered.push_str(line);
+                lowered.make_ascii_lowercase();
+                if lowered.contains(&needle) {
+                    self.find_matches.push(idx);
+                }
             }
         }
         self.find_step(true);
@@ -558,9 +626,16 @@ impl AscApp {
     /// against the current document. Preserves [`Self::pending_scroll`]
     /// so a rebind never overrides an explicit navigation target.
     ///
-    /// Cheap after the first frame: the descriptor match short-circuits
-    /// before any scan, so this is not a per-frame full-document rescan.
+    /// Nothing reads the matches while the bar is closed (`draw_code`
+    /// tints and `nav_or_find_line` are both gated on `show_find`, and
+    /// opening the bar recomputes — `Command::FindInDocument`), so a
+    /// hidden bar only drops the binding instead of rescanning the whole
+    /// document on every switch (audit F3).
     pub(crate) fn reconcile_find_to_document(&mut self) {
+        if !self.show_find {
+            self.find_for_descriptor = None;
+            return;
+        }
         let Some(doc) = self.active_doc.clone() else {
             self.find_for_descriptor = None;
             self.find_matches.clear();
@@ -918,41 +993,28 @@ impl AscApp {
             }
             Command::ShowSmali => {
                 // Smali listing of the active class, opened as a
-                // `#smali`-keyed document/tab. Cached listings reuse
-                // the normal navigation path.
-                let descriptor = self.active_class_descriptor().map(str::to_string);
-                let Some(descriptor) = descriptor else {
+                // `#smali`-keyed document/tab. Cache hit and cache miss
+                // are the *same* navigation now: `navigate_to` reuses a
+                // cached listing or re-issues the disasm job for a view
+                // key. The old miss-only branch bypassed the navigation
+                // history, so the listing could never be reached by
+                // Back/Forward and the recorded location stayed the Java
+                // class (audit F2).
+                let Some(descriptor) = self.active_class_descriptor().map(str::to_string) else {
                     self.set_status("open a class first", false);
                     return;
                 };
                 let key = crate::task::TaskManager::smali_key(&descriptor, None);
-                if self.documents.contains(&key) {
-                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-                    return;
-                }
-                if let Some(session) = &self.session {
-                    let apk = session.path().to_path_buf();
-                    self.tabs.open_preview(&key);
-                    self.tabs.activate(&key);
-                    self.active_doc = None;
-                    self.tasks.spawn_disasm(&apk, &descriptor, None, ctx);
-                    self.set_status(format!("disasm: {descriptor}"), true);
-                }
+                self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
             }
             Command::ShowSmaliMethod | Command::ShowCallees => {
-                // Both act on the clicked identifier. The class is the
-                // symbol's own descriptor (its enclosing class), with
-                // the active tab as fallback — but never a `#smali`
-                // view key (`{class}#smali[#{method}]`).
-                let descriptor = self
-                    .symbol_sel
-                    .as_ref()
-                    .map(|s| s.descriptor.clone())
-                    .filter(|d| !d.is_empty())
-                    .or_else(|| self.active_class_descriptor().map(str::to_string));
-                let method = self.symbol_sel.as_ref().map(|s| s.token.clone());
-                let (Some(descriptor), Some(method)) = (descriptor, method) else {
-                    let msg = if self.symbol_sel.is_some() {
+                // Both act on the clicked identifier, and only while it
+                // applies to the document on screen. The class is the
+                // click's own document class, resolved through
+                // `class_of_tab_key` (a `#smali` view key is a tab
+                // identity, never an engine descriptor — audit F1/F2).
+                let Some((descriptor, method)) = self.clicked_member() else {
+                    let msg = if self.active_symbol_sel().is_some() {
                         "open a class first"
                     } else {
                         "click a method identifier first"
@@ -971,25 +1033,15 @@ impl AscApp {
                     return;
                 }
                 let key = crate::task::TaskManager::smali_key(&descriptor, Some(&method));
-                if self.documents.contains(&key) {
-                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-                    return;
-                }
-                self.tabs.open_preview(&key);
-                self.tabs.activate(&key);
-                self.active_doc = None;
-                self.tasks
-                    .spawn_disasm(&apk, &descriptor, Some(&method), ctx);
-                self.set_status(format!("disasm: {descriptor}->{method}"), true);
+                self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
             }
             Command::ShowClassStrings => {
-                // Class-scoped: symbol's class, else active tab /
-                // tree selection — never a `#smali` view key.
+                // Class-scoped: the click's own document class, else the
+                // active tab / tree selection — never a `#smali` view key
+                // and never a descriptor from another document's click.
                 let descriptor = self
-                    .symbol_sel
-                    .as_ref()
-                    .map(|s| s.descriptor.clone())
-                    .filter(|d| !d.is_empty())
+                    .clicked_member()
+                    .map(|(class, _)| class)
                     .or_else(|| self.active_class_descriptor().map(str::to_string));
                 let Some(descriptor) = descriptor else {
                     self.set_status("select a class first", false);
@@ -1005,10 +1057,11 @@ impl AscApp {
             }
             Command::ToggleBookmark => {
                 // Bookmark the active tab at the clicked line (or
-                // line 1 when nothing is clicked). Second toggle on
-                // the same line clears it.
+                // line 1 when nothing is clicked); a line clicked in
+                // another document does not count (audit F1).
+                // Second toggle on the same line clears it.
                 if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
-                    let line = self.last_clicked_line.map(|l| l + 1).unwrap_or(1);
+                    let line = self.clicked_line().map(|l| l + 1).unwrap_or(1);
                     let on = self.tabs.toggle_bookmark(&d, Some(line));
                     self.set_status(
                         if on {
@@ -1061,15 +1114,15 @@ impl AscApp {
             Command::FindUsagesOfClicked => {
                 // Workflow B: prefill the search bar with the clicked
                 // identifier as a method-scoped find with a class
-                // filter pinned to the click's descriptor. Falls back
-                // to global search when the click didn't target a
-                // member (still useful — same UI surface).
-                if let Some(sel) = self.symbol_sel.as_ref()
-                    && !sel.descriptor.is_empty()
-                {
-                    self.search.input = sel.token.clone();
-                    self.search.class_filter = asc_core::normalize_class_name(&sel.descriptor)
-                        .unwrap_or_else(|_| sel.descriptor.clone());
+                // filter pinned to the click's class. The click must
+                // apply to the document on screen, and the filter is
+                // that class — never a `#smali` view key (audit F1).
+                // Falls back to global search when the click didn't
+                // target a member (still useful — same UI surface).
+                if let Some((class, token)) = self.clicked_member() {
+                    self.search.input = token;
+                    self.search.class_filter =
+                        asc_core::normalize_class_name(&class).unwrap_or(class);
                     self.search.kind = SearchKind::Method;
                     self.focus_search = true;
                     self.queue(Command::RunSearch);
@@ -1078,16 +1131,15 @@ impl AscApp {
                 self.queue(Command::GlobalSearch);
             }
             Command::GoToDeclaration => {
-                // Workflow D: open the descriptor the click landed on,
-                // if any. For non-class tokens we still run a search —
-                // "go to declaration" of a member in the absence of a
-                // class-keyed find is a TODO at the engine level.
-                if let Some(sel) = self.symbol_sel.as_ref()
-                    && sel.descriptor.starts_with('L')
-                    && sel.descriptor.ends_with(';')
-                {
+                // Workflow D: open the class the click landed on, if
+                // any. A selection from another document does not
+                // count (audit F1). For non-class tokens we still run
+                // a search — "go to declaration" of a member in the
+                // absence of a class-keyed find is a TODO at the
+                // engine level.
+                if let Some((class, _)) = self.clicked_member() {
                     self.queue(Command::OpenClass {
-                        descriptor: sel.descriptor.clone(),
+                        descriptor: class,
                         pin: false,
                         line: None,
                         origin: NavOrigin::Declaration,
@@ -1162,6 +1214,10 @@ impl AscApp {
                 self.tasks.cancel_kind(TaskKind::DecompileClass);
                 self.documents.clear();
                 self.active_doc = None;
+                // The click anchors pointed into the dropped sources.
+                self.symbol_sel = None;
+                self.last_click = None;
+                self.comment_target = None;
                 if self.session.is_some()
                     && let Some(d) = self.active_class_descriptor().map(str::to_string)
                 {
@@ -1189,9 +1245,14 @@ impl AscApp {
                 });
             }
             Command::BeginRenameSymbol => {
-                if let Some(sel) = self.symbol_sel.as_ref() {
-                    self.rename_input = sel.token.clone();
+                // Only a selection that applies to the document on
+                // screen may open the rename bar (audit F1).
+                let token = self.active_symbol_sel().map(|s| s.token.clone());
+                if let Some(token) = token {
+                    self.rename_input = token;
                     self.show_rename = true;
+                } else {
+                    self.set_status("rename: click an identifier in the editor first", false);
                 }
             }
             Command::RenameSymbol { new_name } => {
@@ -1199,15 +1260,32 @@ impl AscApp {
                 self.apply_symbol_rename(&new_name);
             }
             Command::BeginLineComment => {
-                if self.last_clicked_line.is_some() {
+                // The anchor must belong to the document on screen:
+                // otherwise the bar would show the previous document's
+                // line and append the note there (audit F1).
+                let Some(line) = self.clicked_line() else {
+                    self.set_status("comment: click a code line first", false);
+                    return;
+                };
+                let doc = self.active_doc_key().map(str::to_string);
+                if let Some(doc) = doc {
                     self.comment_input.clear();
-                    self.comment_target = self.last_clicked_line;
+                    self.comment_target = Some((doc, line));
                 }
             }
             Command::SetLineComment { line, text } => {
-                self.comment_target = None;
+                // Apply the note only to the document the bar was armed
+                // for: a document switch while the bar is open must not
+                // comment the new document at the old line (audit F1).
+                let target = self.comment_target.take();
                 let text = text.trim().to_string();
-                if !text.is_empty() {
+                if text.is_empty() {
+                    return;
+                }
+                let active = self.active_doc_key().map(str::to_string);
+                if let Some((doc, _)) = target
+                    && Some(doc.as_str()) == active.as_deref()
+                {
                     self.apply_line_comment(line, &text);
                 }
             }

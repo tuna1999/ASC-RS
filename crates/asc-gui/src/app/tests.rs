@@ -1091,7 +1091,10 @@ fn rename_and_comment_edit_flow() {
     assert!(app.symbol_sel.is_none(), "selection dropped after edit");
     assert!(app.documents.peek("LA;").is_some(), "cache entry replaced");
 
-    // Line comment on the signature line (2, 0-based) via dispatch.
+    // Line comment on the signature line (2, 0-based) via dispatch:
+    // the click anchor plus the bar arming, like the `;` shortcut.
+    app.last_click = Some(("LA;".into(), 2));
+    app.dispatch(Command::BeginLineComment, &egui::Context::default());
     app.dispatch(
         Command::SetLineComment {
             line: 2,
@@ -1116,6 +1119,13 @@ fn rename_and_comment_edit_flow() {
 #[test]
 fn go_to_declaration_jumps_to_owner() {
     let mut app = empty_app();
+    // The click happened in that class's document, which is on screen
+    // (audit F1: the selection is only valid for its own document).
+    app.active_doc = Some(Arc::new(Document::new(
+        "Lcom/foo/Bar;".into(),
+        "classes.dex".into(),
+        "class Bar {}\n".into(),
+    )));
     // Simulate a click on an `Lcom/foo/Bar;` reference.
     app.symbol_sel = Some(SymbolSelection {
         descriptor: "Lcom/foo/Bar;".into(),
@@ -1145,6 +1155,12 @@ fn go_to_declaration_jumps_to_owner() {
 #[test]
 fn find_usages_method_query_via_click() {
     let mut app = empty_app();
+    // The click happened in that class's document, which is on screen.
+    app.active_doc = Some(Arc::new(Document::new(
+        "Lcom/foo/Bar;".into(),
+        "classes.dex".into(),
+        "class Bar {}\n".into(),
+    )));
     app.symbol_sel = Some(SymbolSelection {
         descriptor: "Lcom/foo/Bar;".into(),
         token: "doThing".into(),
@@ -1504,15 +1520,29 @@ fn evicted_method_smali_tab_keeps_its_method_scope() {
     };
     let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
     crate::app::AscApp::run_ui(&ctx, |ui| {
-        let ctx = ui.ctx();
-        app.navigate_to(SMALI_LIFECYCLE_CLASS, false, None, NavOrigin::Tree, ctx);
+        app.navigate_to(
+            SMALI_LIFECYCLE_CLASS,
+            false,
+            None,
+            NavOrigin::Tree,
+            ui.ctx(),
+        );
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a
+            .documents
+            .contains(SMALI_LIFECYCLE_CLASS)),
+        "the class document must be on screen for its click to apply (audit F1)"
+    );
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        // The click that selects the method identifier, in that document.
         app.symbol_sel = Some(SymbolSelection {
             descriptor: SMALI_LIFECYCLE_CLASS.to_string(),
             token: "<init>".to_string(),
             method: (0, 0),
             occurrences: Vec::new(),
         });
-        app.dispatch(Command::ShowSmaliMethod, ctx);
+        app.dispatch(Command::ShowSmaliMethod, ui.ctx());
     });
     assert!(
         pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
@@ -1667,15 +1697,29 @@ fn navigation_history_restores_evicted_method_smali() {
     };
     let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
     crate::app::AscApp::run_ui(&ctx, |ui| {
-        let ctx = ui.ctx();
-        app.navigate_to(SMALI_LIFECYCLE_CLASS, false, None, NavOrigin::Tree, ctx);
+        app.navigate_to(
+            SMALI_LIFECYCLE_CLASS,
+            false,
+            None,
+            NavOrigin::Tree,
+            ui.ctx(),
+        );
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a
+            .documents
+            .contains(SMALI_LIFECYCLE_CLASS)),
+        "the class document must be on screen for its click to apply (audit F1)"
+    );
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        // The click that selects the method identifier, in that document.
         app.symbol_sel = Some(SymbolSelection {
             descriptor: SMALI_LIFECYCLE_CLASS.to_string(),
             token: "<init>".to_string(),
             method: (0, 0),
             occurrences: Vec::new(),
         });
-        app.dispatch(Command::ShowSmaliMethod, ctx);
+        app.dispatch(Command::ShowSmaliMethod, ui.ctx());
     });
     assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
     let scoped = app.documents.get(&key).unwrap().source.clone();
@@ -2232,7 +2276,13 @@ fn frame_shortcut_smoke() {
 fn frame_shortcut_n_routes_to_rename() {
     let mut app = empty_app();
     app.tabs.open_pinned("LA;");
-    // Pre-set the symbol selection; the rename bar opens from it.
+    // Pre-set the click (the document it happened in must be on
+    // screen); the rename bar opens from it.
+    app.active_doc = Some(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A { void foo() {} }\n".into(),
+    )));
     app.symbol_sel = Some(SymbolSelection {
         descriptor: "LA;".into(),
         token: "foo".into(),
@@ -2334,8 +2384,9 @@ fn activity_bar_toggles_explorer_inspector_bottom() {
     assert!(!app.show_bottom);
 }
 
-/// `draw_editor` records the last-clicked line. Alias for
-/// ASC-GUI-038 (clicked line persists).
+/// `draw_editor` records the last-clicked line, and the record keeps
+/// the document it was clicked in: it applies there and nowhere else
+/// (audit F1). Alias for ASC-GUI-038 (clicked line persists).
 #[test]
 fn clicked_line_persists() {
     let mut app = empty_app();
@@ -2346,10 +2397,26 @@ fn clicked_line_persists() {
     ));
     app.tabs.open_pinned("LA;");
     app.active_doc = Some(doc);
-    // Set last_clicked_line directly (the draw path normally
-    // drives it on click; here we simulate the click).
-    app.last_clicked_line = Some(1);
-    assert_eq!(app.last_clicked_line, Some(1));
+    // The record the draw path writes on a click.
+    app.last_click = Some(("LA;".into(), 1));
+    assert_eq!(
+        app.clicked_line(),
+        Some(1),
+        "the click applies in its own document"
+    );
+    // Another document on screen: the same record must not apply.
+    app.documents.put(Arc::new(crate::state::Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        "line 0\nline 1\nline 2\n".into(),
+    )));
+    let ctx = egui::Context::default();
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.clicked_line(),
+        None,
+        "a line clicked in A must not anchor an action in B"
+    );
 }
 
 /// Persistence round-trip: a JSON-encoded SettingsBlob round-trips
@@ -2601,7 +2668,16 @@ fn bookmark_toggle_jump_and_open_tabs_picker() {
     let ctx = egui::Context::default();
     app.tabs.open_preview("Lcom/foo/Bar;");
     app.tabs.activate("Lcom/foo/Bar;");
-    app.last_clicked_line = Some(4); // 0-indexed → bookmark line 5
+    // The click anchor needs the document it was clicked in on screen
+    // (audit F1).
+    let doc = Arc::new(Document::new(
+        "Lcom/foo/Bar;".into(),
+        "classes.dex".into(),
+        synthetic_class("Bar", 8),
+    ));
+    app.documents.put(doc.clone());
+    app.active_doc = Some(doc);
+    app.last_click = Some(("Lcom/foo/Bar;".into(), 4)); // 0-indexed → bookmark line 5
     app.dispatch(Command::ToggleBookmark, &ctx);
     assert_eq!(app.tabs.bookmark("Lcom/foo/Bar;"), Some(5));
     // Jump sets pending_scroll to the 0-indexed line.
@@ -2673,7 +2749,15 @@ fn method_smali_and_callees_e2e() {
     }
     assert!(app.session.is_some(), "artifact loaded");
     let descriptor = "Lcom/google/android/material/timepicker/ClockFaceView;";
-    // Simulate the click that selects a method identifier.
+    // The class must be on screen before its click can apply (audit F1).
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.navigate_to(descriptor, false, None, NavOrigin::Tree, ui.ctx());
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(descriptor)),
+        "the class document must land"
+    );
+    // Simulate the click that selects a method identifier, in it.
     app.symbol_sel = Some(crate::app::SymbolSelection {
         descriptor: descriptor.into(),
         token: "<init>".into(),
@@ -2681,9 +2765,7 @@ fn method_smali_and_callees_e2e() {
         occurrences: vec![],
     });
     crate::app::AscApp::run_ui(&ctx, |ui| {
-        let ctx = ui.ctx();
-        app.navigate_to(descriptor, false, None, NavOrigin::Tree, ctx);
-        app.dispatch(Command::ShowCallees, ctx);
+        app.dispatch(Command::ShowCallees, ui.ctx());
     });
     for _ in 0..900 {
         crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
@@ -2720,9 +2802,15 @@ fn method_smali_and_callees_e2e() {
         !app.documents.contains(&full),
         "class listing must not have been requested"
     );
-    // Regression: callees while a `#smali#method` tab is ACTIVE must
-    // still resolve the real class (from the symbol selection, not
-    // the tab key) — the shot suite caught this.
+    // Regression: a click inside the `#smali#method` listing (its own
+    // document key) must still resolve the real class — the shot
+    // suite caught the view key being handed to the engine.
+    app.symbol_sel = Some(crate::app::SymbolSelection {
+        descriptor: key.clone(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: vec![],
+    });
     crate::app::AscApp::run_ui(&ctx, |ui| {
         app.references = None;
         app.dispatch(Command::ShowCallees, ui.ctx());
@@ -2962,7 +3050,14 @@ fn visual_shots_v090_features() {
     assert!(h.state().documents.contains(&key), "method smali landed");
     save(&mut h, "09_method_smali");
 
-    // Callees of the same method → REFERENCES rows.
+    // Callees of the same method → REFERENCES rows. The click that
+    // drives it now lands in the listing on screen (audit F1).
+    h.state_mut().symbol_sel = Some(crate::app::SymbolSelection {
+        descriptor: key.clone(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: vec![],
+    });
     h.state_mut().queue(Command::ShowCallees);
     for _ in 0..300 {
         h.step();
@@ -2986,4 +3081,501 @@ fn visual_shots_v090_features() {
         h.step();
     }
     save(&mut h, "11_open_tabs");
+}
+
+// ---------------------------------------------------------------------
+// Audit F1 — click-derived state is per-document
+//
+// `symbol_sel` / the clicked line anchor are captured from one
+// document's source (byte offsets, line numbers, the document key).
+// Every consumer must therefore refuse to act on them once another
+// document is on screen — otherwise class A's descriptor, token and
+// line number drive an action in class B.
+// ---------------------------------------------------------------------
+
+/// A synthetic class source with `lines` body lines (so a stale line
+/// number from another document is still *in range* and would silently
+/// land, not fail loudly).
+fn synthetic_class(name: &str, lines: usize) -> String {
+    let mut s = format!("class {name} {{\n");
+    for i in 0..lines {
+        s.push_str(&format!("  void m{i}() {{}}\n"));
+    }
+    s.push_str("}\n");
+    s
+}
+
+/// Audit F1: a line clicked in A must not arm the comment bar (`;`)
+/// after switching to B — the bar would show A's line and append a
+/// `// note` to an unrelated line of B.
+#[test]
+fn line_comment_anchor_is_not_carried_across_documents() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        synthetic_class("A", 40),
+    )));
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        synthetic_class("B", 40),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    // The record the editor writes on a click in A.
+    app.last_click = Some(("LA;".into(), 30));
+    // Switch to B (cached → the document really is on screen).
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.active_doc.as_ref().map(|d| d.descriptor.as_str()),
+        Some("LB;")
+    );
+
+    app.dispatch(Command::BeginLineComment, &ctx);
+    assert!(
+        app.comment_target.is_none(),
+        "a line clicked in A must not arm the comment bar in B"
+    );
+    app.dispatch(
+        Command::SetLineComment {
+            line: 30,
+            text: "note".into(),
+        },
+        &ctx,
+    );
+    let b = app.documents.get("LB;").unwrap().source.clone();
+    assert!(
+        !b.contains("// note"),
+        "B must not be commented at the line clicked in A"
+    );
+}
+
+/// Audit F1: a bookmark toggled after a document switch must not land
+/// on the previous document's clicked line. With no click in the new
+/// document the anchor is the tab default (line 1).
+#[test]
+fn bookmark_anchor_is_not_carried_across_documents() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        synthetic_class("A", 40),
+    )));
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        synthetic_class("B", 40),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.last_click = Some(("LA;".into(), 30));
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+
+    app.dispatch(Command::ToggleBookmark, &ctx);
+    assert_eq!(
+        app.tabs.bookmark("LB;"),
+        Some(1),
+        "the bookmark must anchor to the new document, not A's clicked line"
+    );
+    assert_eq!(
+        app.tabs.bookmark("LA;"),
+        None,
+        "the bookmark must not land on the other tab either"
+    );
+}
+
+/// Audit F1: a click selection captured in class A must not drive
+/// member-scoped engine dispatch once class B is on screen (the
+/// descriptor *and* the token would both be A's).
+#[test]
+fn stale_symbol_selection_does_not_open_method_smali_or_callees() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let a = SMALI_LIFECYCLE_CLASS;
+    app.navigate_to(a, false, None, NavOrigin::Tree, &ctx);
+    app.symbol_sel = Some(SymbolSelection {
+        descriptor: a.into(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: Vec::new(),
+    });
+    // Switch to another document (cached, so it is really on screen).
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        synthetic_class("B", 5),
+    )));
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.active_doc.as_ref().map(|d| d.descriptor.as_str()),
+        Some("LB;")
+    );
+
+    let in_flight = app.tasks.in_flight_count();
+    app.dispatch(Command::ShowCallees, &ctx);
+    assert_eq!(
+        app.tasks.in_flight_count(),
+        in_flight,
+        "a selection from another document must not spawn a callee scan"
+    );
+    assert!(
+        app.references.is_none(),
+        "no callee result for a stale click"
+    );
+
+    let stale_key = crate::task::TaskManager::smali_key(a, Some("<init>"));
+    app.dispatch(Command::ShowSmaliMethod, &ctx);
+    assert_eq!(
+        app.tasks.in_flight_count(),
+        in_flight,
+        "a selection from another document must not spawn a disasm"
+    );
+    assert_ne!(
+        app.tabs.active_descriptor(),
+        Some(stale_key.as_str()),
+        "no method-smali tab may open for the stale class"
+    );
+}
+
+/// Audit F1: the class-scoped actions fed by the click selection
+/// (`ShowClassStrings`, `FindUsagesOfClicked`) must fall back to the
+/// on-screen class instead of dispatching A's descriptor.
+#[test]
+fn stale_symbol_selection_does_not_scan_or_search_the_old_class() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let a = SMALI_LIFECYCLE_CLASS;
+    app.navigate_to(a, false, None, NavOrigin::Tree, &ctx);
+    app.symbol_sel = Some(SymbolSelection {
+        descriptor: a.into(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: Vec::new(),
+    });
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        synthetic_class("B", 5),
+    )));
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+
+    let in_flight = app.tasks.in_flight_count();
+    app.dispatch(Command::ShowClassStrings, &ctx);
+    assert!(
+        app.tasks.references_surface_live(a).is_none(),
+        "the stale click's class must not be scanned"
+    );
+    assert!(
+        app.tasks.references_surface_live("LB;").is_some(),
+        "the scan must target the class on screen instead (in_flight: {in_flight})"
+    );
+
+    app.dispatch(Command::FindUsagesOfClicked, &ctx);
+    assert!(
+        app.search.input.is_empty(),
+        "a stale click must not prefill the search bar with the old token"
+    );
+    assert!(
+        app.commands
+            .iter()
+            .any(|c| matches!(c, Command::GlobalSearch)),
+        "without a usable click the command degrades to global search"
+    );
+}
+
+/// Audit F1: `GoToDeclaration` / `BeginRenameSymbol` are click-scoped
+/// too — neither may act on a selection captured in another document.
+#[test]
+fn stale_symbol_selection_does_not_queue_navigation_or_rename() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        synthetic_class("B", 5),
+    )));
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+    app.symbol_sel = Some(SymbolSelection {
+        descriptor: "LA;".into(),
+        token: "Bar".into(),
+        method: (0, 10),
+        occurrences: vec![(0, 3)],
+    });
+
+    app.dispatch(Command::GoToDeclaration, &ctx);
+    assert!(
+        app.commands.is_empty(),
+        "no navigation may be queued for the stale class"
+    );
+    app.dispatch(Command::BeginRenameSymbol, &ctx);
+    assert!(
+        !app.show_rename,
+        "the rename bar must not open from a stale selection"
+    );
+}
+
+/// Audit F1 (must not over-correct): jumping to another line of the
+/// *same* document — or re-activating its tab — keeps the click
+/// selection valid.
+#[test]
+fn click_selection_survives_in_document_navigation() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    let src = "class A {\n  void m() {\n    int foo = 0;\n    foo = foo + 1;\n  }\n}\n";
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        src.into(),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    let off = src.find("foo = foo").unwrap();
+    app.symbol_sel = Some(crate::ui::editor::symbol_selection_for("LA;", src, off).unwrap());
+    app.last_click = Some(("LA;".into(), 3));
+    // Same document: an outline jump to another line.
+    app.navigate_to("LA;", false, Some(4), NavOrigin::Outline, &ctx);
+    app.dispatch(Command::BeginRenameSymbol, &ctx);
+    assert!(app.show_rename, "same-document jumps keep the selection");
+    assert_eq!(app.rename_input, "foo");
+    // …and the rename still applies.
+    app.dispatch(
+        Command::RenameSymbol {
+            new_name: "bar".into(),
+        },
+        &ctx,
+    );
+    let doc = app.active_doc.clone().expect("doc kept");
+    assert!(doc.source.contains("int bar = 0;"), "{}", doc.source);
+}
+
+/// Audit F1 (view keys): a click inside a Smali listing records the
+/// *view* key as its document identity, but engine dispatch must still
+/// resolve the owning class (`L…;`) — `L…;#smali` is not a class
+/// descriptor and must never reach the engine as one.
+#[test]
+fn smali_view_click_resolves_the_owning_class() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let a = SMALI_LIFECYCLE_CLASS;
+    let key = crate::task::TaskManager::smali_key(a, None);
+    open_smali_view(&mut app, &ctx, a);
+    assert!(pump_until(&mut app, &ctx, |x| x.documents.contains(&key)));
+    // The click record the editor writes inside the listing.
+    app.symbol_sel = Some(SymbolSelection {
+        descriptor: key.clone(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: Vec::new(),
+    });
+
+    app.dispatch(Command::ShowCallees, &ctx);
+    let label = format!("{a}-><init>");
+    assert!(
+        app.tasks.references_surface_live(&label).is_some(),
+        "callees from a Smali click must target the owning class, not the view key"
+    );
+    app.dispatch(Command::ShowSmaliMethod, &ctx);
+    let method_key = crate::task::TaskManager::smali_key(a, Some("<init>"));
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some(method_key.as_str()),
+        "method Smali from a Smali-listing click must re-resolve the class"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Audit F2 — the first Smali open is a navigation like any other
+// ---------------------------------------------------------------------
+
+/// Audit F2: opening a Smali view for the *first* time (cache miss)
+/// must enter the navigation history exactly like a cached reopen
+/// does. Otherwise the recorded location stays the Java class, Back
+/// has nowhere to go and Forward can never reach the listing.
+#[test]
+fn first_smali_open_enters_navigation_history() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let a = SMALI_LIFECYCLE_CLASS;
+    let key = crate::task::TaskManager::smali_key(a, None);
+    app.navigate_to(a, false, None, NavOrigin::Tree, &ctx);
+    assert!(
+        pump_until(&mut app, &ctx, |x| x.documents.contains(a)),
+        "A's document must land"
+    );
+    assert_eq!(app.nav.position(), (0, 1), "history: [A]");
+
+    // First open: cache miss, a real disasm worker behind it.
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.dispatch(Command::ShowSmali, ctx);
+    });
+    assert_eq!(
+        app.nav.len(),
+        2,
+        "the first Smali open must be recorded in history"
+    );
+    assert_eq!(
+        app.nav.current().map(|l| l.descriptor.as_str()),
+        Some(key.as_str()),
+        "the current location is the listing, not the Java class"
+    );
+    assert!(
+        pump_until(&mut app, &ctx, |x| x.documents.contains(&key)),
+        "the listing must land"
+    );
+
+    // Back → the Java class; Forward → the listing; no extra entries.
+    app.dispatch(Command::NavigateBack, &ctx);
+    assert_eq!(app.tabs.active_descriptor(), Some(a));
+    assert_eq!(app.nav.len(), 2, "a history walk must not push entries");
+    app.dispatch(Command::NavigateForward, &ctx);
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+    assert_eq!(app.nav.len(), 2, "a history walk must not push entries");
+
+    // A cached reopen is the same navigation, deduplicated.
+    let in_flight = app.tasks.in_flight_count();
+    app.dispatch(Command::ShowSmali, &ctx);
+    assert_eq!(
+        app.tasks.in_flight_count(),
+        in_flight,
+        "a cached reopen spawns no worker"
+    );
+    assert_eq!(app.nav.len(), 2, "a cached reopen adds no history entry");
+}
+
+/// Audit F2 (method scope through the first open): `ShowSmaliMethod`
+/// on a cache miss must record the `#smali#<method>` location, and
+/// Forward must restore that exact view.
+#[test]
+fn first_method_smali_open_enters_navigation_history() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let a = SMALI_LIFECYCLE_CLASS;
+    let key = crate::task::TaskManager::smali_key(a, Some("<init>"));
+    app.navigate_to(a, false, None, NavOrigin::Tree, &ctx);
+    assert!(pump_until(&mut app, &ctx, |x| x.documents.contains(a)));
+    app.symbol_sel = Some(SymbolSelection {
+        descriptor: a.into(),
+        token: "<init>".into(),
+        method: (0, 0),
+        occurrences: Vec::new(),
+    });
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.dispatch(Command::ShowSmaliMethod, ctx);
+    });
+    assert_eq!(
+        app.nav.current().map(|l| l.descriptor.as_str()),
+        Some(key.as_str()),
+        "the method-scoped listing is the current location"
+    );
+    assert!(pump_until(&mut app, &ctx, |x| x.documents.contains(&key)));
+    let scoped = app.documents.get(&key).unwrap().source.clone();
+    assert!(scoped.contains("<init>"), "{scoped}");
+    assert!(
+        !scoped.contains("findIntersectingTextView"),
+        "the first open must keep the method scope:\n{scoped}"
+    );
+
+    app.dispatch(Command::NavigateBack, &ctx);
+    assert_eq!(app.tabs.active_descriptor(), Some(a));
+    app.dispatch(Command::NavigateForward, &ctx);
+    assert_eq!(
+        app.tabs.active_descriptor(),
+        Some(key.as_str()),
+        "Forward restores the method-scoped listing"
+    );
+    let restored = app.documents.get(&key).unwrap().source.clone();
+    assert!(
+        !restored.contains("findIntersectingTextView"),
+        "the restored listing keeps its method scope"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Audit F3 — find reconciliation only pays for what it shows
+// ---------------------------------------------------------------------
+
+/// Audit F3: a *hidden* find bar is unbound, not rescanned, on a
+/// document switch — nothing reads the matches while it is closed, and
+/// opening it (Ctrl+F) recomputes against the document on screen.
+#[test]
+fn hidden_find_bar_rebinds_only_when_opened() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "class A {}\nfoo on A\n".into(),
+    )));
+    app.documents.put(Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        "class B {}\nno match\nfoo on B\n".into(),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.show_find = true;
+    app.find_input = "foo".into();
+    app.recompute_find_matches();
+    assert_eq!(app.find_matches, vec![1], "A's own line");
+
+    // Close the bar, then switch document.
+    app.show_find = false;
+    app.navigate_to("LB;", false, None, NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.find_for_descriptor, None,
+        "a hidden bar holds no document binding"
+    );
+
+    // Opening it recomputes against the document on screen.
+    app.dispatch(Command::FindInDocument, &ctx);
+    assert_eq!(app.find_for_descriptor.as_deref(), Some("LB;"));
+    assert_eq!(
+        app.find_matches,
+        vec![2],
+        "the rebind must use B's line, never A's"
+    );
+}
+
+/// Audit F3: the scan lowercases into one reused buffer (no per-line
+/// allocation), so the comparison must stay ASCII-case-insensitive and
+/// leave non-ASCII bytes alone, exactly like `to_ascii_lowercase`.
+#[test]
+fn find_scan_is_ascii_case_insensitive() {
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.documents.put(Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        "void Méthod() { Foo(); }\nvoid bar() {}\n".into(),
+    )));
+    app.navigate_to("LA;", false, None, NavOrigin::Tree, &ctx);
+    app.show_find = true;
+    for (needle, expected) in [
+        ("FOO", vec![0]),
+        ("méthod", vec![0]),
+        // ASCII-only folding, before and after the buffer reuse: a
+        // non-ASCII letter is never case-folded, so `É` ≠ `é`.
+        ("MÉTHOD", vec![]),
+        ("missing", vec![]),
+    ] {
+        app.find_input = needle.into();
+        app.recompute_find_matches();
+        assert_eq!(app.find_matches, expected, "needle {needle:?}");
+    }
 }

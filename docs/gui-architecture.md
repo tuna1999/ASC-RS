@@ -129,6 +129,28 @@ new visits from a *different* origin location, never rewritten on tab
 close (closed tabs re-decompile on revisit — ASC is fast and on-demand).
 Back/Forward restores document + line (scroll target), deterministically.
 
+Smali listings are navigation locations like any other document:
+`ShowSmali` / `ShowSmaliMethod` route through `navigate_to` on both a
+cache hit and a cache miss, so the first open is recorded in the history
+(Back returns to the class, Forward to the listing), the disasm job stays
+deduplicated, and a `#smali` view key never reaches the engine as a class
+descriptor (GUI-hardening audit F1/F2).
+
+### Click-derived state (GUI-hardening audit F1)
+
+`symbol_sel` and `last_click` are captured from **one document version**:
+the document key it was clicked in, the token, and byte / line offsets
+into that source. Consumers read them through `AscApp::active_symbol_sel`
+/ `AscApp::clicked_line` / `clicked_member`, which refuse a value whose
+document key is not the one on screen — a document switch must never let
+class A's descriptor, token or line number drive an action in class B
+(dispatch, bookmark or line comment). A source-replacing edit drops the
+selection (its offsets are invalid); a line jump inside the same document
+keeps it. A click in a `#smali` listing resolves its owning class through
+`class_of_tab_key`, never the view key. `comment_target` carries its
+document key for the same reason: the bar applies only to the document it
+was armed for.
+
 ## 5. Search (fixes F7)
 
 `SearchController` retains the full `SearchReport`:

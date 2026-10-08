@@ -138,7 +138,7 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ShowSmali);
                     }
-                    let sel_ok = self.symbol_sel.is_some();
+                    let sel_ok = self.active_symbol_sel().is_some();
                     if ui
                         .add_enabled(sel_ok, egui::Button::new("Show Smali of clicked method"))
                         .on_disabled_hover_text("click a method identifier first")
@@ -155,11 +155,7 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ShowCallees);
                     }
-                    let class_ok = self
-                        .symbol_sel
-                        .as_ref()
-                        .map(|s| !s.descriptor.is_empty())
-                        .unwrap_or(false)
+                    let class_ok = self.active_symbol_sel().is_some()
                         || self.active_class_descriptor().is_some();
                     if ui
                         .add_enabled(class_ok, egui::Button::new("Strings used by this class"))
@@ -169,7 +165,7 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ShowClassStrings);
                     }
-                    let sel_ok = self.symbol_sel.is_some();
+                    let sel_ok = self.active_symbol_sel().is_some();
                     if ui
                         .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))
                         .on_disabled_hover_text("click an identifier in the editor first")
@@ -178,7 +174,7 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::BeginRenameSymbol);
                     }
-                    let line_ok = self.last_clicked_line.is_some();
+                    let line_ok = self.clicked_line().is_some();
                     if ui
                         .add_enabled(line_ok, egui::Button::new("Comment line  (;)"))
                         .on_disabled_hover_text("click a code line first")

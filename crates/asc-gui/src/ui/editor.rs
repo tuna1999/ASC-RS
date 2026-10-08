@@ -390,21 +390,22 @@ impl AscApp {
     fn draw_rename_bar(&mut self, ui: &mut egui::Ui) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
+        // Only the selection that applies to the document on screen is
+        // described here (audit F1); a stale one renders no summary.
+        let summary = self
+            .active_symbol_sel()
+            .map(|s| (s.token.clone(), s.occurrences.len()));
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("rename")
                     .small()
                     .color(T.text_secondary),
             );
-            if let Some(sel) = &self.symbol_sel {
+            if let Some((token, refs)) = summary {
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{} · {} refs in method",
-                        sel.token,
-                        sel.occurrences.len()
-                    ))
-                    .small()
-                    .color(T.text_disabled),
+                    egui::RichText::new(format!("{token} · {refs} refs in method"))
+                        .small()
+                        .color(T.text_disabled),
                 );
             }
             let edit = egui::TextEdit::singleline(&mut self.rename_input)
@@ -427,10 +428,12 @@ impl AscApp {
     }
 
     /// Line-comment bar (F26): append a `// note` to the clicked line.
+    /// The armed target carries its document identity; the dispatch
+    /// re-checks it (audit F1).
     fn draw_comment_bar(&mut self, ui: &mut egui::Ui) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
-        let target = self.comment_target;
+        let target = self.comment_target.as_ref().map(|(_, line)| *line);
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("comment")
@@ -534,7 +537,7 @@ impl AscApp {
                                 .wrap_mode(egui::TextWrapMode::Extend),
                         );
                         if resp.clicked() {
-                            self.last_clicked_line = Some(idx);
+                            self.last_click = Some((doc.descriptor.clone(), idx));
                             if let Some(pos) = resp.interact_pointer_pos() {
                                 // Monospace: column from glyph advance.
                                 let col = (((pos.x - resp.rect.left()) / advance).round() as i64)
