@@ -1735,6 +1735,13 @@ fn relative_data_from_attrs(attrs: &[XmlAttr]) -> RelativeDataSpec {
     let parts = attrs
         .iter()
         .filter_map(|a| {
+            // Only the Android (or an unqualified) attribute is a legal
+            // matcher here; a foreign namespace (`tools:path`, or a custom
+            // namespace whose local name collides with a matcher) must not
+            // be read as Android data. Same policy as `attr()` (audit F1).
+            if !a.ns.as_deref().is_none_or(|ns| ns == ANDROID_NS) {
+                return None;
+            }
             let (_, part, kind) = URI_RELATIVE_ATTRS
                 .iter()
                 .find(|(name, _, _)| *name == a.name)?;

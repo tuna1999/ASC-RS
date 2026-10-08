@@ -392,7 +392,13 @@ impl AscApp {
             self.active_doc = self.documents.get(descriptor);
         } else {
             self.active_doc = None;
-            self.spawn_decompile(descriptor, ctx);
+            // Re-issue the engine job that produces this *view*: a class
+            // tab is a getclass job, a `L…;#smali…` view key a disasm job.
+            // `spawn_decompile` alone would be a silent no-op for a view
+            // key and leave the recreated `Loading` tab with no worker —
+            // navigation back to an evicted Smali view would then hang the
+            // tab on Loading forever (audit F1).
+            self.reload_document(descriptor, ctx);
         }
         // Scroll target persists until the document is visible.
         self.pending_scroll = Some(line.unwrap_or(0));

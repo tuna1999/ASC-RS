@@ -1387,6 +1387,196 @@ fn evicted_method_smali_tab_keeps_its_method_scope() {
     assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
 }
 
+/// Audit F1: restoring a Smali view from Navigation History when its tab has
+/// been closed and its document evicted must re-issue the *disasm* job for
+/// the view key, not fall through to a getclass spawn that a view key cannot
+/// ever start (and so leave the recreated tab stuck at `Loading` with no
+/// worker behind it). `NavOrigin::History` restores don't re-push, so this
+/// directly drives the `nav_back`/`nav_forward` entry point.
+#[test]
+fn navigation_history_restores_evicted_class_smali() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, None);
+    open_smali_view(&mut app, &ctx, SMALI_LIFECYCLE_CLASS);
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+    assert!(app.documents.get(&key).unwrap().source.contains(".method"));
+
+    // The tab is closed and its document dropped (cache eviction), but the
+    // view key remains reachable through the navigation history.
+    app.tabs.close(&key);
+    app.documents.remove(&key);
+    assert!(!app.documents.contains(&key), "the document is evicted");
+    assert!(
+        !app.tabs.tabs().iter().any(|t| t.descriptor == key),
+        "no tab is open for the view key"
+    );
+
+    // Back/Forward lands on the history location again.
+    app.navigate_to(&key, false, None, NavOrigin::History, &ctx);
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "a history-restored evicted Smali view must be re-issued, not left on Loading forever"
+    );
+    assert!(
+        app.documents.get(&key).unwrap().source.contains(".method"),
+        "the restored document is the listing"
+    );
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+    assert_eq!(
+        app.tabs
+            .tabs()
+            .iter()
+            .find(|t| t.descriptor == key)
+            .map(|t| t.status.clone()),
+        Some(crate::state::TabStatus::Ready),
+        "the restored tab must reach Ready, not stick at Loading"
+    );
+}
+
+/// Audit F1 (method scope): the same history restore must keep the method
+/// scope of `L…;#smali#<method>` — re-issuing it as the whole-class listing
+/// would be a silent lie.
+#[test]
+fn navigation_history_restores_evicted_method_smali() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.navigate_to(SMALI_LIFECYCLE_CLASS, false, None, NavOrigin::Tree, ctx);
+        app.symbol_sel = Some(SymbolSelection {
+            descriptor: SMALI_LIFECYCLE_CLASS.to_string(),
+            token: "<init>".to_string(),
+            method: (0, 0),
+            occurrences: Vec::new(),
+        });
+        app.dispatch(Command::ShowSmaliMethod, ctx);
+    });
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+    let scoped = app.documents.get(&key).unwrap().source.clone();
+    assert!(scoped.contains("<init>"), "{scoped}");
+
+    app.tabs.close(&key);
+    app.documents.remove(&key);
+    app.navigate_to(&key, false, None, NavOrigin::History, &ctx);
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "a history-restored evicted method Smali view must be re-issued"
+    );
+    let reloaded = app.documents.get(&key).unwrap().source.clone();
+    assert!(reloaded.contains("<init>"), "{reloaded}");
+    assert!(
+        !reloaded.contains("findIntersectingTextView"),
+        "the restored method listing must keep its method scope:\n{reloaded}"
+    );
+    assert_eq!(
+        app.tabs
+            .tabs()
+            .iter()
+            .find(|t| t.descriptor == key)
+            .map(|t| t.status.clone()),
+        Some(crate::state::TabStatus::Ready)
+    );
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+}
+
+/// Audit F1 (dedup): navigating to a **cached** Smali view reuses the cached
+/// document and must not re-issue a duplicate disasm job — a second worker
+/// that would only be discarded on arrival.
+#[test]
+fn navigation_to_cached_smali_does_not_spawn_duplicate() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, None);
+    open_smali_view(&mut app, &ctx, SMALI_LIFECYCLE_CLASS);
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+    assert_eq!(app.tasks.in_flight_count(), 0, "the first disasm retired");
+
+    let cached = app.documents.get(&key).unwrap();
+    app.navigate_to(&key, false, None, NavOrigin::Tree, &ctx);
+    assert_eq!(
+        app.tasks.in_flight_count(),
+        0,
+        "a cached Smali navigation must not spawn a duplicate disasm"
+    );
+    assert!(
+        Arc::ptr_eq(&cached, &app.documents.get(&key).unwrap()),
+        "the cached document is reused as-is"
+    );
+    assert_eq!(
+        app.tabs
+            .tabs()
+            .iter()
+            .find(|t| t.descriptor == key)
+            .map(|t| t.status.clone()),
+        Some(crate::state::TabStatus::Ready)
+    );
+}
+
+/// Audit F1 (terminal state): if the history restore's reload fails, the tab
+/// must land in a terminal `Failed` state — never left at `Loading` with no
+/// worker and no way to resolve. A `Failed` tab is the intentional terminal
+/// signal; `Loading` with nothing running is the bug this whole audit guards
+/// against.
+#[test]
+fn navigation_reload_failure_does_not_stick_loading() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::smali_key(SMALI_LIFECYCLE_CLASS, None);
+    open_smali_view(&mut app, &ctx, SMALI_LIFECYCLE_CLASS);
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+
+    app.tabs.close(&key);
+    app.documents.remove(&key);
+    app.navigate_to(&key, false, None, NavOrigin::History, &ctx);
+    // A real worker errors (as `poll_workers` would report a Disasm failure).
+    app.apply_task(CompletedTask {
+        id: crate::task::TaskId(7777),
+        generation: crate::task::SessionGeneration::INITIAL,
+        kind: TaskKind::Disasm,
+        label: key.clone(),
+        outcome: TaskOutcome::Failed("cannot disasm".into()),
+        elapsed: std::time::Duration::from_millis(1),
+        stale: false,
+    });
+    assert!(matches!(
+        app.tabs
+            .tabs()
+            .iter()
+            .find(|t| t.descriptor == key)
+            .map(|t| &t.status),
+        Some(crate::state::TabStatus::Failed(_)),
+    ));
+    // Stay terminal across further frames: never back to Loading.
+    for _ in 0..5 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+    }
+    assert!(
+        matches!(
+            app.tabs
+                .tabs()
+                .iter()
+                .find(|t| t.descriptor == key)
+                .map(|t| &t.status),
+            Some(crate::state::TabStatus::Failed(_)),
+        ),
+        "a failed reload must stay in the terminal Failed state, not reload-loop into Loading"
+    );
+}
+
 /// `Command::ToggleTheme` flips the active theme. Covers
 /// `ASC-GUI-025` (settings dialog theme picker). The full
 /// settings dialog is still TODO; the theme toggle is the

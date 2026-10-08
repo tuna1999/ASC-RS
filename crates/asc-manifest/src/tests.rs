@@ -2241,6 +2241,122 @@ fn uri_relative_filter_group_is_preserved_not_evaluated() {
     assert_eq!(f.effective_data.paths[0].value, "/direct");
 }
 
+/// Audit F2: a `<data>` child of a `<uri-relative-filter-group>` must only
+/// honour **Android** (or unqualified) matcher attributes. A foreign
+/// namespace — `tools:path`, a custom namespace whose local name collides
+/// with a real matcher — must never be read as Android data. This is the
+/// same namespace policy `attr()`, `data_spec_from_attrs`, etc. already
+/// enforce for every other manifest attribute; `relative_data_from_attrs`
+/// was the one direct `XmlAttr` walk that skipped it.
+#[test]
+fn uri_relative_group_rejects_foreign_namespace_matchers() {
+    use axml::{ANDROID_NS, TOOLS_NS, Val, attr, elem};
+    const CUSTOM_NS: &str = "http://example.com/custom";
+    let f = single_filter_elems(vec![elem(
+        "uri-relative-filter-group",
+        vec![],
+        vec![elem(
+            "data",
+            vec![
+                attr(Some(ANDROID_NS), "path", Val::Str("/valid")),
+                attr(Some(TOOLS_NS), "path", Val::Str("/invalid")), // local-name collision
+                attr(Some(CUSTOM_NS), "pathPrefix", Val::Str("/nope")), // collision
+                attr(Some(TOOLS_NS), "query", Val::Str("evil=1")),
+                attr(Some(ANDROID_NS), "query", Val::Str("token=1")),
+                attr(Some(TOOLS_NS), "fragment", Val::Str("ignored")),
+            ],
+            vec![],
+        )],
+    )]);
+    let group = &f.uri_relative_groups[0];
+    assert_eq!(group.data.len(), 1);
+    let parts = &group.data[0].parts;
+    // Only the Android matchers survive; every foreign one is dropped.
+    assert_eq!(parts.len(), 2, "got {parts:?}");
+    assert_eq!(parts[0].value, "/valid");
+    assert_eq!(parts[0].part, UriPart::Path);
+    assert_eq!(parts[0].kind, PathMatchKind::Exact);
+    assert_eq!(parts[1].value, "token=1");
+    assert_eq!(parts[1].part, UriPart::Query);
+    assert_eq!(parts[1].kind, PathMatchKind::Exact);
+    assert!(
+        !parts.iter().any(|p| p.value == "/invalid"),
+        "tools:path must not become android:path: {parts:?}"
+    );
+    assert!(
+        !parts.iter().any(|p| p.value == "/nope"),
+        "a custom-namespace pathPrefix must not be read: {parts:?}"
+    );
+    assert!(!parts.iter().any(|p| p.value == "evil=1"));
+    assert!(!parts.iter().any(|p| p.value == "ignored"));
+    assert!(f.has_uri_relative_groups());
+}
+
+/// Audit F2: among the *accepted* (Android) matchers, declaration order is
+/// preserved even when foreign-namespace attributes sit between them — the
+/// `filter_map` drops the foreign ones without re-ordering the survivors.
+#[test]
+fn uri_relative_group_preserves_android_matcher_order() {
+    use axml::{ANDROID_NS, TOOLS_NS, Val, attr, elem};
+    let f = single_filter_elems(vec![elem(
+        "uri-relative-filter-group",
+        vec![],
+        vec![elem(
+            "data",
+            vec![
+                attr(Some(TOOLS_NS), "pathPrefix", Val::Str("/first")), // rejected
+                attr(Some(ANDROID_NS), "pathPrefix", Val::Str("/second")),
+                attr(Some(ANDROID_NS), "path", Val::Str("/third")),
+                attr(Some(TOOLS_NS), "path", Val::Str("/fourth")), // rejected
+                attr(Some(ANDROID_NS), "fragmentPrefix", Val::Str("fifth")),
+            ],
+            vec![],
+        )],
+    )]);
+    let parts = &f.uri_relative_groups[0].data[0].parts;
+    assert_eq!(parts.len(), 3, "got {parts:?}");
+    assert_eq!(
+        parts
+            .iter()
+            .map(|p| (p.value.as_str(), p.part, p.kind))
+            .collect::<Vec<_>>(),
+        [
+            ("/second", UriPart::Path, PathMatchKind::Prefix),
+            ("/third", UriPart::Path, PathMatchKind::Exact),
+            ("fifth", UriPart::Fragment, PathMatchKind::Prefix),
+        ]
+    );
+}
+
+/// Audit F2: a group whose `<data>` carries **only** foreign-namespace
+/// matchers must still be captured as a group — never dropped — so the
+/// renderer keeps declaring that API 35 URI-relative groups are present and
+/// NOT evaluated rather than silently claiming a fully-analysed filter.
+#[test]
+fn uri_relative_group_preserves_incomplete_analysis_warning() {
+    use axml::{TOOLS_NS, Val, attr, elem};
+    let f = single_filter_elems(vec![elem(
+        "uri-relative-filter-group",
+        vec![],
+        vec![elem(
+            "data",
+            vec![attr(Some(TOOLS_NS), "path", Val::Str("/foreign-only"))],
+            vec![],
+        )],
+    )]);
+    assert!(
+        f.has_uri_relative_groups(),
+        "a group with only foreign matchers is still a declared group"
+    );
+    let group = &f.uri_relative_groups[0];
+    assert_eq!(group.data.len(), 1, "the <data> child is preserved");
+    assert!(
+        group.data[0].parts.is_empty(),
+        "the foreign-only matcher contributes nothing to the parsed parts"
+    );
+    assert!(group.allow, "android:allow defaults to true");
+}
+
 // ---------------------------------------------------------------------------
 // Audit F4: android:exported semantics for targetSdk >= 31.
 // ---------------------------------------------------------------------------

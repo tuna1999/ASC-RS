@@ -774,7 +774,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
       "reference": "JADX preview",
-      "notes": "Audit F2: the listing is a document like any other, so an evicted OR invalidated `#smali` view must be re-issued through `AscApp::reload_document` (disasm, keeping method scope) instead of being left on the empty state — `evicted_smali_tab_is_reissued_and_rendered_again`, `evicted_method_smali_tab_keeps_its_method_scope`, `paranoid_toggle_rebuilds_an_open_smali_tab`."
+      "notes": "Audit F2: the listing is a document like any other, so an evicted OR invalidated `#smali` view must be re-issued through `AscApp::reload_document` (disasm, keeping method scope) instead of being left on the empty state — `evicted_smali_tab_is_reissued_and_rendered_again`, `evicted_method_smali_tab_keeps_its_method_scope`, `paranoid_toggle_rebuilds_an_open_smali_tab`. Audit F1: navigation-restore goes through `AscApp::navigate_to` → `reload_document`, so a closed-and-evicted Smali view restored from Navigation History is re-issued (never stuck at `Loading` with no worker) — `navigation_history_restores_evicted_class_smali`, `navigation_history_restores_evicted_method_smali`, `navigation_to_cached_smali_does_not_spawn_duplicate`, `navigation_reload_failure_does_not_stick_loading`."
     },
     {
       "id": "JADX-GUI-019",
