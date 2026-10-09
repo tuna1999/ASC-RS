@@ -1629,6 +1629,10 @@ struct MatchReport<'a> {
 
 #[derive(serde::Serialize)]
 struct MatchReportEntry {
+    /// Which component kind declared the filter: `activity` / `activity_alias`
+    /// / `service` / `receiver`. Additive, so two components (e.g. an
+    /// activity and an alias with the same name) stay distinguishable.
+    kind: &'static str,
     component: String,
     filter_index: usize,
     verdict: &'static str,
@@ -1636,6 +1640,7 @@ struct MatchReportEntry {
 }
 
 fn match_report_entry(
+    kind: &'static str,
     c_component: &str,
     f: &asc_manifest::IntentFilter,
     i: usize,
@@ -1643,6 +1648,7 @@ fn match_report_entry(
 ) -> MatchReportEntry {
     let v = asc_manifest::uri_match::evaluate_filter_uri(f, uri, true);
     MatchReportEntry {
+        kind,
         component: c_component.to_string(),
         filter_index: i,
         verdict: match v.outcome {
@@ -1654,17 +1660,28 @@ fn match_report_entry(
     }
 }
 
-/// `--match-uri` JSON payload builder (activities / services / receivers).
+/// `--match-uri` JSON payload builder (activities / activity-aliases /
+/// services / receivers).
 fn format_manifest_match_json<'a>(
     m: &'a asc_manifest::ManifestInfo,
     uri: &'a str,
 ) -> ManifestMatchJson<'a> {
     let mut results = Vec::new();
-    for list in [&m.activities, &m.services, &m.receivers] {
+    for (kind, list) in [
+        ("activity", &m.activities),
+        ("service", &m.services),
+        ("receiver", &m.receivers),
+    ] {
         for c in list {
             for (i, f) in c.intent_filters.iter().enumerate() {
-                results.push(match_report_entry(&c.name, f, i, uri));
+                results.push(match_report_entry(kind, &c.name, f, i, uri));
             }
+        }
+    }
+    for a in &m.activity_aliases {
+        let c = &a.component;
+        for (i, f) in c.intent_filters.iter().enumerate() {
+            results.push(match_report_entry("activity_alias", &c.name, f, i, uri));
         }
     }
     ManifestMatchJson {
@@ -1736,7 +1753,8 @@ mod tests {
 
     use super::{format_manifest_match_json, format_manifest_text, to_json};
     use asc_manifest::{
-        ComponentEntry, DataSpec, ExportedState, IntentFilter, ManifestInfo, ProviderEntry,
+        ActivityAliasEntry, ComponentEntry, DataSpec, ExportedState, IntentFilter, ManifestInfo,
+        ProviderEntry,
     };
 
     fn data(
@@ -2174,5 +2192,60 @@ mod tests {
             "{json}"
         );
         assert!(json.contains("\"assumed_flag_on\": true"), "{json}");
+    }
+
+    /// Audit F6: the JSON `--match-uri` report covers activity-alias filters
+    /// (matching the text scope) and tags each entry with its component kind so
+    /// a same-named activity and alias are not confounded. Positive, negative
+    /// and unknown verdicts are all surfaced.
+    #[test]
+    fn manifest_match_uri_json_includes_activity_aliases_by_kind() {
+        let alias_filter = || {
+            filter(vec![
+                data(Some("https"), Some("example.com"), None, None),
+                data(None, None, Some("/alias"), None),
+            ])
+        };
+        let alias_match = ActivityAliasEntry {
+            target_activity: Some("com.example.Main".into()),
+            component: activity(
+                "com.example.Alias",
+                ExportedState::LegacyInferred,
+                true,
+                vec![alias_filter()],
+            ),
+        };
+        // A same-named activity with a non-matching path keeps the two apart.
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(35),
+            activities: vec![activity(
+                "com.example.Alias",
+                ExportedState::LegacyInferred,
+                true,
+                vec![filter(vec![
+                    data(Some("https"), Some("example.com"), None, None),
+                    data(None, None, Some("/other"), None),
+                ])],
+            )],
+            activity_aliases: vec![alias_match],
+            ..ManifestInfo::default()
+        };
+
+        let json = to_json(&format_manifest_match_json(&m, "https://example.com/alias"));
+        // Activity / alias with the same name are both present, distinguished.
+        assert!(
+            json.contains("\"kind\": \"activity_alias\"")
+                && json.contains("\"component\": \"com.example.Alias\""),
+            "alias must appear tagged as activity_alias:\n{json}"
+        );
+        assert!(
+            json.contains("\"kind\": \"activity\""),
+            "the same-named activity must also appear:\n{json}"
+        );
+        // The alias's sibling path /alias matches (positive), the activity's
+        // /other does not (negative) — separately attributable.
+        assert!(json.contains("\"verdict\": \"matches\""), "{json}");
+        assert!(json.contains("\"verdict\": \"cannot_match\""), "{json}");
     }
 }

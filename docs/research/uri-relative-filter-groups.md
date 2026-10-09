@@ -234,12 +234,20 @@ consulted.
 | T16 | R9 (simple glob) | one `allow=true` group `pathPattern="/a/.*"` | `https://example.com/a/123` | matches | `.*` greedy, single-pass: the literal `/a/` prefix with `.*` rest matches. |
 | T17 | R9 (glob no match) | same manifest as T16 | `https://example.com/ab` | cannot match | Weak path does not start with literal `/a/`. |
 | T18 | R9 (advanced glob) | one `allow=true` group `pathAdvancedPattern="/a/[0-9]+"` | `https://example.com/a/42` | matches | Regex-like char class + `+` on the advanced form. |
-| T19 | R10 flag OFF (only source of match is a group) | `allow=true` group (`path="/a/b"`) **with flag off** | `https://example.com/a/b` | cannot match | `Flags.relativeReferenceIntentFilters()` false → groups ignored → behaves as if the path layer were absent (no sibling path). |
+|| T19 | R10 flag OFF (only source of match is a group) | `allow=true` group (`path="/a/b"`) **with flag off** | `https://example.com/a/b` | matches | With the flag off `matchData` ignores groups entirely and takes the `paths == null` branch: a filter with no sibling path has `paths == null` → `match = authMatch` → the URI matches at the scheme/host level. (Verified from `IntentFilter.matchData` flag-off branch; this corrected the earlier draft that expected `cannot match`.) |
 | T20 | R10 flag OFF (sibling still matches) | filter-level `<data path="/public"/>` + `allow=false` group, **flag off** | `https://example.com/public` | matches | Groups ignored, but the sibling path still matches (R5 unaffected by the flag). |
 | T21 | R10 flag OFF (block inert) | filter-level `<data path="/public"/>` + `allow=false` group (`path="/private"`), **flag off** | `https://example.com/private` | cannot match | Block group ignored; `/private` is not a sibling path → no path match. |
 | T22 | §4 unknown (unsupported/unevaluable) | a group whose `pathAdvancedPattern` uses a construct §5.4 marks unsupported (e.g. a lookahead) | `https://example.com/x` | unknown | Unevaluable construct → `unknown` with reason, never `matches` (§4). Final classification orbited by the 5.4 oracle. |
 | T23 | R2 (pooled filter data) | two filter-level `<data scheme="https" host="example.com" path="/a"/>` and `<data scheme="https" host="example.com" path="/b"/>` | `https://example.com/b` | matches | Filter-level `<data>` are pooled/ORed (existing `EffectiveData`), a path matches. Group layer irrelevant here. |
-| T24 | R3/§2.1 doc example (AND vs OR) | filter-level `<data path="/path"/>` + `allow=false` group whose **two** `<data>` (`path="/excluded"`, `query="token=secret"`) are ANDed; URI `?query` carries `token=secret` | `https://project.example.com/path?token=secret` | matches | The sibling `path="/path"` matches (OR), so the filter accepts even though the block group's ANDed matchers would also be satisfied — matches the documented example. |
+|| T24 | R3/§2.1 doc example (AND vs OR) | filter-level `<data path="/path"/>` + `allow=false` group whose **two** `<data>` (`path="/excluded"`, `query="token=secret"`) are ANDed; URI `?query` carries `token=secret` | `https://project.example.com/path?token=secret` | matches | The sibling `path="/path"` matches (OR), so the filter accepts even though the block group's ANDed matchers would also be satisfied — matches the documented example. |
+| T25 | F1 authMatch (no path, no group, flag on) | scheme+host `<data>` only, **no** path matcher and **no** group | `https://example.com/any` | matches | `paths == null && groups == null → match = authMatch` (flag-on branch); also `paths == null` in the flag-off branch. A path-less filter accepts any URI at the scheme/host level. |
+| T26 | F3 unknown-block then definite allow | group1 `allow=false` `pathPattern="/x"` (unevaluable), then group2 `allow=true` `path="/x"` | `https://example.com/x` | unknown | If group1 matched it would block (later groups not consulted); if not, group2 allows → depends on the unevaluable group → `unknown`, not a fabricated result either way. |
+| T27 | F3 unknown-allow then definite block | group1 `allow=true` `pathPattern="/x"`, then group2 `allow=false` `path="/x"` | `https://example.com/x` | unknown | Mirrors T26: the earlier unknown group could allow, the later definite block could veto → `unknown`. |
+| T28 | F2 group beyond bound | 65 groups, the deciding matcher on the 65th | `https://example.com/target` | unknown | A truncated group layer must not decide → `unknown` with a reason, never a silent verdict (§4). |
+| T29 | F4 queryPrefix | one `allow=true` group `queryPrefix="token="` | `https://example.com/a?token=123` | matches | QUERY applies the matcher's kind per split parameter (`matchQuery` — `&`, fallback `;`): the single parameter `token=123` prefix-matches `token=`. |
+|
+| T30 | F5 wildcard host | filter `host="*.example.com"`; sibling/group layer empty | `https://sub.example.com/x` | matches | AOSP `AuthorityEntry`: a leading `*` makes the host a case-insensitive **suffix** match; `https://example.com/x` (shorter) does **not** match. |
+
 
 **Accompanying invariants (asserted at 5.4, not per-row):**
 
@@ -257,22 +265,34 @@ consulted.
 → T6/T7; sibling path overriding a block group → T9/T10. Flag-off variant →
 T19–T21.
 
-**Implementation status (2026-10-08).** 5.2+5.3 shipped as
+**Implementation status (2026-10-09).** 5.2+5.3 shipped as
 `asc-manifest::uri_match::evaluate_filter_uri(filter, uri, assume_flag_on)`
 → three-valued `Verdict`, plus the 5.4 synthetic suite (`uri_match::tests`).
-It reuses `UriPartMatcher` (no new stored model, no reordering) and returns
-`CannotMatch`/`Matches`/`Unknown` exactly per the table: the deterministic
-rules (order, AND, empty-group, host dependency, sibling-path OR, allow/
-block, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`, flag-off) are decided;
-**`Pattern`/`AdvancedPattern` matchers and query content containing `+`
-return `Unknown`** because their semantics are the §6.3/§6.4 oracle open
-questions. `assumed_flag_on` is reported on every verdict. Exceeding an
-§4 bound (64 groups / 64 data / 256 parts / 1 MiB URI) yields `Unknown`.
-Not yet done: the 5.4 AOSP-oracle differential and real-APK fixtures (aapt2)
-— until the oracle runs, `pathPattern`/`pathAdvancedPattern` matchers and
-query `+` stay `unknown`. 5.5's CLI surface shipped as `asc-rs manifest
---match-uri <uri>` (text verdict lines + additive `uri_match` JSON); the
-GUI inspector surface was not added.
+It reuses `UriPartMatcher` (no new stored model, no reordering) and follows
+AOSP `matchData`/`matchGroupsToUri` against the pinned API 35 source
+(`android-15.0.0_r1`): ORDER, AND, empty-group, host dependency, sibling-path
+OR, allow/block, whole-part Exact/Prefix/Suffix, flag-off, and the §4 bounds
+(64 groups / 64 data / 256 parts / 1 MiB URI — exceeded ⇒ `Unknown`, never a
+silent truncation) are decided. The 2026-10-09 correctness audit added:
+`authMatch` when there is no path matcher (and no group, flag on) instead of a
+wrong `cannot match` (T19/T25); three-valued ordered-group resolution so an
+earlier `Unknown` group that could flip a later decision yields `Unknown` and
+a deterministically-false matcher makes its group `Cannot` (F3); QUERY now
+applies the matcher's kind per split parameter (`&`, fallback `;`) and `+` is
+a literal (`Uri.getQuery()` decodes with convertPlus=false) — `Pattern` /
+`AdvancedPattern` matchers alone still return `Unknown` because their glob
+semantics are the §6.3 oracle open question (F4); host compare is
+case-insensitive with `*`-prefix suffix wildcards, ports compare numerically,
+userinfo is stripped, and opaque/no-`://` or malformed URIs return `Unknown`
+instead of a guessed `cannot match` (F5); the `--match-uri` JSON report now
+covers activity-alias filters and tags each entry with its component kind,
+matching the text scope (F6). `assumed_flag_on` is reported on every verdict.
+5.5's CLI surface is `asc-rs manifest --match-uri <uri>` (text verdict lines
++ additive `uri_match` JSON); the GUI inspector surface was not added. Not
+yet done: the 5.4 AOSP-oracle differential and real-APK fixtures (aapt2) — no
+Android SDK/emulator on this machine, so `pathPattern`/`pathAdvancedPattern`
+glob semantics remain `unknown` and T1–T30 are source-confirmed (not yet
+oracle-run).
 
 
 **5.2 Data-model design.** Keep `UriRelativeFilterGroup { allow, data }`
@@ -329,9 +349,15 @@ suite and the oracle differential registered in
    "flag off" verdict is a separate row, not a footnote.
 3. **`PatternMatcher` corner cases** (lazy `.*` stops at the first literal
    occurrence, greedy `*`, `[ ]` sets and `{ }` ranges in the advanced
-   form, escaping `\\*`): the oracle decides, not prose.
-4. **Decoding details** (percent-encoding, `+` in queries, `;` fallback
-   when a query contains both separators) — oracle.
+   form, escaping `\\*`): the oracle decides, not prose. Until it runs,
+   `Pattern` / `AdvancedPattern` matchers from the filter return `Unknown`.
+4. **Decoding details.** Resolved from the pinned API 35 source (2026-10-09):
+   `Uri.getPath()/getQuery()/getFragment()` percent-decode with
+   `convertPlus=false`, so `%21`→`!` and a literal `+` **stays** `+` (Fixed to
+   return Unknown only for bad escapes / non-UTF-8; the `;` fallback applies
+   only when the query has no `&`). Still an oracle boundary: how
+   `PatternMatcher` treats a decoded `+`/`%XX` inside a glob pattern, and the
+   1 MiB URI cap vs. any real-world ceiling.
 5. **Not in scope for the first cut:** intent *resolution* scoring
    (priority, categories, MIME types, `<queries>`), `android:autoVerify`
    App Links verification, `pathAdvancedPattern` performance parity.

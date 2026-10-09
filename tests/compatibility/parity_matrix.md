@@ -142,3 +142,28 @@ will be exercised automatically by the differential runner:
 5. Run `tests/differential/run_differential.py --selftest` to confirm
    the harness still produces the expected PASS/FAIL/SKIP pattern, then
    run it against your asc-rs build to confirm parity.
+## `manifest --match-uri` — AOSP-API-35 oracle differential (roadmap 5.6, PENDING)
+
+The `--match-uri <uri>` evaluator (`asc_manifest::uri_match::evaluate_filter_uri`)
+is a three-valued `matches` / `cannot match` / `unknown` verdict. Its truth is
+the Android framework's `IntentFilter.matchData` /
+`UriRelativeFilterGroup.matchGroupsToUri` against `/android.net.Uri`, **not**
+the Python oracle above (which has no such command). The acceptance rows
+T1–T30 in `docs/research/uri-relative-filter-groups.md` were source-confirmed
+against the pinned `android-15.0.0_r1` (API 35) code, but the live oracle
+differential has **not been run**: no Android SDK / emulator / Robolectric
+environment is available on this machine. Until it runs:
+
+- the deterministic rows (order, AND, empty-group, host dependency, sibling
+  OR, allow/block, authMatch, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`,
+  `+`-literal, case-insensitive/`*`-wildcard host, numeric port, userinfo,
+  bounds → Unknown) are treated as verified-by-source, not oracle-run;
+- `Pattern` / `AdvancedPattern` glob matchers remain `unknown` (§6.3);
+- aapt2-built real-APK fixtures for the element are still missing.
+
+How to run once an SDK/emulator is available: build the fixture (or Robolectric
+on the framework jar) per T1–T30, run `IntentFilter.matchData(type, scheme,
+Uri)` exactly as `matchDataAuthority` → path/group, and diff the boolean (with
+`flags=on|off`) against ASC-RS's three-valued verdict; record the Android API
+level, source revision (`android-15.0.0_r1`), flag state, and a pass/fail table
+here before closing roadmap 5.6.

@@ -32,7 +32,7 @@
 //! elements, a `<data>` at 256 matchers, and a URI at 1 MiB decoded;
 //! exceeding a bound yields `Unknown`, never a silent truncation.
 
-use crate::{IntentFilter, PathMatchKind, UriDependency, UriPart};
+use crate::{IntentFilter, PathMatchKind, UriDependency, UriPart, UriRelativeFilterGroup};
 
 const MAX_GROUPS: usize = 64;
 const MAX_DATA_PER_GROUP: usize = 64;
@@ -139,43 +139,57 @@ fn parse_uri(uri: &str) -> Option<UriParts> {
         None => (rest, None),
     };
     let query = dec(query)?;
-    // scheme + authority + path
-    let (scheme, rest2) = if let Some(colon) = rest.find("://") {
-        (Some(&rest[..colon]), &rest[colon + 3..])
-    } else {
-        (None, rest)
-    };
+    // A hierarchical URI with an authority must carry "://". A relative or
+    // opaque URI (no "://") has no authority/path we can host-match against,
+    // and this module refuses to guess → the parse fails (→ Unknown).
+    let colon = rest.find("://")?;
+    let (scheme, rest2) = (Some(&rest[..colon]), &rest[colon + 3..]);
     // authority ends at the first '/' (or is the whole rest)
     let (authority, path) = match rest2.find('/') {
         Some(slash) => (&rest2[..slash], Some(&rest2[slash..])),
         None => (rest2, None),
     };
-    let host;
-    let port;
-    if authority.is_empty() {
-        host = None;
-        port = None;
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, pt)) if !pt.is_empty() => {
-                host = Some(h.to_string());
-                port = Some(pt.to_string());
-            }
-            _ => {
-                host = Some(authority.to_string());
-                port = None;
-            }
-        }
-    }
     let path = dec(path)?;
+    let (host, port) = split_authority(authority)?;
     Some(UriParts {
-        scheme: Some(scheme.map(str::to_string).unwrap_or_default()).filter(|s| !s.is_empty()),
+        scheme: scheme.map(str::to_string).filter(|s| !s.is_empty()),
         host,
         port,
         path,
         query,
         fragment,
     })
+}
+
+/// Split an authority into `(host, port)` the way `android.net.Uri` does
+/// (`AbstractHierarchicalUri.parseHost` / `parsePort`): strip the userinfo at
+/// the last `@`, then treat only a trailing `:digits` as the port (interior
+/// colons — an IPv6 literal `[::1]` — are never a port separator). The host is
+/// percent-decoded (`getHost()`); a non-numeric/empty port is absent
+/// (`getPort()` would be `-1`). Returns `None` when the host cannot be decoded.
+fn split_authority(authority: &str) -> Option<(Option<String>, Option<String>)> {
+    if authority.is_empty() {
+        return Some((None, None));
+    }
+    // AOSP uses `authority.lastIndexOf('@')` to strip userinfo.
+    let auth = match authority.rsplit_once('@') {
+        Some((_, rest)) => rest,
+        None => authority,
+    };
+    // Find a trailing run of ASCII digits preceded by ':' (AOSP findPortSeparator).
+    let bytes = auth.as_bytes();
+    let mut j = auth.len();
+    while j > 0 && bytes[j - 1].is_ascii_digit() {
+        j -= 1;
+    }
+    let (host_raw, port) = if j > 0 && bytes[j - 1] == b':' {
+        (&auth[..j - 1], Some(&auth[j..]))
+    } else {
+        (auth, None)
+    };
+    let host = percent_decode(host_raw)?;
+    let port = port.and_then(|p| p.parse::<i32>().ok().map(|_| p.to_string()));
+    Some((if host.is_empty() { None } else { Some(host) }, port))
 }
 
 /// Match a single `(kind, value)` matcher against a whole part (`None` =
@@ -199,24 +213,198 @@ fn match_part(kind: PathMatchKind, value: &str, part: Option<&str>) -> Result<bo
     }
 }
 
-/// R8: a QUERY matcher matches any single parameter, split on `&` then `;`.
-fn query_has_param(value: &str, query: Option<&str>) -> Result<bool, String> {
+/// R8: a QUERY matcher matches any single parameter, split on `&` (falling
+/// back to `;` only when the query has no `&` — AOSP `matchQuery`), each
+/// parameter tested with the matcher's *kind* (F4). A literal `+` is kept as
+/// `+` (AOSP `Uri.getQuery()` decodes with convertPlus=false). Returns `Err`
+/// for an unevaluable kind (Pattern / AdvancedPattern), never a guessed match.
+fn query_has_param(kind: PathMatchKind, value: &str, query: Option<&str>) -> Result<bool, String> {
     let Some(q) = query else {
         return Ok(false);
     };
-    if q.contains('+') {
-        return Err("query contains '+' whose decoding is oracle-open".to_string());
+    // AOSP: split on '&'; when that yields one element (no '&'), split on ';'.
+    let sep = if q.contains('&') { '&' } else { ';' };
+    for param in q.split(sep) {
+        match match_part(kind, value, Some(param)) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
     }
-    let mut params: Vec<&str> = if q.contains('&') {
-        q.split('&').collect()
+    Ok(false)
+}
+
+/// Three-valued helper for a single decision (used inside the path/group
+/// layer). `Unknown` = the module cannot determine the outcome from the
+/// data it accepts to evaluate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tri {
+    Match,
+    Cannot,
+    Unknown,
+}
+
+/// AOSP `AuthorityEntry.match` (F5): a filter host with a leading `*` is a
+/// wildcard — it matches any URI host that *ends with* the remainder,
+/// case-insensitive, and never a shorter host. A non-wildcard host is
+/// compared case-insensitively (`compareToIgnoreCase`, despite the stale
+/// "case-sensitive" doc comment). Byte-safe: a decoded host may contain
+/// multi-byte UTF-8, so the suffix compare slices bytes, never char cells.
+fn host_matches(filter_host: &str, uri_host: &str) -> bool {
+    let uri = uri_host.as_bytes();
+    match filter_host.strip_prefix('*') {
+        Some(base) => {
+            let b = base.as_bytes();
+            uri.len() >= b.len() && uri[uri.len() - b.len()..].eq_ignore_ascii_case(b)
+        }
+        None => uri.eq_ignore_ascii_case(filter_host.as_bytes()),
+    }
+}
+
+/// AOSP `AuthorityEntry.match` port rule (F5): a filter declaring a port
+/// requires the URI port to match *numerically* (`mPort == data.getPort()`,
+/// where a missing URI port is `-1`); a filter without a port matches any /
+/// absent port.
+fn port_matches(filter_port: Option<&str>, uri_port: Option<&str>) -> bool {
+    match filter_port {
+        None => true,
+        Some(fp) => match fp.parse::<i32>() {
+            Ok(f) => uri_port.and_then(|up| up.parse::<i32>().ok()) == Some(f),
+            Err(_) => false,
+        },
+    }
+}
+
+/// R3/R7/R8: match one `(kind, value)` matcher from a group against its URI
+/// part, as `Tri`. An absent part never matches (R7/R8); a non-oracle-confirmed
+/// kind (Pattern / AdvancedPattern) is `Unknown`.
+fn match_tri(kind: PathMatchKind, value: &str, part: Option<&str>) -> Tri {
+    match match_part(kind, value, part) {
+        Ok(true) => Tri::Match,
+        Ok(false) => Tri::Cannot,
+        Err(_) => Tri::Unknown,
+    }
+}
+
+/// Match every matcher of one group against `p`. A group's `<data>` children
+/// (and each child's `parts`) are **ANDed** (R3): any deterministically-false
+/// matcher makes the whole group `Cannot` regardless of any `Unknown` sibling
+/// (a group that cannot match provably has no effect). A group with no
+/// matchers at all never matches (an attribute-less `<data>` contributes none).
+fn group_match(g: &UriRelativeFilterGroup, p: &UriParts) -> Tri {
+    let mut saw_matcher = false;
+    let mut any_unknown = false;
+    for data in &g.data {
+        for m in &data.parts {
+            saw_matcher = true;
+            let res = match m.part {
+                // Query matches any single parameter with the matcher's kind (R8/F4).
+                UriPart::Query => query_has_param(m.kind, &m.value, p.query.as_deref()),
+                UriPart::Path => match_part(m.kind, &m.value, p.path.as_deref()),
+                UriPart::Fragment => match_part(m.kind, &m.value, p.fragment.as_deref()),
+            };
+            match res {
+                Ok(true) => {}
+                Ok(false) => return Tri::Cannot,
+                Err(_) => any_unknown = true,
+            }
+        }
+    }
+    if !saw_matcher {
+        Tri::Cannot // R3: a group with zero filters can never match
+    } else if any_unknown {
+        Tri::Unknown
     } else {
-        q.split(';').collect()
-    };
-    if params.len() == 1 {
-        // AOSP: when a single element, re-split on ';'.
-        params = q.split(';').collect();
+        Tri::Match
     }
-    Ok(params.contains(&value))
+}
+
+/// Evaluate the ordered group layer (R6, three-valued). AOSP
+/// `matchGroupsToUri` returns on the *first* group that matches, by its `allow`
+/// flag; later groups are never consulted. First-match-wins plus Unknown means:
+/// the outcome is a definite `Match` iff every resolution of the unknown groups
+/// allows, a definite `Cannot` iff every resolution blocks (`false`), and
+/// `Unknown` when an earlier uncertain group could flip a later decision.
+fn group_layer(groups: &[UriRelativeFilterGroup], p: &UriParts) -> (Tri, Vec<String>) {
+    // First definitely-matching group (if any) + the uncertain groups before it
+    // (only those can ever become the first matching group under some resolution).
+    let mut first_def: Option<&UriRelativeFilterGroup> = None;
+    let mut pre_unknown: Vec<&UriRelativeFilterGroup> = Vec::new();
+    for g in groups {
+        match group_match(g, p) {
+            Tri::Match => {
+                first_def = Some(g);
+                break;
+            }
+            Tri::Unknown => pre_unknown.push(g),
+            Tri::Cannot => {}
+        }
+    }
+    // base = result when every pre-unknown group is resolved to "doesn't match".
+    let base = first_def.is_some_and(|g| g.allow);
+    // possible_true/false over all 2^n resolutions of the pre-unknown groups.
+    let possible_true = base || pre_unknown.iter().any(|g| g.allow);
+    let possible_false = !base || pre_unknown.iter().any(|g| !g.allow);
+    match (possible_true, possible_false) {
+        (true, true) => (
+            Tri::Unknown,
+            vec![
+                "group-layer verdict depends on an earlier group whose matching is \
+                 oracle-unevaluated (ordered first-match)"
+                    .to_string(),
+            ],
+        ),
+        (true, false) => (
+            Tri::Match,
+            vec!["first matching group has android:allow=true".to_string()],
+        ),
+        (false, true) => {
+            // Some resolution blocks, none allows: either a matching block
+            // group, or no group matches.
+            let reason = if pre_unknown.is_empty() {
+                match first_def {
+                    Some(g) if !g.allow => "first matching group has android:allow=false (block)",
+                    _ => "no group matched",
+                }
+            } else {
+                "some group blocks and none can allow (no definite allow group)"
+            };
+            (Tri::Cannot, vec![reason.to_string()])
+        }
+        (false, false) => unreachable!("possible_true or possible_false is always true"),
+    }
+}
+
+/// F2: before truncating a group layer we refuse to evaluate beyond a bound,
+/// return `Some(reason)` → the caller returns `Unknown`. The bounds are only
+/// relevant when the groups are actually consulted (flag on).
+fn group_layer_overflow(groups: &[UriRelativeFilterGroup]) -> Option<String> {
+    if groups.len() > MAX_GROUPS {
+        return Some(format!(
+            "uri-relative-filter-group count {0} exceeds the {1} limit",
+            groups.len(),
+            MAX_GROUPS
+        ));
+    }
+    for g in groups {
+        if g.data.len() > MAX_DATA_PER_GROUP {
+            return Some(format!(
+                "<data> count {0} in a group exceeds the {1} limit",
+                g.data.len(),
+                MAX_DATA_PER_GROUP
+            ));
+        }
+        for d in &g.data {
+            if d.parts.len() > MAX_PARTS_PER_DATA {
+                return Some(format!(
+                    "matcher count {0} in a <data> exceeds the {1} limit",
+                    d.parts.len(),
+                    MAX_PARTS_PER_DATA
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// Evaluate the path/group layer of `filter` against `uri`.
@@ -224,6 +412,13 @@ fn query_has_param(value: &str, query: Option<&str>) -> Result<bool, String> {
 /// `assume_flag_on` is the assumed value of
 /// `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS`; when `false`, groups are
 /// ignored entirely (R10) and only the filter's own path matchers apply.
+///
+/// The verdict is three-valued and follows AOSP `IntentFilter.matchData`
+/// (verified against the pinned API 35 source): when the authority matched and
+/// the filter declares **no path matcher and no group** (flag on) — or no path
+/// matcher at all with the flag off — the path layer is `authMatch` and the
+/// URI *matches* (F1). Otherwise the path layer matches iff any sibling path
+/// matcher matches (R5 OR) or the ordered group layer allows.
 pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) -> Verdict {
     let on = assume_flag_on;
     let Some(p) = parse_uri(uri) else {
@@ -265,11 +460,7 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
             let host_ok = match &p.host {
                 None => false,
                 Some(h) => eff.authorities.iter().any(|a| {
-                    a.host == *h
-                        && match &a.port {
-                            Some(fp) => p.port.as_deref() == Some(fp.as_str()),
-                            None => true,
-                        }
+                    host_matches(&a.host, h) && port_matches(a.port.as_deref(), p.port.as_deref())
                 }),
             };
             if !host_ok {
@@ -282,96 +473,101 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
         }
     }
 
-    // R5: sibling path matcher (OR) — deterministic first.
-    let mut sibling_uncertain = false;
-    let mut sibling_matched = false;
-    for pm in eff.paths.iter() {
-        match match_part(pm.kind, &pm.value, p.path.as_deref()) {
-            Ok(true) => {
-                sibling_matched = true;
-            }
-            Ok(false) => {}
-            Err(_) => {
-                sibling_uncertain = true;
-            }
+    // F1: a filter with no sibling path matcher and (flag on) no group leaves
+    // the path layer as `authMatch` → it matches (AOSP `paths == null [&&
+    // groups == null] → match = authMatch`). With the flag off the same
+    // applies whenever there is no sibling path at all (groups are ignored).
+    if !on {
+        if eff.paths.is_empty() {
+            return verdict(
+                UriMatchVerdict::Matches,
+                on,
+                vec![
+                    "authMatch: no path matcher and the group layer is ignored (flag off)"
+                        .to_string(),
+                ],
+            );
         }
-    }
-    if sibling_matched {
+    } else if eff.paths.is_empty() && f.uri_relative_groups.is_empty() {
         return verdict(
             UriMatchVerdict::Matches,
             on,
-            vec!["a filter-level path matcher matched (R5)".to_string()],
+            vec![
+                "authMatch: URI matches at the scheme/host level; no path matcher and no \
+                 relative group narrow it"
+                    .to_string(),
+            ],
         );
     }
 
-    // R6: ordered groups (only when the flag is on).
-    let mut group_uncertain = false;
-    if on {
-        for group in f.uri_relative_groups.iter().take(MAX_GROUPS) {
-            if group.data.is_empty() {
-                continue; // R3: an empty group never matches.
-            }
-            let mut group_matched = true;
-            'group: for data in group.data.iter().take(MAX_DATA_PER_GROUP) {
-                if data.parts.is_empty() {
-                    group_matched = false;
-                    break;
-                }
-                for part in data.parts.iter().take(MAX_PARTS_PER_DATA) {
-                    let res = match part.part {
-                        UriPart::Query => query_has_param(&part.value, p.query.as_deref()),
-                        UriPart::Path => match_part(part.kind, &part.value, p.path.as_deref()),
-                        UriPart::Fragment => {
-                            match_part(part.kind, &part.value, p.fragment.as_deref())
-                        }
-                    };
-                    match res {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            group_matched = false;
-                            break 'group;
-                        }
-                        Err(_) => {
-                            group_uncertain = true;
-                            group_matched = false;
-                            break 'group;
-                        }
-                    }
-                }
-            }
-            if group_matched {
-                // First matching group decides (R6).
-                return if group.allow {
-                    verdict(
-                        UriMatchVerdict::Matches,
-                        on,
-                        vec!["first matching group has android:allow=true".to_string()],
-                    )
-                } else {
-                    verdict(
-                        UriMatchVerdict::CannotMatch,
-                        on,
-                        vec!["first matching group has android:allow=false (block)".to_string()],
-                    )
-                };
-            }
-        }
+    // F2: refuse to give a definite verdict on a truncated group layer.
+    if on && let Some(reason) = group_layer_overflow(&f.uri_relative_groups) {
+        return verdict(UriMatchVerdict::Unknown, on, vec![reason]);
     }
 
-    // No sibling path matched and no group decided.
-    if sibling_uncertain || group_uncertain {
-        verdict(
-            UriMatchVerdict::Unknown,
+    // R5: sibling path matchers are ORed with the group layer.
+    let (sib, sib_reasons) = sibling_or(&eff.paths, p.path.as_deref());
+    let (grp, grp_reasons) = if on {
+        group_layer(&f.uri_relative_groups, &p)
+    } else {
+        (Tri::Cannot, Vec::new())
+    };
+
+    // OR over the three-valued layer results: a definite match wins; else any
+    // uncertainty wins; else no-match.
+    match (sib, grp) {
+        (Tri::Match, _) => verdict(
+            UriMatchVerdict::Matches,
             on,
-            vec!["path/group match depends on an oracle-unevaluated pattern".to_string()],
+            vec!["a filter-level path matcher matched (R5)".to_string()],
+        ),
+        (_, Tri::Match) => verdict(UriMatchVerdict::Matches, on, grp_reasons),
+        (Tri::Unknown, _) | (_, Tri::Unknown) => {
+            let mut reasons = sib_reasons;
+            reasons.extend(grp_reasons);
+            if reasons.is_empty() {
+                reasons
+                    .push("path/group match depends on an oracle-unevaluated pattern".to_string());
+            }
+            verdict(UriMatchVerdict::Unknown, on, reasons)
+        }
+        (Tri::Cannot, _) => {
+            let mut reasons = grp_reasons;
+            if reasons.is_empty() {
+                reasons.push(if !on {
+                    "no path layer match and groups are ignored (flag off)".to_string()
+                } else {
+                    "no path matcher and no group matched".to_string()
+                });
+            }
+            verdict(UriMatchVerdict::CannotMatch, on, reasons)
+        }
+    }
+}
+
+/// R5: OR over the filter's own sibling path matchers, three-valued.
+fn sibling_or(paths: &[crate::PathMatcher], path: Option<&str>) -> (Tri, Vec<String>) {
+    let mut any_match = false;
+    let mut any_unknown = false;
+    for pm in paths {
+        match match_tri(pm.kind, &pm.value, path) {
+            Tri::Match => any_match = true,
+            Tri::Cannot => {}
+            Tri::Unknown => any_unknown = true,
+        }
+    }
+    if any_match {
+        (
+            Tri::Match,
+            vec!["a filter-level path matcher matched (R5)".to_string()],
+        )
+    } else if any_unknown {
+        (
+            Tri::Unknown,
+            vec!["filter-level path match depends on an oracle-unevaluated pattern".to_string()],
         )
     } else {
-        let reason = if !on {
-            "no path layer match and groups are ignored (flag off)"
-        } else {
-            "no path matcher and no group matched"
-        };
-        verdict(UriMatchVerdict::CannotMatch, on, vec![reason.to_string()])
+        (Tri::Cannot, Vec::new())
     }
 }
 
@@ -617,7 +813,9 @@ mod tests {
 
     #[test]
     fn flag_off_ignores_groups() {
-        // T19: flag off → group that would allow is ignored → CannotMatch.
+        // T19: flag off → group (the only matcher) is ignored → the filter has
+        // no sibling path, so AOSP `matchData` takes `paths == null` →
+        // `match = authMatch` → it MATCHES (F1; source-confirmed).
         let f = base_filter(
             vec![group(
                 true,
@@ -627,7 +825,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/a/b", false).outcome,
-            UriMatchVerdict::CannotMatch
+            UriMatchVerdict::Matches
         );
         // T20: flag off, sibling path still matches.
         let f2 = base_filter(
@@ -655,5 +853,556 @@ mod tests {
         let v = evaluate_filter_uri(&f, "https://example.com/x", true);
         assert_eq!(v.outcome, UriMatchVerdict::Unknown);
         assert!(!v.reasons.is_empty(), "unknown always explains itself");
+    }
+
+    // ---- F1: authMatch when there is no path matcher (and no group, flag on) ----
+
+    #[test]
+    fn no_path_no_group_authmatch_matches() {
+        // scheme+host filter with neither a path nor a group: AOSP
+        // `paths == null && groups == null → match = authMatch` → Matches.
+        let f = base_filter(vec![], vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        // Flag off, no path at all → the flag-off branch is `paths == null` → authMatch.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", false).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn groups_present_but_none_match_is_cannot() {
+        // paths==null but a group exists (and none match) → NOT the authMatch
+        // short-circuit → CannotMatch.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "/z")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    // ---- F2: bounds never silently truncate a decision ----
+
+    fn groups_matching_last(how_many: usize, target_at: usize) -> Vec<UriRelativeFilterGroup> {
+        (0..how_many)
+            .map(|i| {
+                let value = if i == target_at {
+                    "/target".to_string()
+                } else {
+                    format!("/g{i}")
+                };
+                group(
+                    true,
+                    vec![part(UriPart::Path, PathMatchKind::Exact, &value)],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn group_count_boundary_exact_cap_ok() {
+        // Exactly MAX_GROUPS groups; the last one decides → deterministic.
+        let f = base_filter(groups_matching_last(MAX_GROUPS, MAX_GROUPS - 1), vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/target", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn group_count_boundary_over_cap_unknown() {
+        // MAX_GROUPS + 1 groups where the deciding matcher sits past the cap →
+        // would be truncated → Must be Unknown, never a definite verdict.
+        let f = base_filter(groups_matching_last(MAX_GROUPS + 1, MAX_GROUPS), vec![]);
+        let v = evaluate_filter_uri(&f, "https://example.com/target", true);
+        assert_eq!(v.outcome, UriMatchVerdict::Unknown);
+        assert!(!v.reasons.is_empty(), "bounds-reason must explain itself");
+        // …and the overflow does not fire when the groups are ignored (flag off).
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/target", false).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn data_and_parts_bounds_unknown() {
+        // A group with > MAX_DATA_PER_GROUP <data> children. The in-cap 64 all
+        // match "/same"; the 65th (overflow) would veto → Unknown, not a
+        // truncated definite verdict.
+        let mut datas: Vec<_> = (0..MAX_DATA_PER_GROUP)
+            .map(|_| RelativeDataSpec {
+                parts: vec![part(UriPart::Path, PathMatchKind::Exact, "/same")],
+            })
+            .collect();
+        datas.push(RelativeDataSpec {
+            parts: vec![part(UriPart::Path, PathMatchKind::Exact, "/different")],
+        });
+        let g = UriRelativeFilterGroup {
+            allow: true,
+            data: datas,
+        };
+        let f = base_filter(vec![g], vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+
+        // A group whose sole <data> has > MAX_PARTS_PER_DATA matchers, the
+        // decision sitting past the limit.
+        let mut parts: Vec<_> = (0..MAX_PARTS_PER_DATA)
+            .map(|_| part(UriPart::Path, PathMatchKind::Exact, "/same"))
+            .collect();
+        // 257th matcher would veto the in-cap match → truncating it would flip
+        // Matches→CannotMatch, so the verdict must be Unknown.
+        parts.push(part(UriPart::Path, PathMatchKind::Exact, "/different"));
+        let g = UriRelativeFilterGroup {
+            allow: true,
+            data: vec![RelativeDataSpec { parts }],
+        };
+        let f = base_filter(vec![g], vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+        // Boundary N is within the cap and stays deterministic: MAX_PARTS_PER_DATA
+        // matchers that are all satisfiable together (all equal) → Matches.
+        let parts: Vec<_> = (0..MAX_PARTS_PER_DATA)
+            .map(|_| part(UriPart::Path, PathMatchKind::Exact, "/same"))
+            .collect();
+        let g = UriRelativeFilterGroup {
+            allow: true,
+            data: vec![RelativeDataSpec { parts }],
+        };
+        let f = base_filter(vec![g], vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    // ---- F3: three-valued logic & ordered groups ----
+
+    #[test]
+    fn unknown_block_then_definite_allow_is_unknown() {
+        // Group1 matches ⇔ unknown, and is a BLOCK; Group2 definitively allows.
+        // If group1 matches it blocks (later groups not consulted); if not,
+        // group2 allows → verdict depends on the unknown → Unknown.
+        let f = base_filter(
+            vec![
+                group(
+                    false,
+                    vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
+                ),
+                group(true, vec![part(UriPart::Path, PathMatchKind::Exact, "/x")]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn unknown_allow_then_definite_block_is_unknown() {
+        let f = base_filter(
+            vec![
+                group(
+                    true,
+                    vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
+                ),
+                group(false, vec![part(UriPart::Path, PathMatchKind::Exact, "/x")]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn unknown_allow_group_alone_is_unknown() {
+        // Only source of a possible match is unknown-allow → Unknown.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn unknown_block_group_alone_is_certain_cannot() {
+        // A lone unknown-BLOCK group: if it matched it blocks, if not nothing
+        // else matches → either resolution gives CannotMatch.
+        let f = base_filter(
+            vec![group(
+                false,
+                vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn sibling_unknown_plus_definite_block_group_is_unknown() {
+        // An unevaluable sibling path is ORed with the group layer (R5): a
+        // definitive block group cannot override it → Unknown, not CannotMatch.
+        let mut f = base_filter(
+            vec![group(
+                false,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "/blocked")],
+            )],
+            vec![path_data("/public")],
+        );
+        f.data.push(DataSpec {
+            path_pattern: Some("/a.*".into()),
+            ..DataSpec::default()
+        });
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/blocked", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn sibling_definite_match_plus_unknown_block_group_matches() {
+        let f = base_filter(
+            vec![group(
+                false,
+                vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
+            )],
+            vec![path_data("/public")],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/public", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn group_with_definite_false_and_unknown_is_cannot() {
+        // Group1 ANDs an unknown matcher with a provably-false one → it cannot
+        // match, so it contributes no uncertainty; Group2's definite allow
+        // decides → Matches.
+        let f = base_filter(
+            vec![
+                group(
+                    true,
+                    vec![
+                        part(UriPart::Path, PathMatchKind::Pattern, "/x"),
+                        part(UriPart::Query, PathMatchKind::Exact, "token=NO"),
+                    ],
+                ),
+                group(true, vec![part(UriPart::Path, PathMatchKind::Exact, "/ok")]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/ok?token=1", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn provably_cannot_match_group_does_not_affect_result() {
+        // Group1 is unknown but provably cannot match (definite-false AND);
+        // Group2 definite allow → Matches (not Unknown).
+        let f = base_filter(
+            vec![
+                group(
+                    true,
+                    vec![
+                        part(UriPart::Path, PathMatchKind::Pattern, "/anything"),
+                        part(UriPart::Path, PathMatchKind::Exact, "/not-here"),
+                    ],
+                ),
+                group(true, vec![part(UriPart::Path, PathMatchKind::Exact, "/ok")]),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/ok", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    // ---- F4: QUERY matcher respects its kind ----
+
+    #[test]
+    fn query_prefix_matches_single_param() {
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Prefix, "token=")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?token=123", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?x=1&token=456", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?tocado=1", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn query_suffix_matches() {
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Suffix, "=done")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?state=done", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?state=do", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn query_pattern_and_advanced_pattern_are_unknown() {
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Pattern, "token=.*")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?token=x", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+        let f2 = base_filter(
+            vec![group(
+                true,
+                vec![part(
+                    UriPart::Query,
+                    PathMatchKind::AdvancedPattern,
+                    "token=[0-9]+",
+                )],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com/a?token=1", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn query_plus_is_literal() {
+        // AOSP Uri.getQuery() decodes with convertPlus=false → '+' stays '+'.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Exact, "token=a+b")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?token=a+b", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?token=a%20b", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn query_decoded_escapes_before_splitting() {
+        // getQuery() percent-decodes first; %3D inside a param becomes '='.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Exact, "token=a=b")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?token=a%3Db", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        // Empty parameter and duplicates don't change the semantics.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Prefix, "token")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?token=1&token=2", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn query_mixed_separators_split_on_amp() {
+        // With an '&' present AOSP splits only on '&'; the ';' stays inside a param.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Prefix, "tok")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?a=1;tok=2&b=3", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // Without '&' it falls back to ';'.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a?a=1;tok=2;b=3", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    // ---- F5: authority matching & URI parsing ----
+
+    fn authority_filter(
+        host: &str,
+        port: Option<&str>,
+        groups: Vec<UriRelativeFilterGroup>,
+    ) -> IntentFilter {
+        let data = DataSpec {
+            scheme: Some("https".into()),
+            host: Some(host.into()),
+            port: port.map(str::to_string),
+            ..DataSpec::default()
+        };
+        IntentFilter {
+            data: vec![data],
+            uri_relative_groups: groups,
+            ..IntentFilter::default()
+        }
+    }
+
+    #[test]
+    fn host_match_is_case_insensitive() {
+        // AOSP AuthorityEntry uses compareToIgnoreCase despite the stale note.
+        let f = authority_filter("example.com", None, vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://EXAMPLE.COM/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn wildcard_host_is_suffix_match() {
+        let f = authority_filter("*.example.com", None, vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://sub.example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://deep.sub.example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        // AOSP: a wildcard host must be no longer than the data host.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://other.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // A decoded host with multi-byte UTF-8 must not panic the byte-based
+        // suffix compare and must not match.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com\u{00e9}/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn userinfo_is_stripped() {
+        let f = authority_filter("example.com", None, vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://user:pass@example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn port_matches_numerically() {
+        let f = authority_filter("example.com", Some("8080"), vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com:8080/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com:08080/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com:8081/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // A filter-declared port never matches a URI without one (getPort()==-1).
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn opaque_and_no_authority_uris_are_unknown() {
+        let f = authority_filter("example.com", None, vec![]);
+        // No "://": relative/opaque URI has no authority we can host-match.
+        assert_eq!(
+            evaluate_filter_uri(&f, "myapp:foo", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn ipv6_authority_parses_without_mangling() {
+        let f = authority_filter("[::1]", Some("8080"), vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://[::1]:8080/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        let f2 = authority_filter("[::1]", None, vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://[::1]/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
     }
 }
