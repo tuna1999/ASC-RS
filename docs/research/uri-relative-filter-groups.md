@@ -294,7 +294,7 @@ Android SDK/emulator on this machine, so `pathPattern`/`pathAdvancedPattern`
 glob semantics remain `unknown` and T1–T30 are source-confirmed (not yet
 oracle-run).
 
-**v0.19.1 follow-up audit (2026-10-09).** Two more source-confirmed fixes:
+**v0.19.2 follow-up audit (2026-10-09).** Two more source-confirmed fixes:
 **empty path ≠ null** — a hierarchical URI with no path separator (`https://
 example.com`, with a `?`/`#` too) has `Uri.getPath() == ""` (AOSP `parsePath`
 returns `""` at the `?/#/end` boundary, not null), so a sibling/group `path=""`

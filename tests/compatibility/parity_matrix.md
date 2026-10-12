@@ -164,7 +164,7 @@ environment is available on this machine. Until it runs:
 How to run once an SDK/emulator is available: the asc-rs side is already
 runnable — `python tests/differential/run_uri_oracle.py` drives
 `asc-manifest/examples/eval_uri.rs` over `tests/fixtures/uri_match_cases.json`
-(36 fixtures incl. the v0.19.1 F1 empty-path and F2 backslash rows) and returns
+(36 fixtures incl. the v0.19.2 F1 empty-path and F2 backslash rows) and returns
 0 iff every verdict equals `source_expected`. The Android side is
 `reference/oracle/uri_match/UriOracle.java` (Robolectric, **not executed here**)
 which builds each fixture's `IntentFilter`, runs `matchData(type, scheme, Uri)`
