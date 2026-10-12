@@ -348,13 +348,22 @@ made the oracle reproducible.
   `src/test/java/us/ascrs/urioracle/UriOracle.java`. Correctness fixes:
   the `scheme` passed to `matchData(type, scheme, data)` is now the **input
   URI's** scheme (`Uri.parse(uri).getScheme()`), not the filter's pooled
-  `<data>` scheme; `flag_on` is threaded and asserted against the framework's
-  frozen aconfig state (the flag is NOT runtime-toggleable from Robolectric —
-  both sides need two framework builds or an emulator switch), with the
-  mechanism recorded in `provenance.flag_mechanism` (an `UNKNOWN` mechanism ⇒
-  the file is `UNVERIFIED_SKIPPED`); output is `build/oracle_verdicts.json`
-  `{verdicts, provenance}`. **Not compiled/run**: no JDK / Android SDK /
-  Gradle on this machine — every oracle row stays `NOT_RUN` / `UNVERIFIED`.
+  `<data>` scheme. **Flag state is VERIFIED, not assumed**: `UriOracle`
+  reads the build's ACTUAL frozen aconfig state via
+  `android.content.pm.Flags.relativeReferenceIntentFilters()` into
+  `provenance.flag_state_actual` and only emits a verdict for a case whose
+  required `flag_on` equals it; every other case lands in
+  `provenance.flag_skipped`. If the flag state cannot be read the test fails
+  closed (writes nothing, `status` `UNVERIFIED_SKIPPED`). The flag is NOT
+  runtime-toggleable from Robolectric, so exercising both states takes two
+  android-all builds (an `UNKNOWN`/absent `flag_mechanism` ⇒ `UNVERIFIED_SKIPPED`).
+  The runner (`run_uri_oracle.py`) treats any such file — missing/invalid/
+  `UNVERIFIED_SKIPPED` provenance, or missing/duplicate/unexpected verdicts —
+  as a hard error (exit 1) and never emits `ORACLE-CONFIRMED` from it; a
+  resolved asc-rs `unknown` is `ORACLE-OPEN`, not confirmed. Output is
+  `build/oracle_verdicts.json` `{verdicts, provenance}`. **Not compiled/run**:
+  no JDK / Android SDK / Gradle on this machine — every oracle row stays
+  `NOT_RUN` / `UNVERIFIED`.
 - **Fixture coverage grew to 51 cases** — added the missing acceptance rows
   T9, T15b, T17, T21, T22, T26, T27, T28 plus D1–D4 (scheme mismatch, host
   mismatch, wildcard apex/not-sibling boundaries, ASCII case-insensitive host)

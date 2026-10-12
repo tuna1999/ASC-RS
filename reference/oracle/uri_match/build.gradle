@@ -4,9 +4,16 @@
 // JDK / Android SDK / Gradle). The dependency versions and the flag-control
 // recipe below are a documented starting point; a maintainer with the
 // environment must verify them (see README.md) before any oracle_verdicts.json
-// is treated as authoritative.
+// is treated as authoritative. The runner (tests/differential/run_uri_oracle.py)
+// rejects any oracle file whose provenance cannot prove its flag state.
+//
+// This is a plain `java` project: Robolectric tests run via JUnit + the
+// RobolectricTestRunner and do not need the `org.robolectric` Gradle plugin
+// (that plugin is Android-AGP sugar). The Android API-35 compile/runtime
+// classpath (android-all-instrumented) is resolved by Robolectric itself at
+// test time from Maven Central per @Config(sdk = 35); offline maintainers must
+// have that android-all artifact in their local ~/.m2.
 apply plugin: 'java'
-apply plugin: 'org.robolectric'
 
 repositories {
     mavenCentral()
@@ -19,13 +26,19 @@ ext {
     oracleOut    = file("${buildDir}/oracle_verdicts.json").canonicalPath
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 dependencies {
     testImplementation 'junit:junit:4.13.2'
-    // Robolectric 4.14+ can resolve android-all for API 35 (Android 15).
-    // NOTE: an API-35 android-all artifact MUST be present in the local
-    // ~/.m2 or resolvable from Maven Central, and its aconfig flag state
-    // for FLAG_RELATIVE_REFERENCE_INTENT_FILTERS must be known (see README
-    // "Flag handling").
+    // Robolectric 4.14+ resolves the android-all-instrumented artifact for
+    // API 35 (Android 15) from Maven Central. The aconfig flag state of that
+    // exact android-all build for FLAG_RELATIVE_REFERENCE_INTENT_FILTERS is
+    // READ at runtime by UriOracle (android.content.pm.Flags) and recorded in
+    // provenance — see README "Flag handling". A maintainer must pin the
+    // android-all version they use and record it.
     testImplementation 'org.robolectric:robolectric:4.14.1'
 }
 
@@ -33,7 +46,9 @@ test {
     useJUnit()
     systemProperty 'uri.fixtures', uriFixtures
     systemProperty 'uri.oracle.out', oracleOut
-    // Document which flag-control mechanism was used. See README "Flag handling".
+    // Document which flag-control mechanism produced this build's flag state.
+    // See README "Flag handling" — a value of UNKNOWN makes UriOracle fail
+    // closed (status UNVERIFIED_SKIPPED) and the runner rejects the file.
     systemProperty 'uri.flag.mechanism', System.getenv('URI_FLAG_MECHANISM') ?: 'UNKNOWN'
     testLogging { events 'passed', 'failed' }
 }

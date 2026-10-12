@@ -30,7 +30,9 @@ verdict matches `source_expected` but has never been diffed against the
 framework, `UNSUPPORTED` where asc-rs deliberately returns `unknown` (glob,
 opaque URI, bound overflow), and a genuine `SOURCE-MISMATCH` / `ORACLE-MISMATCH`
 only when a real divergence exists. Skipped oracle rows are never counted as
-verified passes.
+verified passes, and the runner **refuses any oracle file whose provenance
+cannot prove its run and its flag state** (it exits 1 rather than confirming
+from an unverified file).
 
 ## Layout
 
@@ -47,9 +49,11 @@ The fixture is read **straight from the repo** via `-Duri.fixtures` (set in
 ## Prerequisites (to close the gap)
 
 - JDK 17+
-- Gradle (wrapper not committed) that can run the `org.robolectric` plugin
+- Gradle 8.x (wrapper not committed; generate one locally with
+  `gradle wrapper` if you want `./gradlew`)
 - Robolectric `4.14+` resolving an **API-35 `android-all`** artifact for
-  `@Config(sdk = 35)`
+  `@Config(sdk = 35)` (Robolectric resolves it from Maven Central at test
+  time; offline maintainers must pre-populate their local `~/.m2`)
 - A verified way to control `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` (below)
 
 **These were not installed/verified here.** The `build.gradle` versions are a
@@ -64,37 +68,58 @@ documented starting point, not a proven build.
 2. **Oracle verdicts** (needs the prerequisites — NOT run here):
    ```
    cd reference/oracle/uri_match
-   ./gradlew test --tests '*.UriOracle'                 # writes build/oracle_verdicts.json
+   gradle test --tests '*.UriOracle'                    # writes build/oracle_verdicts.json
+   # or, if a wrapper was generated: ./gradlew test --tests '*.UriOracle'
+   # To claim a flag mechanism, set URI_FLAG_MECHANISM (see "Flag handling");
+   # without it the file is UNVERIFIED_SKIPPED and the runner rejects it.
    ```
 3. **Diff** (ASC-RS vs source_expected AND vs the framework oracle):
    ```
    python tests/differential/run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json
    ```
    Exit 0 only when every ASC-RS verdict equals `source_expected` and the
-   oracle. Any divergence is a real finding to fix or re-classify.
+   oracle for every case the oracle actually exercised. Any divergence is a
+   real finding to fix or re-classify.
 
 ## Flag handling
 
-`IntentFilter.matchData` consults `Flags.relativeReferenceIntentFilters()`; in
-the framework build that flag gates the group branch of `matchData`. The two
-states must each be exercised:
+`IntentFilter.matchData` consults `android.content.pm.Flags.relativeReferenceIntentFilters()`;
+in the framework build that frozen aconfig flag gates the group branch of
+`matchData`. The two states must each be exercised:
 
 - **flag on**: the group-aware branch (`paths==null && groups==null → authMatch`,
-  else `hasDataPath || matchRelRefGroups`). Default assumption for fixtures with
-  `flag_on: true`.
+  else `hasDataPath || matchRelRefGroups`). Default assumption for fixtures
+  with `flag_on: true`.
 - **flag off**: `paths == null → authMatch` (groups ignored). Fixtures with
   `flag_on: false` (T19–T21).
 
-**Control mechanism.** The aconfig flag is frozen at framework build time; it
-is **not runtime-toggleable** from a Robolectric test. To test both states you
-must run the same physical manifest against two framework builds whose flag
-toggled, or against an API-35 device/emulator where the flag can be switched
-and rebooted. `UriOracle` does **not** toggle the flag — it selects the
-scenario by `flag_on`, asserts it against the build's actual flag state, and
-records `provenance.flag_mechanism` (set via `-Duri.flag.mechanism`, env
-`URI_FLAG_MECHANISM`, default `UNKNOWN`). A file whose mechanism is `UNKNOWN`
-is reported `UNVERIFIED_SKIPPED`, never a pass. A maintainer must record the
-exact mechanism next to the oracle file before it is trusted.
+**The flag is NOT runtime-toggleable from Robolectric.** It is frozen at
+framework build time. `UriOracle` therefore does **not** assume which state it
+is in — it **reads the actual state** via `android.content.pm.Flags.relativeReferenceIntentFilters()`
+and records it as `provenance.flag_state_actual`:
+
+- A case whose required `flag_on` equals `flag_state_actual` is exercised and
+  a verdict is emitted.
+- Every other case (required state ≠ this build's state) is added to
+  `provenance.flag_skipped` and **no verdict is emitted** — the runner reports
+  it `UNVERIFIED(FLAG|SKIP)`, never confirmed, and a verdict that is neither
+  present nor in `flag_skipped` is a hard-runner error (missing oracle result).
+- If the flag state cannot be read at all, `UriOracle` **fails closed**: the
+  JUnit test throws, no verdicts are written, and `status` is
+  `UNVERIFIED_SKIPPED`.
+
+`provenance.flag_mechanism` (from `-Duri.flag.mechanism`, env
+`URI_FLAG_MECHANISM`) records *how* that build's flag state was established.
+A file whose `flag_mechanism` is `UNKNOWN`, whose `status` is
+`UNVERIFIED_SKIPPED`, or which omits `flag_state_actual` is **rejected by the
+runner** — it can never produce `ORACLE-CONFIRMED`.
+
+**Exercising both states requires two builds** (the flag is frozen per build):
+run the same physical fixtures against two android-all artifacts with the flag
+in opposite states, producing two `oracle_verdicts.json` files. Each diff
+confirms only the cases its build exercised; the union of the two runs covers
+both flag states. A single run confirming only one flag state leaves the other
+state's rows `UNVERIFIED(FLAG)`, which is the honest, intended outcome.
 
 ## Verdict mapping
 
@@ -102,11 +127,11 @@ exact mechanism next to the oracle file before it is trusted.
 for a match and negative `NO_MATCH_*` for a rejection. The framework is
 **deterministic** — it has no `unknown`. Map `>= 0 → matches`, `< 0 →
 cannot_match`. A row ASC-RS cannot decide (pattern/advanced glob, opaque URI,
-bound overflow) has **no direct** `matchData` answer; the harness compares
-ASC-RS `unknown` to the oracle's deterministic answer and records the
-divergence as a real finding, never as "the oracle also says unknown".
+bound overflow) has **no direct** matchData answer; the harness surfaces that
+as `ORACLE-OPEN` (a real finding under the framework's deterministic answer) —
+never as "the oracle also says unknown" and never as a passing confirmation.
 
 `UriOracle` implements this mapping and, when run, embeds provenance
-(framework revision, API level, assumed flag states, flag mechanism,
-Robolectric version, input/output paths). Review it against the pinned source
-before trusting it.
+(framework revision, API level, **actual** flag state, skipped flag-mismatched
+cases, flag mechanism, Robolectric version, input/output paths). Review it
+against the pinned source before trusting it.

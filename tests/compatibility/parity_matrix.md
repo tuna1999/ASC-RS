@@ -172,15 +172,21 @@ every verdict equals `source_expected` and no case id is missing/duplicated.
 The Android side is a standalone Gradle + Robolectric project in
 `reference/oracle/uri_match/` (`src/test/java/us/ascrs/urioracle/UriOracle.java`),
 which builds each fixture's `IntentFilter`, runs `matchData(type, scheme, Uri)`
-with the URI-derived scheme and per-row `flag_on`, and writes
+with the URI-derived scheme, and writes
 `build/oracle_verdicts.json` with **provenance** (framework revision, API
-level, assumed flag states, flag mechanism, output paths). Then
+level, **actual** flag state read at runtime via
+`android.content.pm.Flags.relativeReferenceIntentFilters()`, the
+`flag_skipped` cases whose required state the build could not exercise, flag
+mechanism, output paths). Then
 `run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json`
-diffs it; ASC-RS `unknown` rows surfaced against the oracle are real findings,
-never "the oracle also says unknown". The Gradle project was **not compiled or
-run** here (no toolchain); a file whose `flag_mechanism` is `UNKNOWN` is
-reported `UNVERIFIED_SKIPPED`. Record the Android API level, source revision
-(`android-15.0.0_r1`), flag state and mechanism, and a pass/fail table here
+diffs it; ASC-RS `unknown` rows surfaced against the oracle are `ORACLE-OPEN`
+real findings, never "the oracle also says unknown". The Gradle project was
+**not compiled or run** here (no toolchain); the runner **rejects** (exit 1)
+any oracle file whose provenance is missing/invalid or reports
+`UNVERIFIED_SKIPPED`, and never emits `ORACLE-CONFIRMED` from a case it cannot
+prove it exercised in the right flag state. Record the Android API level,
+source revision (`android-15.0.0_r1`), flag state and mechanism, and a
+pass/fail table here
 before closing roadmap 5.6. Known gap: the aconfig flag
 `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` is frozen at framework build time and
 is not runtime-toggleable from Robolectric — both flag states need two

@@ -180,6 +180,17 @@ jobs:
           set -euo pipefail
           python tests/differential/run_uri_oracle.py
 
+      - name: URI oracle harness regression tests
+        # Tests the judging logic in run_uri_oracle.py: provenance gating,
+        # oracle-coverage validation, and the three-way classification. They
+        # run without cargo, Android, or a framework-backed oracle file.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pytest
+          python -m pytest -q tests/differential/test_run_uri_oracle.py
+
       - name: perf_compare selftest
         shell: bash
         run: python benches/perf_compare.py --selftest

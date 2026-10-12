@@ -5,29 +5,38 @@
  * android-15 framework build before its output is treated as authoritative.
  * It did NOT run on this machine (no JDK / Android SDK / Gradle) — see
  * README.md. Every verdict this file could contribute is therefore
- * UNVERIFIED until a maintainer runs it.
+ * UNVERIFIED until a maintainer runs it (and the harness refuses to confirm
+ * anything such an unverified build produced).
  *
  * It mirrors asc-rs `evaluate_filter_uri` over tests/fixtures/uri_match_cases.json
  * and writes a JSON report:
  *     { "verdicts": { case_id: "matches"|"cannot_match", ... },
  *       "provenance": { "framework": "android-15.0.0_r1", "api_level": 35,
- *                       "flag_assumed": bool, "flag_mechanism": "...",
- *                       "robolectric": "...", "fixtures": "...", "output": "..." } }
+ *                       "status": "RUN"|"UNVERIFIED_SKIPPED",
+ *                       "flag_state_actual": bool|null,
+ *                       "flag_skipped": [case_id, ...],
+ *                       "flag_mechanism": "...", "robolectric": "...",
+ *                       "fixtures": "...", "output": "..." } }
  *
  * The framework's `IntentFilter.matchData` is DETERMINISTIC: it returns >=0
  * match categories for a match and <0 for a rejection — it has no "unknown".
  * An ASC-RS `unknown` row (pattern/advanced glob, opaque URI, bound overflow)
  * therefore has no direct `matchData` answer; the harness records that
- * divergence as a real finding and never as "the oracle also says unknown".
+ * divergence as a real finding (ORACLE-OPEN) and never as "the oracle also
+ * says unknown".
  *
- * v0.19.2 correctness audit:
- *  - scheme is now derived from the INPUT URI (Uri.parse(uri).getScheme()),
- *    not from the filter's <data> — `matchData(type, scheme, data)`'s scheme
+ * v0.19.2 correctness audit (flag state is VERIFIED, not assumed):
+ *  - scheme is derived from the INPUT URI (Uri.parse(uri).getScheme()), not
+ *    from the filter's <data> — `matchData(type, scheme, data)`'s scheme
  *    argument is the incoming URI's scheme, not a filter property.
- *  - the flag-on/off scenario is selected explicitly and recorded in
- *    provenance; the aconfig toggle itself is NOT performed here (see
- *    README "Flag handling" for the mechanism) — `flag_mechanism` states how
- *    (or whether) it was enforced on the run that produced this file.
+ *  - The group-aware branch of AOSP `matchData` is gated by the frozen
+ *    build-time aconfig flag `android.content.pm.Flags.relativeReferenceIntentFilters()`,
+ *    which a Robolectric test cannot toggle at runtime. This test therefore
+ *    READS the build's ACTUAL flag state and only emits a verdict for a case
+ *    whose required `flag_on` equals it. Every other case lands in
+ *    `flag_skipped`. If the flag state cannot be read at all, the test FAILS
+ *    (fail closed): no verdicts are written and `status` is UNVERIFIED_SKIPPED.
+ *    A file that cannot prove its flag state is rejected by the runner.
  *  - output path and fixture path come from system properties so the Gradle
  *    task and the README recipe agree (no copy of the fixture).
  */
@@ -37,6 +46,7 @@ package us.ascrs.urioracle;
 import android.content.IntentFilter;
 import android.content.UriRelativeFilter;
 import android.content.UriRelativeFilterGroup;
+import android.content.pm.Flags;
 import android.net.Uri;
 import android.os.PatternMatcher;
 
@@ -51,7 +61,9 @@ import java.io.FileWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RunWith(RobolectricTestRunner.class)
@@ -119,21 +131,33 @@ public class UriOracle {
     }
 
     /**
-     * Deterministic framework verdict for one URI. `flagOn` selects the
-     * scenario ("flag on" group-aware branch vs "flag off" legacy branch);
-     * enforcing the aconfig flag is OUT OF SCOPE here (see README) — the
-     * mechanism that produced this state is recorded in provenance.
+     * The build's ACTUAL frozen aconfig flag state that gates the group-aware
+     * branch of `IntentFilter.matchData`. Returns null only if the generated
+     * flags class cannot be read (build mismatch) — the caller must fail
+     * closed then, never assume a value.
      */
-    static String match(IntentFilter flt, String uri, boolean flagOn) {
+    static Boolean actualFlagOn() {
+        try {
+            return Flags.relativeReferenceIntentFilters();
+        } catch (Throwable t) {
+            // LinkageError / missing generated method / any reflection failure.
+            return null;
+        }
+    }
+
+    /**
+     * Deterministic framework verdict for one URI under this build's flag state.
+     * The group-aware vs legacy branch is taken by the framework build's frozen
+     * FLAG_RELATIVE_REFERENCE_INTENT_FILTERS, NOT by the caller — so this method
+     * is only ever invoked for a case whose required `flag_on` equals
+     * `flag_state_actual` (checked by the caller).
+     */
+    static String match(IntentFilter flt, String uri) {
         Uri u = Uri.parse(uri);
         // AOSP matchData(type, scheme, data): `scheme` is the INCOMING URI's
         // scheme, not a filter property (a filter can pool several schemes).
         String scheme = u.getScheme();
         int r = flt.matchData(null, scheme, u);
-        // NOTE: the group-aware / legacy branch of matchData is taken by the
-        // framework build's frozen FLAG_RELATIVE_REFERENCE_INTENT_FILTERS,
-        // NOT by `flagOn` directly. `flagOn` is asserted against the build's
-        // flag state in provenance.
         return r >= 0 ? "matches" : "cannot_match";
     }
 
@@ -154,31 +178,55 @@ public class UriOracle {
             }
         }
 
+        // FAIL CLOSED: read the actual framework flag state. If it cannot be
+        // proven, write NOTHING (the test itself fails) and record the file as
+        // UNVERIFIED_SKIPPED so the runner can never confirm from it.
+        Boolean flagStateActual = actualFlagOn();
+        if (flagStateActual == null) {
+            throw new IllegalStateException(
+                "cannot read android.content.pm.Flags.relativeReferenceIntentFilters(); "
+                + "flag state unprovable — refusing to write verdicts (fail closed)");
+        }
+        boolean flagOnBuild = flagStateActual.booleanValue();
+
         JSONObject root = new JSONObject(text);
         JSONArray cases = root.getJSONArray("cases");
         Map<String, String> verdicts = new LinkedHashMap<>();
-        boolean anyFlagOn = false;
-        boolean anyFlagOff = false;
+        List<String> flagSkipped = new ArrayList<>();
+        int exercisedOn = 0, exercisedOff = 0, skipped = 0;
         for (int i = 0; i < cases.length(); i++) {
             JSONObject c = cases.getJSONObject(i);
             JSONObject f = c.getJSONObject("filter");
-            boolean flagOn = c.optBoolean("flag_on", true);
-            if (flagOn) anyFlagOn = true; else anyFlagOff = true;
-            verdicts.put(c.getString("case_id"),
-                match(buildFilter(f), c.getString("uri"), flagOn));
+            String cid = c.getString("case_id");
+            boolean requiredFlagOn = c.optBoolean("flag_on", true);
+            if (requiredFlagOn != flagOnBuild) {
+                // This build's frozen flag cannot exercise this case's required
+                // state. Skip it deliberately; the runner will report
+                // UNVERIFIED(FLAG|SKIP), never confirmed. A missing verdict that
+                // is NOT in flag_skipped is a governed error on the runner side.
+                flagSkipped.add(cid);
+                skipped++;
+                continue;
+            }
+            if (requiredFlagOn) exercisedOn++; else exercisedOff++;
+            verdicts.put(cid, match(buildFilter(f), c.getString("uri")));
         }
 
         JSONObject provenance = new JSONObject();
         provenance.put("framework", FRAMEWORK);
         provenance.put("api_level", API_LEVEL);
-        provenance.put("flag_assumed_on", anyFlagOn);
-        provenance.put("flag_assumed_off", anyFlagOff);
+        provenance.put("status", flagMechanism.equals("UNKNOWN")
+            ? "UNVERIFIED_SKIPPED" : "RUN");
+        // The build's ACTUAL flag state, read at runtime — not assumed.
+        provenance.put("flag_state_actual", flagOnBuild);
+        provenance.put("flag_skipped", new JSONArray(flagSkipped));
         provenance.put("flag_mechanism", flagMechanism);
+        provenance.put("exercised_flag_on", exercisedOn);
+        provenance.put("exercised_flag_off", exercisedOff);
+        provenance.put("flag_skipped_count", skipped);
         provenance.put("robolectric", "4.14.1 (see build.gradle)");
         provenance.put("fixtures", fixturePath);
         provenance.put("output", outPath);
-        provenance.put("status", flagMechanism.equals("UNKNOWN")
-            ? "UNVERIFIED_SKIPPED" : "RUN");
 
         JSONObject j = new JSONObject();
         j.put("verdicts", new JSONObject(verdicts));
