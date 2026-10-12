@@ -1,22 +1,40 @@
 // URL-match oracle build.
 //
-// UNVERIFIED: this project has NOT been compiled or run on this machine (no
-// JDK / Android SDK / Gradle). The dependency versions and the flag-control
-// recipe below are a documented starting point; a maintainer with the
-// environment must verify them (see README.md) before any oracle_verdicts.json
-// is treated as authoritative. The runner (tests/differential/run_uri_oracle.py)
-// rejects any oracle file whose provenance cannot prove its flag state.
+// VERIFIED (2026-10-12, v0.19.2 follow-up): this project now COMPILES and RUNS
+// against a real Robolectric + android-all API-35 (Android 15) framework. See
+// README.md "Status". Key correctness changes vs the prior unverified draft:
 //
-// This is a plain `java` project: Robolectric tests run via JUnit + the
-// RobolectricTestRunner and do not need the `org.robolectric` Gradle plugin
-// (that plugin is Android-AGP sugar). The Android API-35 compile/runtime
-// classpath (android-all-instrumented) is resolved by Robolectric itself at
-// test time from Maven Central per @Config(sdk = 35); offline maintainers must
-// have that android-all artifact in their local ~/.m2.
+//   1. A plain `java` project cannot consume the androidx.test AARs that
+//      robolectric/shadows-framework pull in (`androidx.test:monitor`,
+//      `androidx.test.espresso:espresso-idling-resource`); the previous draft
+//      failed at `compileTestJava` ("Could not resolve androidx.test:monitor").
+//      They are excluded — this test uses neither, and Robolectric's core sandbox
+//      runs without them.
+//
+//   2. The android.* framework classes (including the HIDDEN APIs UriOracle
+//      uses) are NOT on the compile classpath from `org.robolectric:robolectric`
+//      alone — Robolectric resolves android-all only at RUNTIME. The test now
+//      compiles against `org.robolectric:android-all` (compileOnly, so it never
+//      leaks onto the runtime classpath where the instrumented build must win).
+//
+//   3. The compile classpath must be the UNINSTRUMENTED android-all; and even
+//      there `android.content.pm.Flags` does not exist under the public path —
+//      the aconfig-generated flags class is a hidden API relocated by the
+//      android-all build to
+//      `com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags`
+//      (verified by inspecting the jar). UriOracle therefore imports the
+//      relocated class. At runtime `Flag.relativeReferenceIntentFilters()` is
+//      instrumented and callable inside the Robolectric sandbox.
+//
+//   4. The android-all version is PINNED to the exact artifact Robolectric
+//      4.14.1 maps @Config(sdk=35) to (`15-robolectric-12650502`), and its
+//      resolved coordinate is forwarded to UriOracle as `uri.androidall` so
+//      provenance records the ACTUAL framework artifact, not a hardcoded tag.
 apply plugin: 'java'
 
 repositories {
     mavenCentral()
+    google()   // authoritative for androidx.test:monitor (AAR)
 }
 
 // Single source of truth: the ASC-RS fixture lives in the repo and is read
@@ -24,6 +42,14 @@ repositories {
 ext {
     uriFixtures = file('../../../tests/fixtures/uri_match_cases.json').canonicalPath
     oracleOut    = file("${buildDir}/oracle_verdicts.json").canonicalPath
+    // The Robolectric android-all for API 35 pinned by Robolectric 4.14.1:
+    // DefaultSdkProvider maps sdk 35 -> ("15", "12650502"), and the runtime
+    // artifact is android-all-instrumented:15-robolectric-12650502-i7.
+    robolectricVersion   = '4.14.1'
+    androidAllVersion    = '15-robolectric-12650502'
+    androidAllRunVersion = "${androidAllVersion}-i7"     // instrumented (runtime)
+    androidAllArtifact   = "org.robolectric:android-all-instrumented:${androidAllRunVersion}"
+    androidxMonitorVersion = '1.7.2'
 }
 
 java {
@@ -31,24 +57,59 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
+// The androidx.test AARs can't be consumed by a plain `java` project, but
+// Robolectric needs `androidx.test.platform.app.InstrumentationRegistry` from
+// androidx.test:monitor at RUNTIME. Resolve the AAR and unpack its classes.jar
+// onto the test runtime classpath.
+configurations {
+    androidxMonitorAar
+}
+
+def unpackMonitorAar = tasks.register('unpackMonitorAar', Copy) {
+    from(zipTree(configurations.androidxMonitorAar.singleFile)) { include 'classes.jar' }
+    into layout.buildDirectory.dir('androidx-monitor')
+    rename 'classes.jar', 'monitor.jar'
+}
+
 dependencies {
     testImplementation 'junit:junit:4.13.2'
-    // Robolectric 4.14+ resolves the android-all-instrumented artifact for
-    // API 35 (Android 15) from Maven Central. The aconfig flag state of that
-    // exact android-all build for FLAG_RELATIVE_REFERENCE_INTENT_FILTERS is
-    // READ at runtime by UriOracle (android.content.pm.Flags) and recorded in
-    // provenance — see README "Flag handling". A maintainer must pin the
-    // android-all version they use and record it.
-    testImplementation 'org.robolectric:robolectric:4.14.1'
+    // Robolectric resolves the android-all-instrumented sandbox at runtime.
+    // The androidx.test AARs can't be consumed by plain-java; the espresso AAR
+    // is genuinely unused, and monitor's classes.jar is re-added below from its
+    // AAR (Robolectric's AndroidTestEnvironment needs InstrumentationRegistry).
+    testImplementation("org.robolectric:robolectric:${robolectricVersion}") {
+        exclude group: 'androidx.test', module: 'monitor'
+        exclude group: 'androidx.test.espresso', module: 'espresso-idling-resource'
+    }
+    // Compile + runtime android.* framework surface (hidden/relocated APIs
+    // included). Must be the INSTRUMENTED artifact — the same one Robolectric's
+    // sandbox loads — so (a) JUnit can parse @Config (its `application()`
+    // default is android.app.Application, loadable only with android classes on
+    // the worker classpath) and (b) there is no uninstrumented/re-instrumented
+    // divergence. The aconfig Flags class is a hidden API relocated to
+    // com.android.internal.hidden_from_bootclasspath.* in this artifact;
+    // UriOracle imports it from there.
+    testImplementation "org.robolectric:android-all-instrumented:${androidAllRunVersion}"
+    // monitor AAR -> runtime only, as an unpacked classes.jar.
+    androidxMonitorAar "androidx.test:monitor:${androidxMonitorVersion}@aar"
+    testRuntimeOnly files(layout.buildDirectory.dir('androidx-monitor').map { it.file('monitor.jar') }) {
+        builtBy unpackMonitorAar
+    }
 }
 
 test {
+    dependsOn unpackMonitorAar
     useJUnit()
     systemProperty 'uri.fixtures', uriFixtures
     systemProperty 'uri.oracle.out', oracleOut
+    systemProperty 'uri.androidall', androidAllArtifact
+    systemProperty 'uri.robolectric', robolectricVersion
     // Document which flag-control mechanism produced this build's flag state.
     // See README "Flag handling" — a value of UNKNOWN makes UriOracle fail
     // closed (status UNVERIFIED_SKIPPED) and the runner rejects the file.
     systemProperty 'uri.flag.mechanism', System.getenv('URI_FLAG_MECHANISM') ?: 'UNKNOWN'
     testLogging { events 'passed', 'failed' }
+    // Robolectric loads a ~200 MB android-all-instrumented jar into the
+    // in-process sandbox; give the test worker enough heap.
+    maxHeapSize = '2g'
 }

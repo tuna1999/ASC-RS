@@ -55,6 +55,7 @@ the oracle actually exercised); 1 = any hard error or genuine mismatch.
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -122,6 +123,18 @@ def validate_oracle_provenance(provenance) -> str | None:
         return f"provenance.framework={provenance.get('framework')!r} != android-15.0.0_r1"
     if provenance.get("api_level") != 35:
         return f"provenance.api_level={provenance.get('api_level')!r} != 35"
+    # The ACTUAL framework artifact the oracle ran against, not a hardcoded tag.
+    artifact = provenance.get("framework_artifact")
+    if not isinstance(artifact, str) or not re.match(
+            r"^org\.robolectric:android-all-instrumented:15-robolectric-\d+(-[a-z0-9]+)?-i\d+$",
+            artifact):
+        return (f"provenance.framework_artifact={artifact!r} is not a real "
+                "org.robolectric:android-all-instrumented:15-robolectric-…-iN coordinate")
+    # The API level the framework sandbox actually loaded (observed at runtime),
+    # not taken on faith from the declared api_level.
+    observed = provenance.get("api_level_observed")
+    if observed != 35:
+        return f"provenance.api_level_observed={observed!r} != 35 (does not match actual framework)"
     mechanism = provenance.get("flag_mechanism")
     if not mechanism or mechanism == "UNKNOWN":
         return "provenance.flag_mechanism missing or UNKNOWN (flag state not verified)"
@@ -134,28 +147,68 @@ def validate_oracle_provenance(provenance) -> str | None:
 
 
 def validate_oracle_coverage(cases, oracle, provenance) -> list[str]:
-    """Return hard structural errors about the oracle verdict set: a fixture
-    case with no verdict that the oracle did NOT skip, an invalid verdict
-    value, or an unexpected oracle id. Duplicate keys are already rejected by
-    strict_json_loads."""
+    """Return hard structural errors about the oracle verdict set; every check
+    rejects the report (the runner exits 1) rather than silently downgrading.
+
+    Invariants enforced (the oracle is REQUIRED to maintain an exact bijection
+    between the frozen flag state and the verdict/skip sets):
+
+      * a case whose required `flag_on` equals the build's actual flag state is
+        EXERCISABLE: it must have a verdict, must NOT be in `flag_skipped`, and
+        the verdict must be a valid value;
+      * a case whose required `flag_on` differs from the actual flag state is
+        NOT exercisable in this build: it MUST be listed in `flag_skipped` and
+        MUST have NO verdict (a verdict here is a wrong-flag result);
+      * every entry in `flag_skipped` must be a real fixture case and must be a
+        flag-mismatched case (an exercisable case in `flag_skipped` is an
+        oracle silently dropping an exercisable result);
+      * every oracle verdict id must be a fixture case and must not also be in
+        `flag_skipped`.
+
+    Duplicate keys are already rejected by strict_json_loads."""
     ids = [c["case_id"] for c in cases]
     id_set = set(ids)
     actual = provenance["flag_state_actual"]
     skipped = set(provenance.get("flag_skipped", []))
+    req_flag = {c["case_id"]: c.get("flag_on", True) for c in cases}
+    exercises = {cid: (req_flag[cid] == actual) for cid in id_set}
     errors: list[str] = []
+
+    for sid in skipped:
+        if sid not in id_set:
+            errors.append(f"unexpected id in flag_skipped (not a fixture case): {sid!r}")
+        elif exercises[sid]:
+            errors.append(
+                f"flag_skipped lists {sid!r} but it is exercisable in this build "
+                f"(flag_on==flag_state_actual) — an exercisable case was dropped")
+
     for c in cases:
         cid = c["case_id"]
-        req_flag = c.get("flag_on", True)
-        if req_flag != actual or cid in skipped:
-            # Not exercisable / not exercised: no verdict expected.
-            continue
-        if cid not in oracle:
-            errors.append(f"missing oracle verdict for case {cid!r} (not skipped)")
-        elif oracle[cid] not in VALID_VERDICTS:
-            errors.append(f"invalid oracle verdict for case {cid!r}: {oracle[cid]!r}")
+        if exercises[cid]:
+            if cid in oracle:
+                if oracle[cid] not in VALID_VERDICTS:
+                    errors.append(
+                        f"invalid oracle verdict for case {cid!r}: {oracle[cid]!r}")
+            elif cid not in skipped:
+                errors.append(f"missing oracle verdict for case {cid!r} (not skipped)")
+        else:
+            # Flag-mismatched: must be explicitly skipped and carry no verdict.
+            if cid not in skipped:
+                errors.append(
+                    f"case {cid!r} requires flag {'on' if req_flag[cid] else 'off'}"
+                    f" but the build is flag {'on' if actual else 'off'}: it must be "
+                    "in flag_skipped, not silently absent")
+            if cid in oracle:
+                errors.append(
+                    f"verdict for flag-mismatched case {cid!r} (wrong-flag result — "
+                    "an unexercisable case must be in flag_skipped, never emit a verdict)")
+
     for oid in oracle:
         if oid not in id_set:
             errors.append(f"unexpected oracle verdict id: {oid!r}")
+        elif oid in skipped:
+            errors.append(
+                f"verdict {oid!r} is both in the oracle and in flag_skipped")
     return errors
 
 

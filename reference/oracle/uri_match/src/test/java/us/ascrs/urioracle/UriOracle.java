@@ -46,9 +46,20 @@ package us.ascrs.urioracle;
 import android.content.IntentFilter;
 import android.content.UriRelativeFilter;
 import android.content.UriRelativeFilterGroup;
-import android.content.pm.Flags;
 import android.net.Uri;
+import android.os.Build;
 import android.os.PatternMatcher;
+
+// The aconfig-generated flags class for FLAG_RELATIVE_REFERENCE_INTENT_FILTERS
+// is a HIDDEN API. In the Robolectric android-all build it is relocated out of
+// the public `android.content.pm` package to
+// `com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags`
+// (verified by inspecting the android-all 15-robolectric-12650502 jar); there
+// is no `android.content.pm.Flags` class to import. This relocated class is
+// present in BOTH the raw and instrumented android-all artifacts and its
+// `relativeReferenceIntentFilters()` is instrumented and callable inside the
+// Robolectric sandbox at runtime.
+import com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -70,7 +81,6 @@ import java.util.Map;
 @Config(sdk = 35)
 public class UriOracle {
     static final String FRAMEWORK = "android-15.0.0_r1";
-    static final int API_LEVEL = 35;
 
     static final int PATH = 0, QUERY = 1, FRAGMENT = 2; // UriRelativeFilter constants
     static final int[] KINDS = {PatternMatcher.PATTERN_LITERAL, PatternMatcher.PATTERN_PREFIX,
@@ -116,9 +126,12 @@ public class UriOracle {
                     JSONArray parts = gd.getJSONObject(d).getJSONArray("parts");
                     for (int p = 0; p < parts.length(); p++) {
                         JSONObject m = parts.getJSONObject(p);
-                        int kind = m.optString("kind", "exact") switch {
-                            "prefix" -> 1, "suffix" -> 2,
-                            "pattern" -> 3, "advanced" -> 4, default -> 0
+                        int kind = switch (m.optString("kind", "exact")) {
+                            case "prefix" -> 1;
+                            case "suffix" -> 2;
+                            case "pattern" -> 3;
+                            case "advanced" -> 4;
+                            default -> 0;
                         };
                         ufg.addUriRelativeFilter(new UriRelativeFilter(
                             partId(m.getString("part")), kindOf(kind), m.getString("value")));
@@ -166,6 +179,14 @@ public class UriOracle {
         String fixturePath = System.getProperty("uri.fixtures", "/uri_match_cases.json");
         String outPath = System.getProperty("uri.oracle.out", "oracle_verdicts.json");
         String flagMechanism = System.getProperty("uri.flag.mechanism", "UNKNOWN");
+        // The ACTUAL framework artifact this test runs against, forwarded by
+        // build.gradle from the pinned android-all version Robolectric 4.14.1
+        // resolves for @Config(sdk=35). Not a user-supplied or hardcoded tag.
+        String androidAllArtifact = System.getProperty(
+            "uri.androidall", "org.robolectric:android-all-instrumented:UNKNOWN");
+        String robolectricVersion = System.getProperty("uri.robolectric", "UNKNOWN");
+        // The api level of the framework the sandbox actually loaded.
+        int actualApi = Build.VERSION.SDK_INT;
 
         String text;
         if (fixturePath.startsWith("/") || fixturePath.contains(":")) {
@@ -214,7 +235,7 @@ public class UriOracle {
 
         JSONObject provenance = new JSONObject();
         provenance.put("framework", FRAMEWORK);
-        provenance.put("api_level", API_LEVEL);
+        provenance.put("api_level", actualApi);
         provenance.put("status", flagMechanism.equals("UNKNOWN")
             ? "UNVERIFIED_SKIPPED" : "RUN");
         // The build's ACTUAL flag state, read at runtime — not assumed.
@@ -224,7 +245,14 @@ public class UriOracle {
         provenance.put("exercised_flag_on", exercisedOn);
         provenance.put("exercised_flag_off", exercisedOff);
         provenance.put("flag_skipped_count", skipped);
-        provenance.put("robolectric", "4.14.1 (see build.gradle)");
+        // Actual framework artifact + execution environment, not a hardcoded tag.
+        provenance.put("framework_artifact", androidAllArtifact);
+        provenance.put("api_level_observed", actualApi);
+        provenance.put("robolectric", robolectricVersion);
+        provenance.put("java_version", System.getProperty("java.version", "UNKNOWN"));
+        provenance.put("java_home", System.getProperty("java.home", "UNKNOWN"));
+        provenance.put("os_name", System.getProperty("os.name", "UNKNOWN"));
+        provenance.put("os_arch", System.getProperty("os.arch", "UNKNOWN"));
         provenance.put("fixtures", fixturePath);
         provenance.put("output", outPath);
 

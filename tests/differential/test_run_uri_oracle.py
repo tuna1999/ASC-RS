@@ -31,12 +31,15 @@ def case(cid, flag_on=True, exp="matches"):
 
 def prov(flag_on_state=True, skipped=(), mechanism="two-build-android-all",
          status="RUN", framework="android-15.0.0_r1", api=35,
-         flag_state=None):
+         flag_state=None, artifact="org.robolectric:android-all-instrumented:"
+                                   "15-robolectric-12345678-i7",
+         observed=35):
     if flag_state is None:
         flag_state = flag_on_state
     return {"framework": framework, "api_level": api, "status": status,
             "flag_state_actual": flag_state, "flag_skipped": list(skipped),
-            "flag_mechanism": mechanism}
+            "flag_mechanism": mechanism,
+            "framework_artifact": artifact, "api_level_observed": observed}
 
 
 # --------------------------------------------------------------------------
@@ -59,6 +62,11 @@ def test_valid_provenance_passes():
     lambda p: p.update(flag_state_actual=None),
     lambda p: p.pop("flag_state_actual", None),
     lambda p: p.pop("flag_skipped", None),     # missing skip list
+    lambda p: p.pop("framework_artifact", None),  # no actual artifact → unverified
+    lambda p: p.update(framework_artifact="nonsense"),  # malformed coordinate
+    lambda p: p.update(framework_artifact="org.robolectric:android-all:15-robolectric-12345678"),
+    lambda p: p.update(api_level_observed=34),  # observed != actual framework
+    lambda p: p.pop("api_level_observed", None),
 ])
 def test_invalid_provenance_rejected(mutate):
     p = prov()
@@ -103,12 +111,51 @@ def test_skipped_case_without_verdict_is_ok():
     assert uro.validate_oracle_coverage(cases, oracle, p) == []
 
 
-def test_flag_mismatch_without_verdict_is_ok():
-    # T19 needs flag OFF but this build is flag ON → no verdict expected.
+def test_flag_mismatch_not_skipped_is_error():
+    # T19 needs flag OFF but this build is flag ON. It must be listed in
+    # flag_skipped; a silent absence is an oracle dropping an unexercisable
+    # case and must reject the report, never silently ignore it.
     cases = [case("T19", flag_on=False)]
     p = prov(flag_on_state=True, skipped=[])
     oracle = {}
-    assert uro.validate_oracle_coverage(cases, oracle, p) == []
+    errs = uro.validate_oracle_coverage(cases, oracle, p)
+    assert any("flag_skipped" in e and "T19" in e for e in errs)
+
+
+def test_wrong_flag_verdict_is_error():
+    # A verdict emitted for a flag-mismatched (unexercisable) case is a
+    # wrong-flag result: the oracle must put it in flag_skipped instead.
+    cases = [case("T19", flag_on=False)]
+    p = prov(flag_on_state=True, skipped=["T19"])
+    oracle = {"T19": "matches"}   # must NOT be present
+    errs = uro.validate_oracle_coverage(cases, oracle, p)
+    assert any("flag-mismatched" in e and "T19" in e for e in errs)
+
+
+def test_exercisable_case_dropped_via_skip_is_error():
+    # T1 requires flag ON == build state, so it is exercisable; listing it in
+    # flag_skipped is an oracle silently dropping an exercisable result.
+    cases = [case("T1")]
+    p = prov(flag_on_state=True, skipped=["T1"])
+    oracle = {}
+    errs = uro.validate_oracle_coverage(cases, oracle, p)
+    assert any("exercisable" in e and "T1" in e for e in errs)
+
+
+def test_skip_id_not_a_fixture_case_is_error():
+    cases = [case("T1")]
+    p = prov(flag_on_state=True, skipped=["GHOST"])
+    oracle = {"T1": "matches"}
+    errs = uro.validate_oracle_coverage(cases, oracle, p)
+    assert any("flag_skipped" in e and "GHOST" in e for e in errs)
+
+
+def test_verdict_both_in_oracle_and_skipped_is_error():
+    cases = [case("T19", flag_on=False)]
+    p = prov(flag_on_state=True, skipped=["T19"])
+    oracle = {"T19": "cannot_match"}
+    errs = uro.validate_oracle_coverage(cases, oracle, p)
+    assert any("flag_skipped" in e and "T19" in e for e in errs)
 
 
 def test_unexpected_oracle_id_is_error():
