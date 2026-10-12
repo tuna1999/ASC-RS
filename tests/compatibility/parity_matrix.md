@@ -161,9 +161,16 @@ environment is available on this machine. Until it runs:
 - `Pattern` / `AdvancedPattern` glob matchers remain `unknown` (§6.3);
 - aapt2-built real-APK fixtures for the element are still missing.
 
-How to run once an SDK/emulator is available: build the fixture (or Robolectric
-on the framework jar) per T1–T30, run `IntentFilter.matchData(type, scheme,
-Uri)` exactly as `matchDataAuthority` → path/group, and diff the boolean (with
-`flags=on|off`) against ASC-RS's three-valued verdict; record the Android API
-level, source revision (`android-15.0.0_r1`), flag state, and a pass/fail table
-here before closing roadmap 5.6.
+How to run once an SDK/emulator is available: the asc-rs side is already
+runnable — `python tests/differential/run_uri_oracle.py` drives
+`asc-manifest/examples/eval_uri.rs` over `tests/fixtures/uri_match_cases.json`
+(36 fixtures incl. the v0.19.1 F1 empty-path and F2 backslash rows) and returns
+0 iff every verdict equals `source_expected`. The Android side is
+`reference/oracle/uri_match/UriOracle.java` (Robolectric, **not executed here**)
+which builds each fixture's `IntentFilter`, runs `matchData(type, scheme, Uri)`
+with `flags=on|off` per row and writes `oracle_verdicts.json`; then
+`run_uri_oracle.py --oracle reference/oracle/uri_match/oracle_verdicts.json`
+diffs it. Record the Android API level, source revision (`android-15.0.0_r1`),
+flag state, and a pass/fail table here before closing roadmap 5.6. Known gap:
+no boot path yet — the aconfig flag `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS`
+must be enabled at runtime for the group-aware `matchData` branch to run.

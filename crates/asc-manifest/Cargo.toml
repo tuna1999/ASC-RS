@@ -16,3 +16,5 @@ asc-apk = { path = "../../crates/asc-apk" }
 # Used by the malformed-ZIP test fixture (computes the CRC-32 over the
 # "hello" payload embedded in the hand-built archive).
 crc32fast.workspace = true
+# Used by the eval_uri example (API-35 oracle differential harness).
+serde_json.workspace = true

@@ -294,6 +294,25 @@ Android SDK/emulator on this machine, so `pathPattern`/`pathAdvancedPattern`
 glob semantics remain `unknown` and T1–T30 are source-confirmed (not yet
 oracle-run).
 
+**v0.19.1 follow-up audit (2026-10-09).** Two more source-confirmed fixes:
+**empty path ≠ null** — a hierarchical URI with no path separator (`https://
+example.com`, with a `?`/`#` too) has `Uri.getPath() == ""` (AOSP `parsePath`
+returns `""` at the `?/#/end` boundary, not null), so a sibling/group `path=""`
+or `pathPrefix=""` matcher matches it — previously reported `cannot match`
+(a false negative); and it stays distinct from the absolute root `"/"`
+(C1/F1). **backslash authority terminator** — AOSP `parseAuthority`/`parsePath`
+both stop the authority at `'\\'` (treated as a path start, per WHATWG host
+rules) and **keep the backslash in the path**, so `https://example.com\private`
+has host `example.com` and path `"\private"`; previously the backslash was
+folded into the host and never matched the authority (C2/F2). The §5.4/5.6
+oracle differential is now scaffolded and runnable on the asc-rs side:
+`tests/differential/run_uri_oracle.py` drives `asc-manifest/examples/eval_uri.rs`
+over `tests/fixtures/uri_match_cases.json` (36 fixtures: T1–T25 + F1–F5 + C1/C2
++ F3/F4) and returns 0 only when every verdict equals `source_expected`; the
+Android side is `reference/oracle/uri_match/UriOracle.java` (Robolectric,
+**not executed here** — no JDK/SDK). Missing: the Android framework run (to fill
+`oracle_verdicts.json`) and aapt2 real-AXML fixtures.
+
 
 **5.2 Data-model design.** Keep `UriRelativeFilterGroup { allow, data }`
 as parsed. Add an evaluation view (no reordering): ordered groups →

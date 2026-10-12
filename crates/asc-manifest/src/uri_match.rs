@@ -144,10 +144,14 @@ fn parse_uri(uri: &str) -> Option<UriParts> {
     // and this module refuses to guess → the parse fails (→ Unknown).
     let colon = rest.find("://")?;
     let (scheme, rest2) = (Some(&rest[..colon]), &rest[colon + 3..]);
-    // authority ends at the first '/' (or is the whole rest)
-    let (authority, path) = match rest2.find('/') {
-        Some(slash) => (&rest2[..slash], Some(&rest2[slash..])),
-        None => (rest2, None),
+    // AOSP Uri.parsePath/parseAuthority both terminate the authority at '/',
+    // '\\' (treated as path start, not normalized), '?' or '#'; and a
+    // hierarchical URI with no path has path "" (empty), not null. We already
+    // stripped ?/# above, so the authority ends at the first '/' or '\\'.
+    let (authority, path) = match rest2.find(['/', '\\']) {
+        Some(sep) => (&rest2[..sep], Some(&rest2[sep..])),
+        // "https://example.com" (no path separator) → empty path "" (F1).
+        None => (rest2, Some("")),
     };
     let path = dec(path)?;
     let (host, port) = split_authority(authority)?;
@@ -193,11 +197,11 @@ fn split_authority(authority: &str) -> Option<(Option<String>, Option<String>)> 
 }
 
 /// Match a single `(kind, value)` matcher against a whole part (`None` =
-/// the part is absent, so it never matches — R7/R8).
+/// the part is absent, so it never matches — R7/R8). For a hierarchical URL a
+/// path is never absent: no path separator ⇒ `""` (F1).
 ///
-/// Returns `Ok(true/false)` for deterministic kinds and `Err` when the kind
-/// is not oracle-confirmed yet (`Pattern`, `AdvancedPattern`) or the query
-/// contains a `+` (§6.4).
+/// Returns `Ok(true/false)` for deterministic kinds and `Err` when the kind is
+/// not oracle-confirmed yet (`Pattern`, `AdvancedPattern`).
 fn match_part(kind: PathMatchKind, value: &str, part: Option<&str>) -> Result<bool, String> {
     let Some(p) = part else {
         // An absent part never satisfies a matcher.
@@ -1403,6 +1407,123 @@ mod tests {
         assert_eq!(
             evaluate_filter_uri(&f2, "https://[::1]/x", true).outcome,
             UriMatchVerdict::Matches
+        );
+    }
+
+    // ---- F1: a hierarchical URI with no explicit path has path "" (not null) ----
+
+    fn prefix_data(p: &str) -> DataSpec {
+        DataSpec {
+            path_prefix: Some(p.to_string()),
+            ..DataSpec::default()
+        }
+    }
+
+    #[test]
+    fn empty_path_is_empty_string_not_null() {
+        // AOSP Uri.getPath() returns "" for a scheme+host URI with no path
+        // (parsePath returns "" at the '?'/'#'/end boundary), so an Exact ""
+        // path matcher matches it. Distinguish from the absolute root "/".
+        let f = base_filter(vec![], vec![path_data("")]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com?token=1", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com#fragment", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        // The bare host and the absolute root "/" are different paths.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn empty_path_prefix_matches_empty_path() {
+        // pathPrefix="" prefix-matches the empty path ("".startsWith("")).
+        let f = base_filter(vec![], vec![prefix_data("")]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn empty_path_at_group_level() {
+        // A group PATH matcher of "" matches a URI with no path layer.
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com?token=1", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    // ---- F2: '\\' terminates the authority and is kept in the path ----
+
+    #[test]
+    fn backslash_terminates_authority() {
+        // https://example.com\private → host example.com, path "\private"
+        // (AOSP parseAuthority/parsePath both stop at '\\'; the backslash is
+        // not normalized into '/').
+        let f = authority_filter("example.com", None, vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com\\private", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com\\private?token=1", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/private", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        let f_other = authority_filter("other.com", None, vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f_other, "https://example.com\\private", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // The backslash stays in the path: an Exact "\private" filter matches it.
+        let f2 = base_filter(vec![], vec![path_data("\\private")]);
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com\\private", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com\\private?token=1", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com/private", true).outcome,
+            UriMatchVerdict::CannotMatch
         );
     }
 }
