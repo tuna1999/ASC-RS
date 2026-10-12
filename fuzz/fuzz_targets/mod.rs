@@ -26,5 +26,6 @@ pub mod fuzz_rebuild;
 pub mod fuzz_ref_walker;
 pub mod fuzz_signing;
 pub mod fuzz_uleb128;
+pub mod fuzz_uri_match;
 pub mod fuzz_xapk;
 pub mod fuzz_zip_directory;

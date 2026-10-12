@@ -265,6 +265,17 @@ consulted.
 → T6/T7; sibling path overriding a block group → T9/T10. Flag-off variant →
 T19–T21.
 
+**Glob-family rows (T16–T18, and the `pattern`/`advanced` parts of T22/T26/T27):
+the fixture file records `unknown`**, not the source-derived `matches` /
+`cannot match` above, because ASC-RS deliberately refuses to decide
+`Pattern`/`AdvancedPattern` glob matchers until §6.3's oracle run confirms
+their semantics. That is a documented, honest divergence — an `unknown` is
+never coerced into a definite verdict to make a test pass. T17's row is
+`unknown` for the same reason (the source-derived "cannot match" stays an
+open oracle expectation). The `pathPattern`/`pathAdvancedPattern` fixtures all
+exercise the `unknown` verdict for regression; the framework answer, once the
+oracle runs, is a real finding to reconcile.
+
 **Implementation status (2026-10-09).** 5.2+5.3 shipped as
 `asc-manifest::uri_match::evaluate_filter_uri(filter, uri, assume_flag_on)`
 → three-valued `Verdict`, plus the 5.4 synthetic suite (`uri_match::tests`).
@@ -312,6 +323,50 @@ over `tests/fixtures/uri_match_cases.json` (36 fixtures: T1–T25 + F1–F5 + C1
 Android side is `reference/oracle/uri_match/UriOracle.java` (Robolectric,
 **not executed here** — no JDK/SDK). Missing: the Android framework run (to fill
 `oracle_verdicts.json`) and aapt2 real-AXML fixtures.
+
+**v0.19.2 review audit (2026-10-12).** Closed a P1 untrusted-input panic and
+made the oracle reproducible.
+
+- **P1 percent-decode panic fixed.** `percent_decode`'s guard
+  `i + 2 < s.len() + 1 && i + 2 <= s.len()` let `&bytes[i+1..i+3]` run past
+  the end for a truncated escape (e.g. path `/%A` — confirmed panic
+  `range end index 4 out of range for slice of length 3`). It is now a
+  bounds-checked loop where a `%` must be followed by two hex digits and a
+  truncated/non-hex escape fails the decode → the URI is malformed → `Unknown`.
+  No unchecked indexing; valid escapes (`%20`, `%2F`, `%E2%82%AC`) decode as
+  before; bad hex (`%GG`) and invalid UTF-8 after decode (`%FF`, `%C3`) are
+  `Unknown`. Regression tests cover truncated/bad-escape/bad-UTF-8 in path,
+  query, fragment and host, plus the URI at/over the 1 MiB bound
+  (`uri_match::tests::{truncated_escape_never_panics, valid_escapes_decode_in_path_and_query, malformed_escapes_and_bad_utf8_are_unknown, uri_at_and_beyond_size_bound_is_unknown}`).
+  New fuzz target `fuzz/fuzz_targets/fuzz_uri_match.rs` (manifest-feature
+  gated) runs `evaluate_filter_uri` on arbitrary bytes; seeds in
+  `fuzz/seeds/uri_strings/`; a 20 s mutation smoke did ~17.5 M executions with
+  zero panics.
+- **Oracle made a reproducible Gradle + Robolectric project.** The oracle is
+  now `reference/oracle/uri_match/` with `settings.gradle`/`build.gradle`/
+  `gradle.properties` and the test at
+  `src/test/java/us/ascrs/urioracle/UriOracle.java`. Correctness fixes:
+  the `scheme` passed to `matchData(type, scheme, data)` is now the **input
+  URI's** scheme (`Uri.parse(uri).getScheme()`), not the filter's pooled
+  `<data>` scheme; `flag_on` is threaded and asserted against the framework's
+  frozen aconfig state (the flag is NOT runtime-toggleable from Robolectric —
+  both sides need two framework builds or an emulator switch), with the
+  mechanism recorded in `provenance.flag_mechanism` (an `UNKNOWN` mechanism ⇒
+  the file is `UNVERIFIED_SKIPPED`); output is `build/oracle_verdicts.json`
+  `{verdicts, provenance}`. **Not compiled/run**: no JDK / Android SDK /
+  Gradle on this machine — every oracle row stays `NOT_RUN` / `UNVERIFIED`.
+- **Fixture coverage grew to 51 cases** — added the missing acceptance rows
+  T9, T15b, T17, T21, T22, T26, T27, T28 plus D1–D4 (scheme mismatch, host
+  mismatch, wildcard apex/not-sibling boundaries, ASCII case-insensitive host)
+  and P1 malformed-escape rows. All regression-green
+  (`run_uri_oracle.py`: 51 cases, 0 source-mismatches). The harness now fails
+  on duplicate/missing/unexpected case ids and labels rows
+  `REGRESSION-OK(UNVERIFIED)` / `REGRESSION-OK(UNSUPPORTED)` /
+  `NOT_RUN` — skipped oracle rows are never counted as verified passes. The
+  source-derived regression is wired into CI (Linux leg).
+- **Remaining blockers (unchanged):** no Android framework to fill
+  `oracle_verdicts.json`; aapt2 real-AXML fixtures still missing.
+
 
 
 **5.2 Data-model design.** Keep `UriRelativeFilterGroup { allow, data }`

@@ -11,7 +11,8 @@
 //!
 //! This is a pure (bounded, deterministic) re-derivation of the evaluator for
 //! the harness; it is NOT an Android oracle. The Android-API-35 reference must
-//! come from `reference/oracle/uri_match/UriOracle.java` under Robolectric.
+//! come from `reference/oracle/uri_match/` (Gradle + Robolectric,
+//! `src/test/java/us/ascrs/urioracle/UriOracle.java`).
 
 use std::env;
 use std::path::Path;

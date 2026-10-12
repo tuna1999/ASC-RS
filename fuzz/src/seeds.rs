@@ -30,6 +30,7 @@ pub fn emit_all(root: &Path) -> io::Result<usize> {
             "fuzz_signing" => emit_signing(&dir)?,
             "fuzz_arsc" => emit_arsc(&dir)?,
             "fuzz_axml" => emit_axml(&dir)?,
+            "fuzz_uri_match" => emit_uri(&dir)?,
             "fuzz_apk_open" | "fuzz_inspect" | "fuzz_xapk" => emit_apk_file(&dir)?,
             "fuzz_hermes" => emit_hermes(&dir)?,
             "fuzz_rebuild" => {
@@ -222,6 +223,45 @@ fn emit_arsc(dir: &Path) -> io::Result<usize> {
 fn emit_axml(dir: &Path) -> io::Result<usize> {
     let mut n = write_bytes(dir.join("00_axml_minimal.bin"), &axml_minimal())?;
     n += write_bytes(dir.join("01_axml_ns_attrs.bin"), &axml_ns_attrs())?;
+    Ok(n)
+}
+
+/// Seed URIs for `fuzz_uri_match`: valid escapes, truncated/malformed
+/// escapes, bad UTF-8 after decoding, empty parts and oversize garbage.
+fn emit_uri(dir: &Path) -> io::Result<usize> {
+    let mut rows: Vec<(&str, Vec<u8>)> = vec![
+        ("00_simple.bin", b"https://example.com/a?b=c#frag".to_vec()),
+        (
+            "01_valid_escape.bin",
+            b"https://example.com/a%20b?x=%2F".to_vec(),
+        ),
+        ("02_truncated_pct.bin", b"https://example.com/%".to_vec()),
+        ("03_truncated_hex.bin", b"https://example.com/a%G".to_vec()),
+        ("04_truncated_end.bin", b"https://example.com/a%".to_vec()),
+        (
+            "05_query_truncated.bin",
+            b"https://example.com/a?token=%A".to_vec(),
+        ),
+        (
+            "06_fragment_truncated.bin",
+            b"https://example.com/a#%A".to_vec(),
+        ),
+        ("07_bad_utf8.bin", b"https://example.com/%FF".to_vec()),
+        (
+            "08_incomplete_utf8.bin",
+            b"https://example.com/p%C3".to_vec(),
+        ),
+        ("09_empty_path.bin", b"https://example.com".to_vec()),
+        ("10_root.bin", b"https://example.com/".to_vec()),
+        ("11_backslash.bin", b"https://example.com\\private".to_vec()),
+        ("12_no_authority.bin", b"opaque:thing#frag".to_vec()),
+    ];
+    rows.push(("13_oversize.bin", "x".repeat(1 << 21).into_bytes()));
+    rows.push(("14_long_not_oversize.bin", "x".repeat(1 << 10).into_bytes()));
+    let mut n = 0usize;
+    for (name, body) in rows {
+        n += write_bytes(dir.join(name), &body)?;
+    }
     Ok(n)
 }
 

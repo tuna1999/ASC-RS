@@ -88,10 +88,19 @@ fn percent_decode(s: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if b == b'%' && i + 2 < bytes.len() + 1 && i + 2 <= bytes.len() {
-            let hex = &bytes[i + 1..i + 3];
-            let hi = hex_val(hex[0])?;
-            let lo = hex_val(hex[1])?;
+        if b == b'%' {
+            // An escape must be followed by exactly two hex digits. A '%'
+            // with no/partial room, or a non-hex pair, is malformed: fail the
+            // whole decode conservatively (AOSP `Uri.decode` throws on an
+            // incomplete/non-hex escape) rather than slicing out of bounds or
+            // silently keeping a raw '%' (which would fabricate a byte the
+            // URI did not intend). The caller maps a failed decode to
+            // `Unknown`.
+            if i + 3 > bytes.len() {
+                return None;
+            }
+            let hi = hex_val(bytes[i + 1])?;
+            let lo = hex_val(bytes[i + 2])?;
             out.push((hi << 4) | lo);
             i += 3;
         } else {
@@ -843,6 +852,56 @@ mod tests {
             evaluate_filter_uri(&f2, "https://example.com/public", false).outcome,
             UriMatchVerdict::Matches
         );
+        // T21: flag off, the block group is ignored and the sibling path does
+        // NOT match the URI → CannotMatch (the flag-off branch is `paths ==
+        // null` only when there is no sibling path at all).
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com/private", false).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn scheme_and_host_preconditions() {
+        // D1/D2: a scheme not in the pooled set, or a host not in the filter,
+        // is a definite rejection before the path/group layer is consulted.
+        let f = base_filter(vec![], vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "http://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://other.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // D4: host compare is case-insensitive (AOSP compareToIgnoreCase).
+        let mut f_case = base_filter(vec![], vec![]);
+        f_case.data[0].host = Some("EXAMPLE.COM".to_string());
+        assert_eq!(
+            evaluate_filter_uri(&f_case, "https://example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        // D3: a wildcard host is a suffix match that never accepts a shorter
+        // apex or a mid-string host.
+        let mut f_wild = base_filter(vec![], vec![]);
+        f_wild.data[0].host = Some("*.example.com".to_string());
+        assert_eq!(
+            evaluate_filter_uri(&f_wild, "https://sub.example.com/x", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f_wild, "https://example.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f_wild, "https://notexample.com/x", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // A decoded host with a malformed escape fails the parse → Unknown.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://exa%mple.com/x", true).outcome,
+            UriMatchVerdict::Unknown
+        );
     }
 
     #[test]
@@ -1524,6 +1583,134 @@ mod tests {
         assert_eq!(
             evaluate_filter_uri(&f2, "https://example.com/private", true).outcome,
             UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn truncated_escape_never_panics() {
+        // P1 regression: a URI whose part ends in an incomplete escape must
+        // not slice out of bounds (previous `i + 2 < len + 1 && i + 2 <= len`
+        // allowed `bytes[i+1..i+3]` to run past the end). Malformed → the
+        // parse fails → Unknown, never a panic and never a guessed match.
+        let f = base_filter(vec![], vec![]);
+        for uri in [
+            "https://example.com/%A",
+            "https://example.com/%",
+            "https://example.com/a%",
+            "https://example.com/a?token=%A",
+            "https://example.com/a?token=%",
+            "https://example.com/a#%A",
+        ] {
+            assert_eq!(
+                evaluate_filter_uri(&f, uri, true).outcome,
+                UriMatchVerdict::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn valid_escapes_decode_in_path_and_query() {
+        // %20 → space (path), %2F → '/', %E2%82%AC → '€' (3-byte UTF-8).
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "/a b")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a%20b", true).outcome,
+            UriMatchVerdict::Matches
+        );
+
+        let f2 = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "/a/b")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com/a%2Fb", true).outcome,
+            UriMatchVerdict::Matches
+        );
+
+        let f3 = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "/€")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f3, "https://example.com/%E2%82%AC", true).outcome,
+            UriMatchVerdict::Matches
+        );
+
+        // Same valid escapes inside the query part.
+        let f4 = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Query, PathMatchKind::Exact, "x=a b")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f4, "https://example.com/?x=a%20b", true).outcome,
+            UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn malformed_escapes_and_bad_utf8_are_unknown() {
+        // Non-hex escape (%GG), an escape producing invalid UTF-8 (%FF alone)
+        // and an incomplete UTF-8 sequence (%C3) all fail the decode → Unknown.
+        // They are not silently replaced or guessed into a verdict.
+        let f = base_filter(vec![], vec![]);
+        for uri in [
+            "https://example.com/%GG",
+            "https://example.com/a%GGb",
+            "https://example.com/%FF",
+            "https://example.com/%C3",
+            "https://example.com/a?token=%GG",
+            "https://example.com/a#%C3",
+        ] {
+            assert_eq!(
+                evaluate_filter_uri(&f, uri, true).outcome,
+                UriMatchVerdict::Unknown
+            );
+        }
+        // A malformed escape in the authority (host) is also a failed parse.
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://exa%mple.com/a", true).outcome,
+            UriMatchVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn uri_at_and_beyond_size_bound_is_unknown() {
+        let f = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Exact, "/a")],
+            )],
+            vec![],
+        );
+        // Just inside the 1 MiB bound: parse succeeds and the verdict is real.
+        let inside = "https://example.com/".to_string() + &"a".repeat(MAX_URI_LEN - 30);
+        assert!(
+            inside.len() <= MAX_URI_LEN,
+            "test fixture must be within the bound"
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, &inside, true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        // At/over the bound: refused → Unknown, never a truncated decision.
+        let at = "https://example.com/".to_string() + &"a".repeat(MAX_URI_LEN + 1);
+        assert_eq!(
+            evaluate_filter_uri(&f, &at, true).outcome,
+            UriMatchVerdict::Unknown
         );
     }
 }

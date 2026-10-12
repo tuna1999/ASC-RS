@@ -145,5 +145,1310 @@
     {"case_id": "F5_wildcard_host", "rule": "F5 wildcard suffix", "uri": "https://sub.example.com/x", "flag_on": true,
      "filter": {"data": [{"scheme": "https", "host": "*.example.com"}], "groups": []},
      "source_expected": "matches", "oracle": null}
+,{
+    "case_id": "T9_sibling_path_overrides_block",
+    "rule": "R5 sibling OR vs block",
+    "uri": "https://example.com/public",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        },
+        {
+          "path": "/public"
+        }
+      ],
+      "groups": [
+        {
+          "allow": false,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/private"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "matches",
+    "oracle": null
+  },
+  {
+    "case_id": "T15b_no_param_matches",
+    "rule": "R8 no single param matches",
+    "uri": "https://example.com/a?token=0&x=2",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": [
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "query",
+                  "kind": "exact",
+                  "value": "token=1"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "cannot_match",
+    "oracle": null
+  },
+  {
+    "case_id": "T17_pattern_no_match_unknown",
+    "rule": "R9 simple glob (oracle-open)",
+    "uri": "https://example.com/ab",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": [
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "pattern",
+                  "value": "/a/.*"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  },
+  {
+    "case_id": "T21_flag_off_block_inert",
+    "rule": "R10 flag off block inert",
+    "uri": "https://example.com/private",
+    "flag_on": false,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        },
+        {
+          "path": "/public"
+        }
+      ],
+      "groups": [
+        {
+          "allow": false,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/private"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "cannot_match",
+    "oracle": null
+  },
+  {
+    "case_id": "T22_advanced_unsupported_unknown",
+    "rule": "unevaluable advanced glob (oracle-open)",
+    "uri": "https://example.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": [
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "advanced",
+                  "value": "/a/(?=x)"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  },
+  {
+    "case_id": "T26_unknown_block_then_allow",
+    "rule": "F3 unknown-block -> allow",
+    "uri": "https://example.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": [
+        {
+          "allow": false,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "pattern",
+                  "value": "/x"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/x"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  },
+  {
+    "case_id": "T27_unknown_allow_then_block",
+    "rule": "F3 unknown-allow -> block",
+    "uri": "https://example.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": [
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "pattern",
+                  "value": "/x"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": false,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/x"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  },
+  {
+    "case_id": "T28_group_beyond_bound",
+    "rule": "F2 65-group truncation",
+    "uri": "https://example.com/target",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": [
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/other"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "allow": true,
+          "data": [
+            {
+              "parts": [
+                {
+                  "part": "path",
+                  "kind": "exact",
+                  "value": "/target"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  },
+  {
+    "case_id": "D1_scheme_mismatch",
+    "rule": "scheme not in pool",
+    "uri": "http://example.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "cannot_match",
+    "oracle": null
+  },
+  {
+    "case_id": "D2_host_mismatch",
+    "rule": "host not in filter",
+    "uri": "https://other.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "cannot_match",
+    "oracle": null
+  },
+  {
+    "case_id": "D3_wildcard_host_apex",
+    "rule": "F5 wildcard not shorter apex",
+    "uri": "https://example.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "*.example.com"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "cannot_match",
+    "oracle": null
+  },
+  {
+    "case_id": "D3_wildcard_host_not_sibling",
+    "rule": "F5 wildcard mid-string",
+    "uri": "https://notexample.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "*.example.com"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "cannot_match",
+    "oracle": null
+  },
+  {
+    "case_id": "D4_host_ascii_case",
+    "rule": "host case-insensitive (ASCII)",
+    "uri": "https://example.com/x",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "EXAMPLE.COM"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "matches",
+    "oracle": null
+  },
+  {
+    "case_id": "P1_truncated_escape_path",
+    "rule": "malformed %A path (unknown)",
+    "uri": "https://example.com/%A",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  },
+  {
+    "case_id": "P1_bad_hex_query",
+    "rule": "malformed %GG query (unknown)",
+    "uri": "https://example.com/a?token=%GG",
+    "flag_on": true,
+    "filter": {
+      "data": [
+        {
+          "scheme": "https",
+          "host": "example.com"
+        }
+      ],
+      "groups": []
+    },
+    "source_expected": "unknown",
+    "oracle": null
+  }
   ]
 }

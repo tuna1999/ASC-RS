@@ -151,26 +151,38 @@ the Android framework's `IntentFilter.matchData` /
 the Python oracle above (which has no such command). The acceptance rows
 T1–T30 in `docs/research/uri-relative-filter-groups.md` were source-confirmed
 against the pinned `android-15.0.0_r1` (API 35) code, but the live oracle
-differential has **not been run**: no Android SDK / emulator / Robolectric
-environment is available on this machine. Until it runs:
+differential has **not been run**: no JDK / Android SDK / Gradle / emulator is
+available on this machine (`java`/`gradle`/`ANDROID_SDK_ROOT` all absent).
+Until it runs:
 
 - the deterministic rows (order, AND, empty-group, host dependency, sibling
   OR, allow/block, authMatch, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`,
   `+`-literal, case-insensitive/`*`-wildcard host, numeric port, userinfo,
-  bounds → Unknown) are treated as verified-by-source, not oracle-run;
+  malformed percent-escape → `unknown`, bounds → Unknown) are treated as
+  verified-by-source, not oracle-run;
 - `Pattern` / `AdvancedPattern` glob matchers remain `unknown` (§6.3);
 - aapt2-built real-APK fixtures for the element are still missing.
 
-How to run once an SDK/emulator is available: the asc-rs side is already
-runnable — `python tests/differential/run_uri_oracle.py` drives
+The source-derived regression runs here and is green:
+`python tests/differential/run_uri_oracle.py` drives
 `asc-manifest/examples/eval_uri.rs` over `tests/fixtures/uri_match_cases.json`
-(36 fixtures incl. the v0.19.2 F1 empty-path and F2 backslash rows) and returns
-0 iff every verdict equals `source_expected`. The Android side is
-`reference/oracle/uri_match/UriOracle.java` (Robolectric, **not executed here**)
+(51 fixtures: T1–T28 rows present as expressible + C1/C2 + F1–F5 + D1–D4
+scheme/host/wildcard/ASCII-case + P1 malformed-escape rows) and returns 0 iff
+every verdict equals `source_expected` and no case id is missing/duplicated.
+The Android side is a standalone Gradle + Robolectric project in
+`reference/oracle/uri_match/` (`src/test/java/us/ascrs/urioracle/UriOracle.java`),
 which builds each fixture's `IntentFilter`, runs `matchData(type, scheme, Uri)`
-with `flags=on|off` per row and writes `oracle_verdicts.json`; then
-`run_uri_oracle.py --oracle reference/oracle/uri_match/oracle_verdicts.json`
-diffs it. Record the Android API level, source revision (`android-15.0.0_r1`),
-flag state, and a pass/fail table here before closing roadmap 5.6. Known gap:
-no boot path yet — the aconfig flag `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS`
-must be enabled at runtime for the group-aware `matchData` branch to run.
+with the URI-derived scheme and per-row `flag_on`, and writes
+`build/oracle_verdicts.json` with **provenance** (framework revision, API
+level, assumed flag states, flag mechanism, output paths). Then
+`run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json`
+diffs it; ASC-RS `unknown` rows surfaced against the oracle are real findings,
+never "the oracle also says unknown". The Gradle project was **not compiled or
+run** here (no toolchain); a file whose `flag_mechanism` is `UNKNOWN` is
+reported `UNVERIFIED_SKIPPED`. Record the Android API level, source revision
+(`android-15.0.0_r1`), flag state and mechanism, and a pass/fail table here
+before closing roadmap 5.6. Known gap: the aconfig flag
+`FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` is frozen at framework build time and
+is not runtime-toggleable from Robolectric — both flag states need two
+framework builds (or an emulator where the flag can be switched) to be
+exercised.

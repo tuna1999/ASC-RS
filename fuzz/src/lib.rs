@@ -176,6 +176,11 @@ pub fn registry() -> Vec<TargetInfo> {
             default_seed: "apk_file",
         },
         TargetInfo {
+            name: "fuzz_uri_match",
+            func: fuzz_targets::fuzz_uri_match::run,
+            default_seed: "uri_strings",
+        },
+        TargetInfo {
             name: "fuzz_disasm",
             func: fuzz_targets::fuzz_disasm::run,
             default_seed: "disasm_dex",

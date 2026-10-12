@@ -73,6 +73,7 @@ const CONTRACT_TARGETS: &[(&str, &str)] = &[
     ("fuzz_apk_open", "apk"),
     ("fuzz_arsc", "resources"),
     ("fuzz_axml", "manifest"),
+    ("fuzz_uri_match", "manifest"),
     ("fuzz_rebuild", "rebuild"),
     ("fuzz_inspect", "core"),
     ("fuzz_hermes", "core"),

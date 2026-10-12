@@ -167,6 +167,19 @@ jobs:
           python tests/differential/run_differential.py \
             target/release/asc-rs${{ runner.os == 'Windows' && '.exe' || '' }}
 
+      - name: URI-relative-filter-group differential (source-expected)
+        # Source-derived regression only: diffs asc-rs evaluate_filter_uri
+        # against each fixture's source_expected and MUST exit 0 with no
+        # SOURCE-MISMATCH (a new or duplicate case_id would also fail the
+        # plugin in the URI oracle README). Android-framework parity is a
+        # separate, manual oracle run (reference/oracle/uri_match) — it is
+        # NOT gated here because no Android SDK exists in CI.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/differential/run_uri_oracle.py
+
       - name: perf_compare selftest
         shell: bash
         run: python benches/perf_compare.py --selftest

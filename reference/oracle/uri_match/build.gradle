@@ -1,0 +1,39 @@
+// URL-match oracle build.
+//
+// UNVERIFIED: this project has NOT been compiled or run on this machine (no
+// JDK / Android SDK / Gradle). The dependency versions and the flag-control
+// recipe below are a documented starting point; a maintainer with the
+// environment must verify them (see README.md) before any oracle_verdicts.json
+// is treated as authoritative.
+apply plugin: 'java'
+apply plugin: 'org.robolectric'
+
+repositories {
+    mavenCentral()
+}
+
+// Single source of truth: the ASC-RS fixture lives in the repo and is read
+// straight from there (no copy). projectDir == reference/oracle/uri_match.
+ext {
+    uriFixtures = file('../../../tests/fixtures/uri_match_cases.json').canonicalPath
+    oracleOut    = file("${buildDir}/oracle_verdicts.json").canonicalPath
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    // Robolectric 4.14+ can resolve android-all for API 35 (Android 15).
+    // NOTE: an API-35 android-all artifact MUST be present in the local
+    // ~/.m2 or resolvable from Maven Central, and its aconfig flag state
+    // for FLAG_RELATIVE_REFERENCE_INTENT_FILTERS must be known (see README
+    // "Flag handling").
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+}
+
+test {
+    useJUnit()
+    systemProperty 'uri.fixtures', uriFixtures
+    systemProperty 'uri.oracle.out', oracleOut
+    // Document which flag-control mechanism was used. See README "Flag handling".
+    systemProperty 'uri.flag.mechanism', System.getenv('URI_FLAG_MECHANISM') ?: 'UNKNOWN'
+    testLogging { events 'passed', 'failed' }
+}
