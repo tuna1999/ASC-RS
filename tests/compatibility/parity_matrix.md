@@ -142,7 +142,7 @@ will be exercised automatically by the differential runner:
 5. Run `tests/differential/run_differential.py --selftest` to confirm
    the harness still produces the expected PASS/FAIL/SKIP pattern, then
    run it against your asc-rs build to confirm parity.
-## `manifest --match-uri` — AOSP-API-35 oracle differential (roadmap 5.6, PENDING)
+## `manifest --match-uri` — AOSP-API-35 oracle differential (roadmap 5.6, CI-GATED)
 
 The `--match-uri <uri>` evaluator (`asc_manifest::uri_match::evaluate_filter_uri`)
 is a three-valued `matches` / `cannot match` / `unknown` verdict. Its truth is
@@ -150,17 +150,22 @@ the Android framework's `IntentFilter.matchData` /
 `UriRelativeFilterGroup.matchGroupsToUri` against `/android.net.Uri`, **not**
 the Python oracle above (which has no such command). The acceptance rows
 T1–T30 in `docs/research/uri-relative-filter-groups.md` were source-confirmed
-against the pinned `android-15.0.0_r1` (API 35) code, but the live oracle
-differential has **not been run**: no JDK / Android SDK / Gradle / emulator is
-available on this machine (`java`/`gradle`/`ANDROID_SDK_ROOT` all absent).
-Until it runs:
+against the pinned `android-15.0.0_r1` (API 35) code and then oracle-run
+(Robolectric, 2026-10-12); the committed verdict file is asserted on every CI
+run, so the differential is no longer manual-only.
+Current state after the oracle run (2026-10-12):
 
 - the deterministic rows (order, AND, empty-group, host dependency, sibling
   OR, allow/block, authMatch, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`,
   `+`-literal, case-insensitive/`*`-wildcard host, numeric port, userinfo,
-  malformed percent-escape → `unknown`, bounds → Unknown) are treated as
-  verified-by-source, not oracle-run;
-- `Pattern` / `AdvancedPattern` glob matchers remain `unknown` (§6.3);
+  malformed percent-escape → `unknown`, bounds → Unknown) are
+  verified-by-source **and** oracle-confirmed (36 ORACLE-CONFIRMED, 0
+  mismatches);
+- `Pattern` / `AdvancedPattern` glob rows are answered by the oracle but
+  ASC-RS still returns `unknown` for them — surfaced as ORACLE-OPEN (§6.3),
+  never counted as confirmed;
+- the 3 flag-off rows are UNVERIFIED(FLAG): the aconfig flag is frozen at
+  framework build time, so a second android-all build is needed;
 - aapt2-built real-APK fixtures for the element are still missing.
 
 The source-derived regression runs here and is green:
@@ -180,8 +185,14 @@ level, **actual** flag state read at runtime via
 mechanism, output paths). Then
 `run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json`
 diffs it; ASC-RS `unknown` rows surfaced against the oracle are `ORACLE-OPEN`
-real findings, never "the oracle also says unknown". The Gradle project was
-**not compiled or run** here (no toolchain); the runner **rejects** (exit 1)
+real findings, never "the oracle also says unknown". The Gradle project
+**compiled and ran** on 2026-10-12 (JDK 17.0.20.1, Gradle 8.10.2, Robolectric
+4.14.1, `android-all-instrumented:15-robolectric-12650502-i7`) and produced
+51 rows: 36 ORACLE-CONFIRMED, 12 ORACLE-OPEN, 3 UNVERIFIED(FLAG). That output
+is committed as `tests/fixtures/oracle_verdicts_api35_flag_on.json` and
+**asserted in CI** (Linux leg, `--oracle <fixture>`) — a verdict regression
+fails the build without an Android SDK on the runner, and regenerating the
+file is the only part that needs JDK + Gradle. The runner **rejects** (exit 1)
 any oracle file whose provenance is missing/invalid or reports
 `UNVERIFIED_SKIPPED`, and never emits `ORACLE-CONFIRMED` from a case it cannot
 prove it exercised in the right flag state. Record the Android API level,

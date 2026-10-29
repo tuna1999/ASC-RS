@@ -1,10 +1,14 @@
 # API 35 `<uri-relative-filter-group>` — AOSP semantics, evidence, roadmap
 
-Date: 2026-10-08 · branch `master` · status: **5.1–5.5 shipped in
-`asc-rs manifest --match-uri <uri>` (text + additive JSON), evaluator in
-`asc-manifest::uri_match`; the 5.4 AOSP-oracle differential and real-APK
-fixtures (aapt2) remain pending — underlying glob/decoding rows stay
-`unknown` until the oracle runs.**
+Date: 2026-10-08 · updated 2026-10-29 · branch `master` · status:
+**5.1–5.5 shipped in `asc-rs manifest --match-uri <uri>` (text + additive
+JSON), evaluator in `asc-manifest::uri_match`; the 5.4 AOSP-oracle
+differential is GATED in CI against the committed Robolectric run
+(`tests/fixtures/oracle_verdicts_api35_flag_on.json`: 36 ORACLE-CONFIRMED,
+12 ORACLE-OPEN, 3 flag-state UNVERIFIED, 0 mismatches). Real-APK aapt2
+fixtures remain pending, and glob/decoding rows stay `unknown` in the
+evaluator until implemented — the oracle already resolved them, and those
+rows are surfaced as ORACLE-OPEN, never counted as confirmed.**
 
 ASC-RS today parses `<uri-relative-filter-group>` children of an
 `<intent-filter>` and reports them verbatim (`asc-manifest`
@@ -361,9 +365,15 @@ made the oracle reproducible.
   `UNVERIFIED_SKIPPED` provenance, or missing/duplicate/unexpected verdicts —
   as a hard error (exit 1) and never emits `ORACLE-CONFIRMED` from it; a
   resolved asc-rs `unknown` is `ORACLE-OPEN`, not confirmed. Output is
-  `build/oracle_verdicts.json` `{verdicts, provenance}`. **Not compiled/run**:
-  no JDK / Android SDK / Gradle on this machine — every oracle row stays
-  `NOT_RUN` / `UNVERIFIED`.
+  `build/oracle_verdicts.json` `{verdicts, provenance}`. **Compiled and run
+  on 2026-10-12** (JDK 17.0.20.1, Gradle 8.10.2, Robolectric 4.14.1,
+  `android-all-instrumented:15-robolectric-12650502-i7`): 48 flag-on cases
+  exercised, 3 flag-off rows skipped by construction, 0 mismatches. The
+  result is committed as
+  `tests/fixtures/oracle_verdicts_api35_flag_on.json` and **asserted in CI**
+  (Linux leg) via `run_uri_oracle.py --oracle …`; the live Gradle project
+  (`reference/oracle/uri_match/`, gitignored) is only needed to regenerate
+  it.
 - **Fixture coverage grew to 51 cases** — added the missing acceptance rows
   T9, T15b, T17, T21, T22, T26, T27, T28 plus D1–D4 (scheme mismatch, host
   mismatch, wildcard apex/not-sibling boundaries, ASCII case-insensitive host)
@@ -373,8 +383,9 @@ made the oracle reproducible.
   `REGRESSION-OK(UNVERIFIED)` / `REGRESSION-OK(UNSUPPORTED)` /
   `NOT_RUN` — skipped oracle rows are never counted as verified passes. The
   source-derived regression is wired into CI (Linux leg).
-- **Remaining blockers (unchanged):** no Android framework to fill
-  `oracle_verdicts.json`; aapt2 real-AXML fixtures still missing.
+- **Remaining blockers:** aapt2 real-AXML fixtures (one per rule group,
+  no Android SDK build host in CI) and a second android-all build to
+  exercise the flag-off trio; every other row is gated in CI.
 
 
 
@@ -432,8 +443,10 @@ suite and the oracle differential registered in
    "flag off" verdict is a separate row, not a footnote.
 3. **`PatternMatcher` corner cases** (lazy `.*` stops at the first literal
    occurrence, greedy `*`, `[ ]` sets and `{ }` ranges in the advanced
-   form, escaping `\\*`): the oracle decides, not prose. Until it runs,
-   `Pattern` / `AdvancedPattern` matchers from the filter return `Unknown`.
+   form, escaping `\\*`): the oracle now answers these (the glob rows are
+   ORACLE-OPEN in the committed run), but ASC-RS still returns `Unknown`
+   until the semantics are implemented from those answers — an ORACLE-OPEN
+   row is a surfaced gap, never a confirmed pass.
 4. **Decoding details.** Resolved from the pinned API 35 source (2026-10-09):
    `Uri.getPath()/getQuery()/getFragment()` percent-decode with
    `convertPlus=false`, so `%21`→`!` and a literal `+` **stays** `+` (Fixed to

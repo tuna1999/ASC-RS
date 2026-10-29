@@ -167,18 +167,26 @@ jobs:
           python tests/differential/run_differential.py \
             target/release/asc-rs${{ runner.os == 'Windows' && '.exe' || '' }}
 
-      - name: URI-relative-filter-group differential (source-expected)
-        # Source-derived regression only: diffs asc-rs evaluate_filter_uri
-        # against each fixture's source_expected and MUST exit 0 with no
-        # SOURCE-MISMATCH (a new or duplicate case_id would also fail the
-        # plugin in the URI oracle README). Android-framework parity is a
-        # separate, manual oracle run (reference/oracle/uri_match) — it is
-        # NOT gated here because no Android SDK exists in CI.
+      - name: URI-relative-filter-group differential (source + framework oracle)
+        # Two layers, both gated on the Linux leg:
+        #   1. every fixture's `source_expected` (pinned android-15.0.0_r1
+        #      source) — a SOURCE-MISMATCH is a real bug;
+        #   2. the committed Robolectric run
+        #      (tests/fixtures/oracle_verdicts_api35_flag_on.json). The runner
+        #      validates its provenance (framework, api_level, observed api
+        #      level, flag mechanism, exercised case ids) before emitting any
+        #      ORACLE-CONFIRMED, so CI asserts the framework's committed
+        #      answers without an Android SDK on the runner. Regenerating the
+        #      file needs JDK + Gradle (reference/oracle/uri_match/) and stays
+        #      manual.
+        # Missing/duplicate/unexpected ids, invalid provenance, UNVERIFIED_SKIPPED
+        # and any ORACLE-MISMATCH exit non-zero.
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          python tests/differential/run_uri_oracle.py
+          python tests/differential/run_uri_oracle.py \
+            --oracle tests/fixtures/oracle_verdicts_api35_flag_on.json
 
       - name: URI oracle harness regression tests
         # Tests the judging logic in run_uri_oracle.py: provenance gating,
