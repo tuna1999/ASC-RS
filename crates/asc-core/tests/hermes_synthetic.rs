@@ -2,6 +2,8 @@
 //! known string table (identifier + plain + overflowed UTF-16 entry), wrap
 //! it in a ZIP, and check extraction end-to-end via `run_hermes`.
 
+mod common;
+
 use std::io::Write as _;
 
 const MAGIC: [u8; 8] = [0xC6, 0x1F, 0xBC, 0x03, 0xC1, 0x03, 0x19, 0x1F];
@@ -67,11 +69,10 @@ fn bundle(version: u32, corrupt_storage_size: Option<u32>) -> Vec<u8> {
 }
 
 fn write_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
-    let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
-    let opts =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut w = common::zipw::ZipWriter::new(std::fs::File::create(path).unwrap());
     for (name, data) in entries {
-        w.start_file(*name, opts).unwrap();
+        w.start_file(name, common::zipw::Compression::Stored)
+            .unwrap();
         w.write_all(data).unwrap();
     }
     w.finish().unwrap();

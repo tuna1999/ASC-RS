@@ -220,13 +220,18 @@ fn needle_dex(needle: &str) -> Vec<u8> {
 }
 
 /// STORED APK with the given root entries.
+///
+/// The writer lives in asc-core's test support tree so the ZIP byte
+/// layout has exactly one implementation (see its module docs for why
+/// the `zip` dev-dependency is gone).
+#[path = "../../asc-core/tests/common/zipw.rs"]
+mod zipw;
+
 fn write_apk(tag: &str, entries: &[(&str, Vec<u8>)]) -> PathBuf {
     let path = std::env::temp_dir().join(format!("asc_cli_{tag}_{}.apk", std::process::id()));
-    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-    let opts =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut zip = zipw::ZipWriter::new(std::fs::File::create(&path).unwrap());
     for (name, data) in entries {
-        zip.start_file(*name, opts).unwrap();
+        zip.start_file(name, zipw::Compression::Stored).unwrap();
         zip.write_all(data).unwrap();
     }
     zip.finish().unwrap();

@@ -27,4 +27,8 @@ serde.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 droidsaw-dex = "2.0.0"
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+# Test ZIP fixtures are written by tests/common/zipw.rs; `zip` was a
+# dev-dependency until RUSTSEC-2026-0367/0368/0369 (patched only in the
+# `zip` 9 fork). Both crates below are already in the production graph.
+flate2.workspace = true
+crc32fast.workspace = true

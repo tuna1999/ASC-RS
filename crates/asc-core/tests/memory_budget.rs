@@ -67,19 +67,27 @@ fn needle_dex(marker: &str, pad: usize) -> Vec<u8> {
     needle_dex_for(MAIN, marker, pad)
 }
 
+/// The three DEX payloads `mixed_apk` packs, in archive order.
+fn mixed_dexes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    (
+        needle_dex(NEEDLE, 0),
+        needle_dex(NEEDLE, 700),
+        needle_dex(NEEDLE, 400),
+    )
+}
+
 fn mixed_apk(tag: &str) -> (std::path::PathBuf, usize, usize) {
     // classes.dex: small, defines Lp/Main; classes2.dex: padded, also
     // defines Lp/Main; (dup determinism is covered by duplicate_class.rs,
     // here only the sizes matter).
-    let small = needle_dex(NEEDLE, 0);
-    let big = needle_dex(NEEDLE, 700);
+    let (small, big, third) = mixed_dexes();
     let sizes = (small.len(), big.len());
     let apk = write_apk(
         tag,
         &[
             ("classes.dex", small),
             ("classes2.dex", big),
-            ("classes3.dex", needle_dex(NEEDLE, 400)),
+            ("classes3.dex", third),
         ],
     );
     (apk, sizes.0, sizes.1)
@@ -125,13 +133,10 @@ fn budget_exactly_fits_all_entries_succeeds() {
     // 8 workers may hold all three entries at once; that is the worst
     // case, and a budget of (sum of all entries) + slack must pass.
     let sum: u64 = {
-        let mut z = 0u64;
-        let f = std::fs::File::open(&apk).unwrap();
-        let mut zf = zip::ZipArchive::new(f).unwrap();
-        for i in 0..zf.len() {
-            z += zf.by_index(i).unwrap().size();
-        }
-        z
+        // The archive is STORED, so the declared (== real) entry sizes are
+        // exactly the DEX lengths; `mixed_dexes` is deterministic.
+        let (small, big, third) = mixed_dexes();
+        (small.len() + big.len() + third.len()) as u64
     };
     let result = getclass(&apk, sum as usize + 16);
     assert!(

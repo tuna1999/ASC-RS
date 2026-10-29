@@ -5,14 +5,15 @@
 //! here → `unknown`, never guessed), provenance stays per-member, and a
 //! bad DEX is a member-level error, not a container failure.
 
+mod common;
+
 use std::io::Write as _;
 
 fn zip_bytes(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
-    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let opts =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut w = common::zipw::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, data) in entries {
-        w.start_file(*name, opts).unwrap();
+        w.start_file(name, common::zipw::Compression::Stored)
+            .unwrap();
         w.write_all(data).unwrap();
     }
     w.finish().unwrap().into_inner()
@@ -25,11 +26,10 @@ fn write_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
 /// Same, but every entry is DEFLATE-compressed (the payloads used with
 /// this are highly compressible, so the container stays tiny on disk).
 fn zip_bytes_deflated(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
-    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let opts =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut w = common::zipw::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, data) in entries {
-        w.start_file(*name, opts).unwrap();
+        w.start_file(name, common::zipw::Compression::Deflated)
+            .unwrap();
         w.write_all(data).unwrap();
     }
     w.finish().unwrap().into_inner()
@@ -63,20 +63,18 @@ fn synthetic_xapk_member_isolation() {
     // Member A: split-style APK with one native lib, no manifest.
     let mut split = std::io::Cursor::new(Vec::new());
     {
-        let mut w = zip::ZipWriter::new(&mut split);
-        let opts =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        w.start_file("lib/arm64-v8a/libfoo.so", opts).unwrap();
+        let mut w = common::zipw::ZipWriter::new(&mut split);
+        w.start_file("lib/arm64-v8a/libfoo.so", common::zipw::Compression::Stored)
+            .unwrap();
         w.write_all(b"\x7fELFfake").unwrap();
         w.finish().unwrap();
     }
     // Member B: APK whose only DEX is garbage (member-level error).
     let mut broken = std::io::Cursor::new(Vec::new());
     {
-        let mut w = zip::ZipWriter::new(&mut broken);
-        let opts =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        w.start_file("classes.dex", opts).unwrap();
+        let mut w = common::zipw::ZipWriter::new(&mut broken);
+        w.start_file("classes.dex", common::zipw::Compression::Stored)
+            .unwrap();
         w.write_all(b"not a dex").unwrap();
         w.finish().unwrap();
     }
@@ -118,10 +116,9 @@ fn synthetic_xapk_member_isolation() {
 fn oversized_non_dex_asset_is_not_a_dex() {
     let mut member = std::io::Cursor::new(Vec::new());
     {
-        let mut w = zip::ZipWriter::new(&mut member);
-        let opts =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        w.start_file("assets/huge.bin", opts).unwrap();
+        let mut w = common::zipw::ZipWriter::new(&mut member);
+        w.start_file("assets/huge.bin", common::zipw::Compression::Deflated)
+            .unwrap();
         let zeros = vec![0u8; 1 << 20];
         for _ in 0..300 {
             w.write_all(&zeros).unwrap();
@@ -219,10 +216,9 @@ fn aggregate_budget_stops_and_reports_partial() {
     let member = || {
         let mut m = std::io::Cursor::new(Vec::new());
         {
-            let mut w = zip::ZipWriter::new(&mut m);
-            let opts = zip::write::FileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-            w.start_file("classes.dex", opts).unwrap();
+            let mut w = common::zipw::ZipWriter::new(&mut m);
+            w.start_file("classes.dex", common::zipw::Compression::Stored)
+                .unwrap();
             w.write_all(b"not a dex").unwrap();
             w.finish().unwrap();
         }

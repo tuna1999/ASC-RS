@@ -23,5 +23,9 @@ serde_json.workspace = true
 
 [dev-dependencies]
 asc-dex.workspace = true
-zip = { version = "0.6", default-features = false }
+# The APK fixtures share asc-core's test ZIP writer
+# (tests/common/zipw.rs) instead of the vulnerable `zip` 0.6 crate
+# (RUSTSEC-2026-0367/0368/0369); flate2/crc32fast are already in the
+# production graph.
+flate2.workspace = true
 crc32fast.workspace = true

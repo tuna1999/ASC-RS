@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+
 use asc_core::run_inspect;
 use sha1::Digest as _;
 
@@ -213,11 +215,10 @@ fn write_dex(tag: &str, bytes: &[u8]) -> PathBuf {
 
 fn write_apk(tag: &str, files: &[(&str, &[u8])]) -> PathBuf {
     let p = temp_path(tag);
-    let mut w = zip::ZipWriter::new(fs::File::create(&p).unwrap());
-    let opts =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut w = common::zipw::ZipWriter::new(fs::File::create(&p).unwrap());
     for (name, bytes) in files {
-        w.start_file(*name, opts).unwrap();
+        w.start_file(name, common::zipw::Compression::Stored)
+            .unwrap();
         std::io::Write::write_all(&mut w, bytes).unwrap();
     }
     w.finish().unwrap();

@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use asc_dex::mutf8::from_utf16;
 
+pub mod zipw;
+
 pub fn u(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
@@ -258,11 +260,9 @@ impl Dex {
 /// STORED APK with the given root entries, under the OS temp dir.
 pub fn write_apk(tag: &str, entries: &[(&str, Vec<u8>)]) -> PathBuf {
     let path = std::env::temp_dir().join(format!("asc_core_{tag}_{}.apk", std::process::id()));
-    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-    let opts =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut zip = zipw::ZipWriter::new(std::fs::File::create(&path).unwrap());
     for (name, data) in entries {
-        zip.start_file(*name, opts).unwrap();
+        zip.start_file(name, zipw::Compression::Stored).unwrap();
         zip.write_all(data).unwrap();
     }
     zip.finish().unwrap();
