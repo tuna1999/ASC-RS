@@ -1,0 +1,62 @@
+# Automated dependency PRs.
+#
+# Complements `.github/workflows/deny.yml`: deny catches advisories AFTER a
+# crate is already locked (that is how RUSTSEC-2026-0367/0368/0369 were
+# found, 5 days late); this keeps the lock fresh so such a bump is routine.
+#
+# Two cargo manifests exist: the workspace root and the detached `fuzz/`
+# workspace, which has its own `Cargo.lock`. Actions are pinned by full
+# commit SHA with a `# vX.Y.Z` comment — Dependabot rewrites both, and the
+# normal CI gate (fmt, clippy, test with the corpus env vars, selfcheck,
+# differential, perf selftest) runs on every PR. Nothing auto-merges: the
+# release toolchain pin (1.97.1) and the MSRV floor (1.95.0) are manual
+# decisions, not dependency updates.
+version: 2
+updates:
+  # Workspace root (asc-* crates + benches).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 6
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Detached fuzz workspace (own Cargo.lock, not a member of the root one).
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:10"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 4
+    commit-message:
+      prefix: "chore(deps-fuzz)"
+    groups:
+      fuzz-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Workflow actions (SHA-pinned; the version comment is rewritten too).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:20"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 4
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
