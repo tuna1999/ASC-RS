@@ -51,7 +51,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 crc32fast = "1"
 smallvec = "1"
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 adler2 = "2"
 rayon = "1"
 criterion = "0.8"
