@@ -166,6 +166,17 @@ impl eframe::App for AscApp {
                         ui.close();
                         self.queue(Command::ShowClassStrings);
                     }
+                    if ui
+                        .add_enabled(
+                            self.session.is_some(),
+                            egui::Button::new("Browse resources (APK only)"),
+                        )
+                        .on_disabled_hover_text("open an APK first")
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowResources);
+                    }
                     let sel_ok = self.active_symbol_sel().is_some();
                     if ui
                         .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))

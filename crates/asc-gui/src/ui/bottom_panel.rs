@@ -12,6 +12,7 @@ use crate::state::{NavOrigin, SearchKind, SearchRow};
 pub enum BottomTab {
     Results,
     References,
+    Resources,
     Problems,
     Tasks,
 }
@@ -21,15 +22,17 @@ impl BottomTab {
         match self {
             BottomTab::Results => "SEARCH RESULTS",
             BottomTab::References => "REFERENCES",
+            BottomTab::Resources => "RESOURCES",
             BottomTab::Problems => "PROBLEMS",
             BottomTab::Tasks => "TASKS",
         }
     }
 }
 
-const BOTTOM_TABS: [BottomTab; 4] = [
+const BOTTOM_TABS: [BottomTab; 5] = [
     BottomTab::Results,
     BottomTab::References,
+    BottomTab::Resources,
     BottomTab::Problems,
     BottomTab::Tasks,
 ];
@@ -55,10 +58,11 @@ impl AscApp {
                 ui.add_space(4.0);
             }
             // Right-aligned result summary.
-            let summary_source = if self.bottom_tab == BottomTab::References {
-                self.references.as_ref()
-            } else {
-                self.search.results()
+            let summary_source = match self.bottom_tab {
+                BottomTab::References => self.references.as_ref(),
+                // The RESOURCES tab prints its own counts inline.
+                BottomTab::Resources => None,
+                _ => self.search.results(),
             };
             if let Some(r) = summary_source {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -84,6 +88,7 @@ impl AscApp {
         match self.bottom_tab {
             BottomTab::Results => self.draw_search_results(ui),
             BottomTab::References => self.draw_references(ui),
+            BottomTab::Resources => self.draw_resources(ui),
             BottomTab::Problems => self.draw_problems(ui),
             BottomTab::Tasks => self.draw_tasks(ui),
         }
@@ -196,6 +201,152 @@ impl AscApp {
         }
         let activate = Self::result_rows_ui(ui, rows, None);
         self.activate_result_row(activate, false);
+    }
+
+    /// RESOURCES tab: `resources.arsc` inventory + filterable entries
+    /// (`run_resources`, ASC-RS-GUI-103). Read-only: the engine parses,
+    /// this renders. Empty filters ask the engine for every entry, so
+    /// the tab opens on a full listing the user can narrow.
+    fn draw_resources(&mut self, ui: &mut egui::Ui) {
+        #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
+        let T = crate::design::tokens();
+        let mut run = false;
+        ui.horizontal(|ui| {
+            ui.monospace(
+                egui::RichText::new("filter")
+                    .small()
+                    .color(T.text_secondary),
+            );
+            let key_edit = ui.add(
+                egui::TextEdit::singleline(&mut self.resources_pattern)
+                    .hint_text("key / value substring (empty = all)")
+                    .desired_width(260.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            let id_edit = ui.add(
+                egui::TextEdit::singleline(&mut self.resources_id)
+                    .hint_text("id 0x7f010000")
+                    .desired_width(130.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            if self.tasks.resources_live() {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new("scanning…")
+                        .small()
+                        .color(T.text_secondary),
+                );
+            } else if ui.button("Load").clicked() {
+                run = true;
+            }
+            let entered = (key_edit.lost_focus() || id_edit.lost_focus())
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if entered && !self.tasks.resources_live() {
+                run = true;
+            }
+        });
+        if run {
+            self.queue(Command::ShowResources);
+        }
+
+        // Render inside a scope so the immutable report borrow ends
+        // before the copy-to-clipboard branch mutates `self`.
+        let copied = {
+            let Some(r) = self.resources.as_ref() else {
+                ui.weak("no resources.arsc loaded — Analysis ▸ Browse resources (APK only)");
+                return;
+            };
+            if !r.arsc_present {
+                ui.weak("this APK has no resources.arsc");
+                return;
+            }
+            let entries: usize = r.packages.iter().map(|p| p.entries).sum();
+            let configs: usize = r.packages.iter().map(|p| p.configs).sum();
+            ui.horizontal(|ui| {
+                ui.monospace(
+                    egui::RichText::new(format!(
+                        "{} package(s) · {entries} entries · {configs} configs · {} global strings",
+                        r.packages.len(),
+                        r.global_strings
+                    ))
+                    .small()
+                    .color(T.text_secondary),
+                );
+                if r.total_matches > 0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.monospace(
+                            egui::RichText::new(format!(
+                                "{} match(es){}",
+                                r.total_matches,
+                                if r.truncated { " · truncated" } else { "" }
+                            ))
+                            .small()
+                            .color(if r.truncated {
+                                T.warning
+                            } else {
+                                T.success
+                            }),
+                        );
+                    });
+                }
+            });
+            for d in &r.diagnostics {
+                ui.label(
+                    egui::RichText::new(format!("diagnostic: {d}"))
+                        .small()
+                        .color(T.warning),
+                );
+            }
+            if !r.complete {
+                ui.label(
+                    egui::RichText::new("INCOMPLETE: malformed structures were skipped")
+                        .small()
+                        .color(T.warning),
+                );
+            }
+            if r.hits.is_empty() {
+                ui.weak("no entries match the filter");
+            }
+            let row_h = T.row_list;
+            let mut copied = None;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, row_h, r.hits.len(), |ui, range| {
+                    for idx in range {
+                        let hit = &r.hits[idx];
+                        let head =
+                            format!("{} {}/{} [{}]", hit.id, hit.type_name, hit.key, hit.config);
+                        let resp = egui::Frame::new()
+                            .fill(T.panel_bg)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.set_min_height(row_h);
+                                    ui.monospace(
+                                        egui::RichText::new(&head).color(T.accent).small(),
+                                    );
+                                    ui.monospace(
+                                        egui::RichText::new(truncate(&hit.value, 180))
+                                            .small()
+                                            .color(T.text_secondary),
+                                    );
+                                });
+                            })
+                            .response
+                            .interact(egui::Sense::click())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("click to copy the value");
+                        if resp.clicked() {
+                            copied = Some(hit.value.clone());
+                        }
+                    }
+                });
+            copied
+        };
+        if let Some(value) = copied {
+            ui.ctx().copy_text(value.clone());
+            self.last_clipboard = Some(value);
+            self.set_status("copied resource value", true);
+        }
     }
 
     /// Virtualized search-result rows: DEX · caller · matched
@@ -451,13 +602,14 @@ mod tests {
         assert_eq!(truncate("αβγδεζ", 3), "αβγ…");
     }
 
-    /// `BottomTab::title` covers all four variants. Alias for
+    /// `BottomTab::title` covers all five variants. Alias for
     /// `ui::bottom_panel::tests::bottom_tabs_render`.
     #[test]
     fn bottom_tabs_render() {
         let titles = [
             BottomTab::Results.title(),
             BottomTab::References.title(),
+            BottomTab::Resources.title(),
             BottomTab::Problems.title(),
             BottomTab::Tasks.title(),
         ];
@@ -465,7 +617,7 @@ mod tests {
         for t in titles {
             assert!(!t.is_empty(), "title for variant is non-empty");
         }
-        // BOTTOM_TABS contains all four (the tab strip iterates it).
-        assert_eq!(BOTTOM_TABS.len(), 4);
+        // BOTTOM_TABS contains all five (the tab strip iterates it).
+        assert_eq!(BOTTOM_TABS.len(), 5);
     }
 }

@@ -68,6 +68,9 @@ pub enum Command {
     /// String constants loaded by the selected class's own code
     /// (`run_class_strings`, ASC-RS-GUI-006) — REFERENCES tab.
     ShowClassStrings,
+    /// Browse `resources.arsc` with the current filter inputs
+    /// (`run_resources`, ASC-RS-GUI-103) — RESOURCES tab.
+    ShowResources,
     /// Toggle a bookmark on the active tab at the clicked line
     /// (JADX-GUI-010).
     ToggleBookmark,

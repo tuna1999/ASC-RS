@@ -250,6 +250,7 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
             Command::ShowCallees,
         ),
         ("Strings used by selected class", Command::ShowClassStrings),
+        ("Browse resources (APK only)", Command::ShowResources),
         ("Toggle bookmark (Ctrl+B)", Command::ToggleBookmark),
         ("Go to bookmark (Ctrl+Shift+B)", Command::GoToBookmark),
         ("Open tabs picker (Ctrl+Shift+H)", Command::ShowOpenTabs),

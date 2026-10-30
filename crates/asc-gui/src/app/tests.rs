@@ -6,19 +6,29 @@ use super::*;
 /// `true` when the fixture basename matches an entry of the
 /// comma-separated `ASC_REQUIRE_CORPUS` list (CI sets it after
 /// recreating the corpus fixtures it guarantees; a listed fixture that
-/// is still missing must fail, not silently skip).
+/// is still missing must fail, not silently skip). Matching is a
+/// substring test so the recipe names (`aurora`, `fdroid`) match the
+/// APKs they produce (`com.aurora…`, `org.fdroid…`).
 fn require_corpus(var: &str, p: &std::path::Path) -> bool {
     std::env::var(var).is_ok_and(|req| {
         req.split(',').any(|f| {
             let f = f.trim();
             !f.is_empty()
                 && p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with(f))
+                    .is_some_and(|n| n.to_string_lossy().contains(f))
         })
     })
 }
 fn corpus() -> Option<PathBuf> {
-    let apk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    corpus_named("workload.apk")
+}
+
+/// A specific corpus fixture (must exist under `corpus/apk/`); a fixture
+/// listed in `ASC_REQUIRE_CORPUS` but absent fails instead of skipping.
+fn corpus_named(name: &str) -> Option<PathBuf> {
+    let apk = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/apk")
+        .join(name);
     if !apk.exists() && require_corpus("ASC_REQUIRE_CORPUS", &apk) {
         panic!(
             "ASC_REQUIRE_CORPUS is set but fixture missing: {}",
@@ -1395,7 +1405,12 @@ const SMALI_LIFECYCLE_CLASS: &str = "Lcom/google/android/material/timepicker/Clo
 
 /// A loaded corpus app (audit F2 tests need a real session + engine).
 fn corpus_app(ctx: &egui::Context) -> Option<AscApp> {
-    let apk = corpus()?;
+    corpus_app_at(ctx, corpus()?)
+}
+
+/// A loaded corpus app at an explicit fixture (same progressive load as
+/// the production open path).
+fn corpus_app_at(ctx: &egui::Context, apk: PathBuf) -> Option<AscApp> {
     let mut app = AscApp::new(Some(apk));
     for _ in 0..600 {
         crate::app::AscApp::run_ui(ctx, |ui| app.test_frame(ui));
@@ -3657,4 +3672,202 @@ fn find_scan_is_ascii_case_insensitive() {
         app.recompute_find_matches();
         assert_eq!(app.find_matches, expected, "needle {needle:?}");
     }
+}
+
+/// Resource-ID parsing accepts exactly what `asc-rs resources --id`
+/// accepts, and an empty box means "no ID filter".
+#[test]
+fn resource_id_input_parses_like_the_cli() {
+    assert_eq!(super::parse_resource_id(""), Ok(None));
+    assert_eq!(super::parse_resource_id("   "), Ok(None));
+    assert_eq!(
+        super::parse_resource_id("0x7f010000"),
+        Ok(Some(0x7f01_0000))
+    );
+    assert_eq!(
+        super::parse_resource_id("0X7F010000"),
+        Ok(Some(0x7f01_0000))
+    );
+    assert_eq!(
+        super::parse_resource_id("2130771968"),
+        Ok(Some(0x7f01_0000))
+    );
+    assert!(super::parse_resource_id("0xzz").is_err());
+    assert!(super::parse_resource_id("string/app_name").is_err());
+}
+
+/// ASC-RS-GUI-103 (render path, corpus-free): the RESOURCES tab paints
+/// the package inventory, the truncation warning and one row per hit
+/// from an already-landed report.
+#[test]
+fn resources_tab_renders_report_rows() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut app = empty_app();
+    app.bottom_tab = BottomTab::Resources;
+    app.resources = Some(asc_core::ResourcesReport {
+        input: "synthetic.apk".into(),
+        arsc_present: true,
+        global_strings: 7,
+        packages: vec![asc_core::PackageSummary {
+            id: 0x7f,
+            name: "app".into(),
+            type_id_offset: 0,
+            entries: 2,
+            configs: 1,
+            types: vec![asc_core::TypeCount {
+                name: "string".into(),
+                entries: 2,
+            }],
+        }],
+        total_matches: 1,
+        truncated: true,
+        hits: vec![asc_core::ResourceHit {
+            id: "0x7f010000".into(),
+            package: "app".into(),
+            type_name: "string".into(),
+            key: "app_name".into(),
+            config: "default".into(),
+            matched: "key",
+            value: "Acme".into(),
+        }],
+        skipped_chunks: 0,
+        diagnostics: vec!["chunk 0x0201 skipped".into()],
+        complete: true,
+    });
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), app);
+    h.run_steps(2);
+    h.get_by_label_contains("2 entries");
+    h.get_by_label_contains("truncated");
+    h.get_by_label_contains("chunk 0x0201 skipped");
+    h.get_by_label_contains("0x7f010000");
+    h.get_by_label_contains("app_name");
+    h.get_by_label_contains("Acme");
+}
+
+/// ASC-RS-GUI-103 acceptance: `Analysis ▸ Browse resources` runs
+/// `asc_core::run_resources` on an open corpus APK, lands the report in
+/// the RESOURCES tab with id/type/key/value rows, and a resource-ID
+/// lookup narrows the listing to that id's config variants.
+///
+/// Uses the fdroid fixture: `workload.apk` is a single-entry ZIP built
+/// from the frozen oracle and carries no `resources.arsc`, so it can
+/// only prove the "no table" path.
+#[test]
+fn resources_tab_lists_corpus_entries() {
+    let Some(fixture) = corpus_named("org.fdroid.fdroid_1016000.apk") else {
+        eprintln!("fdroid fixture missing; skipping resources acceptance");
+        return;
+    };
+    let _guard = render_lock();
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app_at(&ctx, fixture) else {
+        return;
+    };
+    AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.dispatch(Command::ShowResources, ctx);
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.resources.is_some()),
+        "the resources report must land (last_error={:?}, status={:?})",
+        app.last_error,
+        app.status.as_ref().map(|s| s.text.as_str())
+    );
+    assert_eq!(
+        app.bottom_tab,
+        BottomTab::Resources,
+        "a resources result selects its tab"
+    );
+    let first = {
+        let r = app.resources.as_ref().expect("report landed");
+        assert!(r.arsc_present, "the fixture carries a resources table");
+        assert!(!r.packages.is_empty(), "package inventory is reported");
+        assert!(!r.hits.is_empty(), "an empty filter lists every entry");
+        assert!(
+            r.hits.iter().all(|h| h.id.starts_with("0x")),
+            "ids render as hex"
+        );
+        r.hits[0].clone()
+    };
+    // ID lookup: only that id's config variants survive.
+    app.resources_pattern.clear();
+    app.resources_id = first.id.clone();
+    AscApp::run_ui(&ctx, |ui| {
+        let ctx = ui.ctx();
+        app.dispatch(Command::ShowResources, ctx);
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a
+            .resources
+            .as_ref()
+            .is_some_and(
+                |r| !r.hits.is_empty() && r.hits.iter().all(|h| h.id == first.id)
+            )),
+        "the id filter must narrow the listing to {first_id}",
+        first_id = first.id
+    );
+    // The tab renders the inventory and the looked-up row.
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), app);
+    h.run_steps(2);
+    h.get_by_label_contains("RESOURCES");
+    h.get_by_label_contains("package(s)");
+    h.get_by_label_contains(&first.id);
+}
+
+/// v0.20.0 shot: the RESOURCES tab over a real `resources.arsc`
+/// (ASC-RS-GUI-103). Same opt-in as `visual_shots`:
+/// `ASC_GUI_SHOTS=1 cargo test -p asc-gui --lib visual_shots_v020_resources`.
+#[test]
+fn visual_shots_v020_resources() {
+    if std::env::var("ASC_GUI_SHOTS").is_err() {
+        eprintln!("ASC_GUI_SHOTS not set; skipping");
+        return;
+    }
+    let Some(fixture) = corpus_named("org.fdroid.fdroid_1016000.apk") else {
+        eprintln!("fdroid fixture missing; skipping");
+        return;
+    };
+    let _guard = render_lock();
+    let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&shots).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    let ctx0 = h.ctx.clone();
+    h.state_mut().open_path(&fixture, &ctx0);
+    for _ in 0..300 {
+        h.step();
+        if h.state().session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.state().session.is_some(), "artifact loaded");
+    h.state_mut().queue(Command::ShowResources);
+    for _ in 0..300 {
+        h.step();
+        if h.state().resources.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(3);
+    let img = h.render().expect("render");
+    let path = shots.join("10_resources_tab.png");
+    img.save(&path).unwrap();
+    eprintln!("shot: {}", path.display());
+    assert!(
+        h.state()
+            .resources
+            .as_ref()
+            .is_some_and(|r| r.arsc_present && !r.hits.is_empty()),
+        "the RESOURCES tab must show table entries"
+    );
 }

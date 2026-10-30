@@ -73,6 +73,9 @@ pub use crate::pipeline::{
     run_callees, run_class_strings, run_disasm, run_findrefs, run_getclass, run_listclasses,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
-pub use crate::resources::{ResourcesQuery, ResourcesReport, format_resources_text, run_resources};
+pub use crate::resources::{
+    PackageSummary, ResourceHit, ResourcesQuery, ResourcesReport, TypeCount, format_resources_text,
+    run_resources,
+};
 pub use crate::worker::{WorkerOutcome, WorkerPool};
 pub use asc_decompile::diagnose::{duplicated_catch_bodies, unbound_locals};

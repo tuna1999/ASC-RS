@@ -161,6 +161,12 @@ pub struct AscApp {
     /// Last "references to selected class" report (Analysis menu) —
     /// shown in the REFERENCES bottom tab.
     pub(crate) references: Option<SearchResults>,
+    /// Last `resources.arsc` report (ASC-RS-GUI-103) — RESOURCES tab.
+    pub(crate) resources: Option<asc_core::ResourcesReport>,
+    /// RESOURCES tab filter: key/value substring (empty = every entry).
+    pub(crate) resources_pattern: String,
+    /// RESOURCES tab filter: resource ID (`0x7f010000` or decimal).
+    pub(crate) resources_id: String,
     /// Jadx-style workspace icons (folders / source files), uploaded
     /// once on the first frame that has a context.
     pub(crate) icons: Option<crate::icons::Icons>,
@@ -224,6 +230,9 @@ impl AscApp {
             window_title: "asc-gui".to_string(),
             palette_sel: 0,
             references: None,
+            resources: None,
+            resources_pattern: String::new(),
+            resources_id: String::new(),
             icons: None,
         }
     }
@@ -891,6 +900,28 @@ impl AscApp {
                 self.references = Some(SearchResults::from_error(task.label, e));
                 self.focus_bottom_tab(BottomTab::References);
             }
+            (TaskKind::Resources, TaskOutcome::Resources(report)) => {
+                let shown = report.hits.len();
+                let total = report.total_matches;
+                let ok = report.complete;
+                self.resources = Some(report);
+                self.reveal_bottom_tab(BottomTab::Resources);
+                self.set_status(
+                    if ok {
+                        format!("resources: {shown} of {total} entries")
+                    } else {
+                        format!("resources incomplete: {shown} of {total} entries")
+                    },
+                    ok,
+                );
+            }
+            (TaskKind::Resources, TaskOutcome::Failed(e)) => {
+                // Keep the previous table on screen: a failed refresh
+                // must not wipe data the user is reading.
+                self.last_error = Some(format!("resources: {e}"));
+                self.set_status(format!("resources failed: {e}"), false);
+                self.focus_bottom_tab(BottomTab::Resources);
+            }
             (TaskKind::Disasm, TaskOutcome::Failed(e)) => {
                 self.tabs.set_failed(&task.label, e.clone());
                 self.last_error = Some(format!("disasm: {e}"));
@@ -1082,6 +1113,40 @@ impl AscApp {
                 self.show_bottom = true;
                 self.bottom_tab = BottomTab::References;
                 self.set_status(format!("strings: {descriptor}"), true);
+            }
+            Command::ShowResources => {
+                // `resources.arsc` inventory / lookup / search (APK
+                // only; the engine rejects a raw DEX). Empty filters
+                // mean "list every entry" — the panel defaults to a
+                // full listing the user can then narrow.
+                let Some(session) = &self.session else {
+                    self.set_status("open an APK first", false);
+                    return;
+                };
+                let id = match parse_resource_id(&self.resources_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.set_status(format!("resources: {e}"), false);
+                        return;
+                    }
+                };
+                let pattern = self.resources_pattern.trim().to_string();
+                let label = match (id, pattern.is_empty()) {
+                    (Some(id), _) => format!("resources 0x{id:08x}"),
+                    (None, false) => format!("resources {pattern:?}"),
+                    (None, true) => "resources *".to_string(),
+                };
+                let query = asc_core::ResourcesQuery {
+                    id,
+                    pattern: Some(pattern),
+                    limit: RESOURCES_ROW_LIMIT,
+                };
+                let apk = session.path().to_path_buf();
+                self.tasks.spawn_resources(&apk, query, label, ctx);
+                self.unpin_bottom_focus();
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::Resources;
+                self.set_status("resources: scanning…", true);
             }
             Command::ToggleBookmark => {
                 // Bookmark the active tab at the clicked line (or
@@ -1558,9 +1623,33 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
         TaskOutcome::Disassembled { .. } => "disassembled",
         TaskOutcome::Callees(_) => "callees",
         TaskOutcome::ClassStrings(_) => "class strings",
+        TaskOutcome::Resources(_) => "resources",
         TaskOutcome::Search(_) => "search",
         TaskOutcome::Failed(_) => "failed",
     }
+}
+
+/// Entries requested per RESOURCES scan.
+///
+/// ponytail: one flat cap instead of paging — the virtualized list
+/// renders this many rows fine and the panel reports truncation, so a
+/// bigger corpus (or a `limit` input) is only needed once someone asks.
+const RESOURCES_ROW_LIMIT: usize = 2000;
+
+/// `0x7f010000` (hex) or plain decimal; empty = no ID filter. Same
+/// accepted syntax as `asc-rs resources --id`.
+fn parse_resource_id(s: &str) -> Result<Option<u32>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => s.parse::<u32>(),
+    };
+    parsed
+        .map(Some)
+        .map_err(|_| format!("not a resource id: {s:?} (use 0x7f010000 or decimal)"))
 }
 
 #[cfg(test)]

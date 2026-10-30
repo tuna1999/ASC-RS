@@ -952,12 +952,13 @@
       "feature": "Resources browsing",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "n/a"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::resources_tab_lists_corpus_entries",
+      "test_kind": "cargo_test_new",
+      "blocking_engine_change": false,
+      "reference": "asc_core::run_resources (shipped with `asc-rs resources`)",
+      "notes": "RESOURCES bottom tab (v0.20.0): Analysis ▸ Browse resources runs `asc_core::run_resources` on the open APK through the task manager and lists id/type/key/[config]/value rows (virtualized, read-only; clicking a row copies its value). Filters are a key/value substring plus a resource id in the CLI syntax (`0x7f010000` or decimal); an empty filter asks the engine for every entry, capped at 2000 rows with the report’s `truncated` flag surfaced. The package/type inventory, global string count, skipped chunks, diagnostics and an INCOMPLETE banner come straight from the report — the GUI parses nothing."
     },
     {
       "id": "ASC-RS-GUI-104",

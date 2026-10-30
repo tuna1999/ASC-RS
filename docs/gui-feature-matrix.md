@@ -116,7 +116,7 @@ PASS only when its `acceptance` identifier returns green.
 |---|---|---|---|
 | ASC-RS-GUI-101 | Smali viewer | SHIPPED via `asc-rs disasm` (`run_disasm`, whole-DEX renderer, no structurer) — class listing = JADX-GUI-018, method listing = ASC-RS-GUI-004 | COMPLETE (superseded) |
 | ASC-RS-GUI-102 | Bytecode viewer (offset table) | Engine has opcode metadata but no offset-aware formatter | BLOCKED |
-| ASC-RS-GUI-103 | Resources browsing (AXML / res/) | Engine has `asc_manifest` only — no resource decoder | BLOCKED |
+| ASC-RS-GUI-103 | Resources browsing (AXML / res/) | SHIPPED (v0.20.0) via `asc_core::run_resources` (the engine behind `asc-rs resources`) + the RESOURCES bottom tab: package/type inventory, key/value and resource-ID filters, read-only rows (click copies the value) | COMPLETE |
 | ASC-RS-GUI-104 | CFG (control-flow graph) | No engine implementation; not in BEHAVIOR.md | BLOCKED |
 | ASC-RS-GUI-105 | Call graph (transitive) | Would require global xref; forbidden by AGENTS.md philosophy | BLOCKED |
 | ASC-RS-GUI-106 | Debugger | Out of scope — ASC is a static analyzer | BLOCKED |

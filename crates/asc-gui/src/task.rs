@@ -87,6 +87,9 @@ pub enum TaskKind {
     Callees,
     /// `run_class_strings` for one class (its own string constants).
     ClassStrings,
+    /// `run_resources` for one `resources.arsc` query (inventory /
+    /// lookup / search, ASC-RS-GUI-103).
+    Resources,
 }
 
 impl TaskKind {
@@ -100,6 +103,7 @@ impl TaskKind {
             TaskKind::Disasm => "disasm",
             TaskKind::Callees => "callees",
             TaskKind::ClassStrings => "class strings",
+            TaskKind::Resources => "resources",
         }
     }
 
@@ -156,6 +160,8 @@ pub enum TaskOutcome {
     Callees(asc_core::CalleesResult),
     /// Successful `run_class_strings`: string constants of one class.
     ClassStrings(asc_core::ClassStringsResult),
+    /// Successful `run_resources`: `resources.arsc` inventory + hits.
+    Resources(asc_core::ResourcesReport),
     /// Engine error or worker panic, as a display string.
     Failed(String),
 }
@@ -571,6 +577,53 @@ impl TaskManager {
         )
     }
 
+    /// Spawn a `run_resources` task (ASC-RS-GUI-103).
+    ///
+    /// The resources surface is its own lane: a new request supersedes
+    /// the previous one (discard-on-arrival) and an identical live
+    /// request is reused instead of scanning twice.
+    pub fn spawn_resources(
+        &mut self,
+        apk: &Path,
+        query: asc_core::ResourcesQuery,
+        label: impl Into<String>,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let label = label.into();
+        if let Some(existing) = self
+            .in_flight
+            .iter()
+            .find(|t| {
+                t.kind == TaskKind::Resources
+                    && t.label == label
+                    && !t.discarded.load(Ordering::Acquire)
+            })
+            .map(|t| t.id)
+        {
+            return existing;
+        }
+        for t in &mut self.in_flight {
+            if t.kind == TaskKind::Resources {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        self.submit(
+            TaskKind::Resources,
+            label,
+            move || run_resources_job(&apk, &query),
+            ctx,
+        )
+    }
+
+    /// Whether a *wanted* resources scan is in flight (same
+    /// discard-on-arrival rule as [`Self::findrefs_live`]).
+    pub fn resources_live(&self) -> bool {
+        self.in_flight
+            .iter()
+            .any(|t| t.kind == TaskKind::Resources && !t.discarded.load(Ordering::Acquire))
+    }
+
     /// Whether a *wanted* task is publishing into the shared references
     /// surface ([`TaskKind::uses_references_surface`]) right now.
     ///
@@ -882,6 +935,14 @@ fn run_callees_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
 fn run_class_strings_job(apk: &Path, descriptor: &str) -> TaskOutcome {
     match asc_core::run_class_strings(&asc_core::ClassStringsJob::new(apk, descriptor)) {
         Ok(r) => TaskOutcome::ClassStrings(r),
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one `resources.arsc` query (worker-thread body).
+fn run_resources_job(apk: &Path, query: &asc_core::ResourcesQuery) -> TaskOutcome {
+    match asc_core::run_resources(apk, query) {
+        Ok(r) => TaskOutcome::Resources(r),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
 }

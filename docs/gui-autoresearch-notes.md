@@ -86,9 +86,9 @@ Top 5 by impact:
 
 | ID | Feature | Reason |
 |---|---|---|
-| ASC-RS-GUI-101 | Smali viewer | requires a smali writer on top of `RefWalker` |
+| ASC-RS-GUI-101 | Smali viewer | SHIPPED — `asc_decompile::disasm` + `asc_core::run_disasm` (see ASC-RS-GUI-004 / JADX-GUI-018) |
 | ASC-RS-GUI-102 | Bytecode viewer | requires opcode-aware formatter |
-| ASC-RS-GUI-103 | Resources browsing | requires a resource decoder (no engine work exists) |
+| ASC-RS-GUI-103 | Resources browsing | SHIPPED v0.20.0 — `asc_core::run_resources` + the RESOURCES bottom tab (see matrix) |
 | ASC-RS-GUI-104 | CFG | forbidden by AGENTS.md philosophy (global preprocessing) |
 | ASC-RS-GUI-105 | Transitive call graph | same — would need a global xref |
 | ASC-RS-GUI-106 | Debugger | static-only project |
