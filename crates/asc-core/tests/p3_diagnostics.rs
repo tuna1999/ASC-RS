@@ -11,7 +11,7 @@
 //!   is the signal for this shape), while verbatim duplication must
 //!   still be counted (unit-covered in `diagnose.rs`).
 //!
-//! Corpus-gated: skips silently when `com.locket.Locket.apk` is absent.
+//! Corpus-gated: skips silently when the fixtures are absent.
 
 use std::path::PathBuf;
 
@@ -23,6 +23,25 @@ fn corpus_locket() -> Option<PathBuf> {
     let p =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/com.locket.Locket.apk");
     p.exists().then_some(p)
+}
+
+fn corpus_workload() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    p.exists().then_some(p)
+}
+
+/// Negative control for the widened detector: a plain class must stay
+/// silent, otherwise "no false positives" would rest on hand-picked text
+/// alone.
+#[test]
+fn a_clean_class_reports_no_unbound_local() {
+    let Some(apk) = corpus_workload() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let job = GetClassJob::new(apk, "Landroidx/transition/ViewUtilsApi21;");
+    let result = run_getclass(&job, &GetClassOptions::default()).expect("getclass");
+    assert_eq!(unbound_locals(&result.source), Vec::<String>::new());
 }
 
 #[test]

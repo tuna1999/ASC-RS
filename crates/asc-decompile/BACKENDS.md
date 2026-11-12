@@ -309,7 +309,12 @@ not model the handler stubs' cross-edge `move` instructions as
 definitions of the shared tail's live registers. Result: 13 reads of
 never-assigned locals (`v0_256`, `v19_569`, `v13_325`, `v3_349`,
 `v4_332`, `v6_390`, …) in the emitted Java. Detected: the existing
-`unbound_locals` warning fires (13 names).
+`unbound_locals` warning fires (13 names). The detector binds a name only
+inside the method that contains it and only from a binding that precedes the
+read (declaration, `=`, compound assignment, `++`/`--`), so a name that droidsaw
+numbers the same in another method can no longer silence the report, and a use
+emitted above its definition is flagged (the shape this defect produces at the
+`super(...)` calls).
 
 ### Defect 2 — catch bodies duplicated
 

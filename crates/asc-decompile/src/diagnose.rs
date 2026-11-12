@@ -23,17 +23,29 @@ const EXPR_KEYWORDS: &[&str] = &[
     "instanceof",
 ];
 
-/// SSA-local names (`v<reg>_<n>`) that occur in `src` (outside comments and
-/// string/char literals) but are never assigned nor declared. Sorted, unique.
+/// SSA-local names (`v<reg>_<n>`) that are read in `src` (outside comments and
+/// string/char literals) before any binding of the same name in the same
+/// method. Sorted, unique.
+///
+/// A read only counts when no assignment or declaration precedes it *in the
+/// method that contains it*: droidsaw numbering restarts per method, and a
+/// dropped phi shows up exactly as a use emitted above its definition.
 pub fn unbound_locals(src: &str) -> Vec<String> {
     let b = src.as_bytes();
-    let mut bound: BTreeSet<&str> = BTreeSet::new();
-    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+    let mut first_bind: BTreeMap<(u32, &str), usize> = BTreeMap::new();
+    let mut first_read: BTreeMap<(u32, &str), usize> = BTreeMap::new();
     let mut prev_ident: Option<&str> = None;
+    let mut scope = 0u32;
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
-        if c == b'/' && b.get(i + 1) == Some(&b'/') {
+        if c == b'\n' {
+            i += 1;
+            if method_header(&src[i..]) {
+                scope += 1;
+                prev_ident = None;
+            }
+        } else if c == b'/' && b.get(i + 1) == Some(&b'/') {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
@@ -54,26 +66,60 @@ pub fn unbound_locals(src: &str) -> Vec<String> {
             }
             let id = &src[s..i];
             if is_local(id) {
-                seen.insert(id, ());
                 let rest = src[i..].trim_start();
-                let assigned = rest.starts_with('=') && !rest.starts_with("==");
+                let r = rest.as_bytes();
+                let assigns = rest.starts_with('=') && !rest.starts_with("==");
+                let compound =
+                    r.get(1) == Some(&b'=') && r.first().is_some_and(|c| b"+-*/%&|^".contains(c));
+                let inc_dec = rest.starts_with("++") || rest.starts_with("--");
                 let declared = prev_ident.is_some_and(|p| !EXPR_KEYWORDS.contains(&p));
-                if assigned || declared {
-                    bound.insert(id);
+                let key = (scope, id);
+                if assigns || compound || inc_dec || declared {
+                    first_bind.entry(key).or_insert(s);
+                } else {
+                    first_read.entry(key).or_insert(s);
                 }
             }
             prev_ident = Some(id);
         } else {
-            if !c.is_ascii_whitespace() {
+            if c == b']' || c == b'>' {
+                prev_ident = Some("");
+            } else if !c.is_ascii_whitespace() {
                 prev_ident = None;
             }
             i += 1;
         }
     }
-    seen.into_keys()
-        .filter(|n| !bound.contains(n))
-        .map(String::from)
-        .collect()
+    let mut out: BTreeSet<&str> = BTreeSet::new();
+    for (key, read) in &first_read {
+        if first_bind.get(key).is_none_or(|bind| bind > read) {
+            out.insert(key.1);
+        }
+    }
+    out.into_iter().map(String::from).collect()
+}
+
+/// True when `rest` starts with the body of a method signature
+/// (`Type name(params) {`, a constructor, or `name(params) throws … {`).
+fn method_header(rest: &str) -> bool {
+    let line = rest.split('\n').next().unwrap_or("");
+    if !line.starts_with("    ") || !line.trim_end().ends_with('{') {
+        return false;
+    }
+    let head = match line.trim_start().split_once('(') {
+        Some((head, _)) => head,
+        None => return false,
+    };
+    if head.split_whitespace().next().is_some_and(|w| {
+        matches!(
+            w,
+            "if" | "for" | "while" | "switch" | "catch" | "else" | "do" | "try" | "synchronized"
+        )
+    }) {
+        return false;
+    }
+    head.bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"_$.,<>[]? ".contains(&c))
 }
 
 /// Size of the largest group of structurally identical `catch` bodies
@@ -193,6 +239,47 @@ mod tests {
     fn comments_and_strings_do_not_count() {
         let src = "// v9_9 here\n/* v8_8 */ String s = \"v7_7 \\\" v6_6\"; char c = 'v';\nint v1_0 = 0; use(v1_0);";
         assert!(unbound_locals(src).is_empty());
+    }
+
+    #[test]
+    fn read_before_assignment_is_flagged() {
+        // Real shape (org.bouncycastle.jce.spec.ECNamedCurveSpec): the int is
+        // read by a `super(...)` argument and only assigned afterwards.
+        let src = "    public ECNamedCurveSpec(String v1, BigInteger v5) {\n        super(v2, v3, v4, v5_6);\n        int v5_6 = v5.intValue();\n    }";
+        assert_eq!(unbound_locals(src), ["v5_6"]);
+    }
+
+    #[test]
+    fn assignment_in_another_method_does_not_bind() {
+        let src = "    void a() {\n        int v1_0 = 1;\n        use(v1_0);\n    }\n    void b() {\n        use(v1_0);\n    }";
+        assert_eq!(unbound_locals(src), ["v1_0"]);
+    }
+
+    #[test]
+    fn array_and_generic_declarations_bind() {
+        let src = "    void f(int[] v1_0, java.util.Map<String, Integer> v2_0) {\n        use(v1_0, v2_0);\n        long[] v3_4;\n        use(v3_4);\n    }";
+        assert!(unbound_locals(src).is_empty());
+    }
+
+    #[test]
+    fn compound_and_incdec_assignments_bind() {
+        let src = "    void f() {\n        int v1_0 = 0;\n        v1_0 += 2;\n        v1_0++;\n        use(v1_0);\n    }";
+        assert!(unbound_locals(src).is_empty());
+    }
+
+    #[test]
+    fn loop_header_read_after_declaration_is_bound() {
+        let src = "    void f() {\n        int v1_0 = 0;\n        while (v1_0 < 3) { v1_0 = v1_0 + 1; }\n    }";
+        assert!(unbound_locals(src).is_empty());
+    }
+
+    #[test]
+    fn method_header_skips_control_statements() {
+        assert!(method_header("    public void f() {"));
+        assert!(method_header("    ECNamedCurveSpec(String v1) throws X {"));
+        assert!(!method_header("        if (v1 == null) {"));
+        assert!(!method_header("        synchronized (this) {"));
+        assert!(!method_header("    private int x = 1;"));
     }
 
     #[test]
