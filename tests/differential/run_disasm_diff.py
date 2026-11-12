@@ -277,12 +277,13 @@ def payload_units(ident: int, raw: bytes, at: int) -> int:
         width, count = struct.unpack_from("<HI", raw, at + 2)
         return min(4 + (width * count + 1) // 2, (len(raw) - at) // 2)
     if ident == 0x0100:
-        # packed-switch: 4 code units of header + 2 per 32-bit target
+        # packed-switch: `ident`, `size`, `first_key` (2 code units) of header,
+        # then 2 per 32-bit target
         return min(4 + 2 * u16(raw, at + 2), (len(raw) - at) // 2)
     if ident == 0x0200:
         # sparse-switch: 2 of header + 2 per key + 2 per target; androguard's
         # `SparseSwitch.get_length()` adds one spare code unit, dexlib2 does not
-        return min(4 + 4 * u16(raw, at + 2), (len(raw) - at) // 2)
+        return min(2 + 4 * u16(raw, at + 2), (len(raw) - at) // 2)
 
 
 #: Our mnemonic -> androguard's, for spellings that differ. Every entry must be
@@ -689,33 +690,22 @@ def canon_ours(op: str) -> tuple:
     return ("X", op)
 
 
-def join_quoted(parts: list[str]) -> list[str]:
-    """Re-join oracle string operands that `split_operands` cut in half.
+def split_oracle_operands(mnemonic: str, text: str) -> list[str]:
+    """Split oracle operands, keeping a string that contains `, ` in one piece.
 
-    The oracle escapes only tab/newline/carriage return/backslash, so a quote
-    inside a string is written doubled and a comma inside it is not escaped:
-    `const-string v0, "a", b"c"` is one operand that arrives as two or three.
-    Splitting assumes a backslash escape, so the operand list is re-scanned
-    here with the doubled-quote rule; a piece that leaves a string open
-    continues into the next one.
+    androguard's `esc()` escapes only tab/newline/carriage return/backslash and
+    leaves a quote inside a string raw, so a `, ` inside one is indistinguishable
+    from an operand separator. `const-string` takes a register and one string,
+    so everything from the first separator on is that string.
     """
-    out: list[str] = []
-    for part in parts:
-        if out and _ends_open(out[-1]) and part.startswith('"') \
-                and part.endswith('"'):
-            out[-1] = out[-1] + "," + part
-            continue
-        out.append(part)
-    return out
-
-
-def _ends_open(text: str) -> bool:
-    """True when the text ends inside a string: a doubled `""` closed a quote.
-
-    `"`   -> closed (one quote)     `""`  -> open
-    `a"`  -> closed (one quote)     `a""` -> open
-    """
-    return len(text) >= 2 and text.endswith('""')
+    parts = split_operands(text)
+    if mnemonic in ("const-string", "const-string/jumbo") and len(parts) > 2:
+        # The register is always followed by the operand separator, which comes
+        # before the opening quote, so the first `, ` is the separator and the
+        # rest is the string verbatim (`split_operands` strips around commas).
+        reg, sep, rest = text.partition(", ")
+        parts = [reg, rest] if sep else parts
+    return parts
 
 
 def canon_oracle(op: str, off: int) -> tuple:
@@ -730,13 +720,11 @@ def canon_oracle(op: str, off: int) -> tuple:
     if m:
         return ("T", off + int(m.group(1), 16))
     if op.startswith('"'):
-        # The oracle escapes only tab/newline/carriage return/backslash, so a
-        # quote inside the string is written doubled (`""`) and a comma inside
-        # it splits the operand list; stitch the fragments of one quoted run
-        # back together and compare the raw characters, not the escapes.
-        # `\n`/`\r`/`\t`/`\\` are the oracle's escapes; a backslash before
-        # anything else is a literal backslash the oracle passed through
-        body = op[1:-1].replace('""', '"')
+        # A quote inside the string is raw (androguard does not double it), so
+        # only the outer quotes are dropped. `\n`/`\r`/`\t`/`\\` are the
+        # oracle's escapes; a backslash before anything else is a literal
+        # backslash the oracle passed through.
+        body = op[1:-1]
         raw, i = [], 0
         while i < len(body):
             if body[i] == "\\" and i + 1 < len(body):
@@ -1035,7 +1023,7 @@ def diff_method(d: DEX, cls: str, name: str, rec: dict, our: OurMethod) -> tuple
             # nothing, so it contributes no operand on either side
             ours_side = ours_side[1:]
         theirs_side = [canon_oracle(p, ins.off)
-                       for p in join_quoted(split_operands(oracle_ops))]
+                       for p in split_oracle_operands(ins.mnemonic, oracle_ops)]
         theirs_side = align_register_run(ours_side, theirs_side)
         compared += 1
         if ours_side == theirs_side:

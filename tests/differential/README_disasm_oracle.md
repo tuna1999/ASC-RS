@@ -10,7 +10,10 @@ Record: `<method descriptor>\t<code unit offset>\t<mnemonic>\t<operands>`, no he
 Descriptor is `Lcls;->name(params)ret`. Offset is 4 lowercase hex digits, no `0x`, measured
 into `insns` in **16-bit code units** (DEX instruction index), so it steps by instruction
 size (`0000,0001,0002,0004`). Operands are comma+space separated, empty when none; tabs,
-newlines and backslashes inside an operand are escaped, so a record is always one line.
+newlines and backslashes inside an operand are escaped, so a record is always one line — a
+`"` inside a string is **not** escaped (never doubled), so the operand separator precedes
+the opening quote and the runner joins everything after the first `, ` of a
+`const-string[/jumbo]` back into one operand.
 Operands: register `vN` (wide pair glued `v0v1`) · literal signed decimal `-2147483648` ·
 string `"this$0"` · type raw · proto `(J)B` · field `LA/A;->b:I` (smali colon form) ·
 method `Lz4/c;-><init>(Lx4/d;)V` · branch `@+014c` (hex, branch-**relative**) ·
