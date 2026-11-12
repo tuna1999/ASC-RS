@@ -244,13 +244,23 @@ fn member_field_at(lt_abs: usize, lt: &str, s: usize) -> Option<ResolvedSymbol> 
 /// `L…;` of `…, Lcom/foo/Bar;`.
 fn class_descriptor_before(prefix: &str) -> Option<String> {
     let prefix = prefix.trim_end();
-    let start = prefix.rfind('L')?;
-    let desc = &prefix[start..];
-    if desc.ends_with(';') {
-        Some(desc.to_string())
-    } else {
-        None
+    let b = prefix.as_bytes();
+    // Walk *back* from the trailing `;` over the descriptor alphabet, then
+    // require the `L` that starts it — `rfind('L')` would collapse
+    // `Ljava/util/List;` to `List;`.
+    if b.last() != Some(&b';') {
+        return None;
     }
+    let mut start = b.len() - 1;
+    while start > 0
+        && (b[start - 1].is_ascii_alphanumeric() || matches!(b[start - 1], b'/' | b'$' | b'_'))
+    {
+        start -= 1;
+    }
+    if start >= b.len() || b[start] != b'L' {
+        return None;
+    }
+    Some(prefix[start..].to_string())
 }
 
 /// The `L…;` descriptor whose byte span contains `s`, if any.
@@ -372,7 +382,7 @@ pub(crate) fn java_resolve(
         let before = &source[..s];
         let prev = before.trim_end().chars().next_back();
         let owner = if prev == Some('.') {
-            None
+            receiver_descriptor(source, before.trim_end().len() - 1, descriptor)
         } else {
             Some(descriptor.to_string())
         };
@@ -381,17 +391,244 @@ pub(crate) fn java_resolve(
     let before = &source[..s];
     let prev = before.trim_end().chars().next_back();
     if prev == Some('.') {
-        // A qualified field access. `this.x`'s owner is the current class;
-        // any other object's owner is unknown.
-        let owner = before
-            .trim_end()
-            .ends_with("this.")
-            .then(|| descriptor.to_string());
+        // A qualified field access: the owner is the *declared* type of the
+        // receiver, provable only when the file declares that receiver.
+        let owner = receiver_descriptor(source, before.trim_end().len() - 1, descriptor);
         return Some(ResolvedSymbol::field(owner, token.to_string()));
     }
     // A bare identifier with no call/field context is not provably a member
     // (local, keyword, …) — do not guess.
     None
+}
+
+/// Descriptor of the declared type of the receiver whose final identifier
+/// ends right before byte `s` (the `.` of the qualified access), or `None`
+/// when the file does not declare it.
+///
+/// This is the minimal declaration resolver: `this`/`super` are known from
+/// the class itself, any other receiver must have a visible declaration whose
+/// type the file spells out (or an import that spells it out). An undeclared
+/// or unknown-typed receiver keeps `owner = None`, never a guess.
+fn receiver_descriptor(source: &str, s: usize, descriptor: &str) -> Option<String> {
+    let recv: String = source[..s]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '$'))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if recv.is_empty() {
+        return None;
+    }
+    if recv == "this" {
+        return Some(descriptor.to_string());
+    }
+    if recv == "super" {
+        return Some(super_descriptor(source));
+    }
+    if let Some(ty) = declared_type(source, &recv, s) {
+        return type_descriptor(source, &ty);
+    }
+    // No declaration: a capitalised receiver is a static class reference.
+    if recv.starts_with(|c: char| c.is_uppercase()) {
+        return type_descriptor(source, &recv);
+    }
+    None
+}
+
+/// The declared type spelling of `name` at or before byte `at` (nearest
+/// preceding declaration wins, which is what shadowing does), or `None`.
+fn declared_type(source: &str, name: &str, at: usize) -> Option<String> {
+    let before = &source[..at.min(source.len())];
+    for line in before.lines().rev() {
+        let t = line.trim();
+        if t.starts_with("//") || t.starts_with('*') {
+            continue;
+        }
+        let mut pos = 0;
+        while let Some(found) = t[pos..].find(name) {
+            let abs = pos + found;
+            pos = abs + name.len();
+            let starts_token = !t[..abs]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.'));
+            // A declaration is followed by one of these; the receiver of the
+            // very access being resolved is not (it sits at the line end).
+            let after = t[abs + name.len()..].trim_start();
+            if !starts_token
+                || !(after.starts_with('=')
+                    || after.starts_with(';')
+                    || after.starts_with(',')
+                    || after.starts_with(')'))
+            {
+                continue;
+            }
+            let head = t[..abs].trim_end();
+            let ty: String = head
+                .chars()
+                .rev()
+                .take_while(|c| {
+                    c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '<' | '>' | '[' | ']')
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            // A bare lowercase word is not a type (`int x`, `new obj`), so
+            // fail closed instead of fabricating `Lpkg/v7;`.
+            let plausible = ty.contains('.')
+                || ty.contains('$')
+                || ty.starts_with(|c: char| c.is_ascii_uppercase());
+            if ty.is_empty()
+                || !plausible
+                || TYPE_STOPWORDS.contains(&ty.as_str())
+                // `this.mContext = v0;` would otherwise report `this` as v0's type.
+                || ty == "this"
+                || ty == "super"
+            {
+                continue;
+            }
+            return Some(ty);
+        }
+    }
+    None
+}
+
+/// Java/FQN type spelling -> class descriptor (`a.b.C` -> `La/b/C;`). A bare
+/// simple name resolves through the file's imports, else the own package;
+/// unprovable spellings yield `None`.
+fn type_descriptor(source: &str, ty: &str) -> Option<String> {
+    if ty.contains('.') || ty.contains('$') {
+        return Some(format!("L{};", ty.replace('.', "/")));
+    }
+    for line in source.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("import ") {
+            let path = rest.trim_end_matches(';').trim();
+            if path.rsplit('.').next() == Some(ty) {
+                return Some(format!("L{};", path.replace('.', "/")));
+            }
+        }
+    }
+    match source
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("package "))
+    {
+        Some(pkg) => {
+            let pkg = pkg.trim_end_matches(';').trim();
+            Some(format!("L{}/{};", pkg.replace('.', "/"), ty))
+        }
+        None => Some(format!("L{ty};")),
+    }
+}
+
+/// Descriptor of the class this file extends (Object when nothing is named).
+fn super_descriptor(source: &str) -> String {
+    for line in source.lines() {
+        let Some(pos) = line.find(" extends ") else {
+            continue;
+        };
+        let rest = line[pos + 9..].trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.'))
+            .collect();
+        if let Some(d) = type_descriptor(source, &name) {
+            return d;
+        }
+    }
+    "Ljava/lang/Object;".to_string()
+}
+
+/// Tokens that precede a name without being its type.
+const TYPE_STOPWORDS: &[&str] = &[
+    "return",
+    "new",
+    "throws",
+    "instanceof",
+    "case",
+    "else",
+    "throw",
+    "yield",
+    "this",
+    "super",
+    "null",
+    "true",
+    "false",
+    "final",
+    "public",
+    "private",
+    "protected",
+    "static",
+    "volatile",
+    "transient",
+    "synchronized",
+    "native",
+    "abstract",
+];
+
+/// 0-indexed line inside `source` that declares member `name` of `kind`, or
+/// `None` when no declaration is visible in this document.
+///
+/// Smali is exact (`.method … name(` / `.field … name:`); decompiled Java
+/// relies on shape alone, so the first plausible declarator wins.
+pub(crate) fn declaration_line(source: &str, name: &str, kind: SymbolKind) -> Option<usize> {
+    source.lines().position(|line| {
+        let t = line.trim_start();
+        if t.starts_with("//") || t.starts_with('*') {
+            return false;
+        }
+        match kind {
+            SymbolKind::Method => {
+                (t.starts_with(".method ") && t.contains(&format!(" {name}(")))
+                    || is_java_declaration(t, name, '(')
+            }
+            SymbolKind::Field => {
+                (t.starts_with(".field ") && t.contains(&format!(" {name}:")))
+                    // A Java field ends with `;` (or `= value;`) — uninitialised
+                    // fields have no `:` at all.
+                    || is_java_declaration(t, name, ';')
+                    || is_java_declaration(t, name, '=')
+            }
+            SymbolKind::Class => false,
+        }
+    })
+}
+
+/// Offset of `name` in `line` that is a whole identifier (`find` alone would
+/// match `find` inside `find_all`).
+fn identifier_occurrence(line: &str, name: &str) -> Option<usize> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    line.match_indices(name).map(|(pos, _)| pos).find(|&pos| {
+        let prev = line[..pos].chars().next_back();
+        let next = line[pos + name.len()..].chars().next();
+        prev.is_none_or(|c| !is_ident(c)) && next.is_none_or(|c| !is_ident(c))
+    })
+}
+
+/// `Type name(` / `Type name;` (or `=`) with no call/field qualifier.
+fn is_java_declaration(line: &str, name: &str, terminator: char) -> bool {
+    let Some(pos) = identifier_occurrence(line, name) else {
+        return false;
+    };
+    let before = &line[..pos];
+    if before.ends_with('.') {
+        return false;
+    }
+    let after = line[pos + name.len()..].trim_start();
+    if !after.starts_with(terminator) {
+        return false;
+    }
+    let ty = before.trim_end();
+    if ty.is_empty() || ty.ends_with(|c: char| c.is_ascii_punctuation() && c != '>' && c != ']') {
+        return false;
+    }
+    ty.split_whitespace()
+        .next_back()
+        .is_some_and(|t| !TYPE_STOPWORDS.contains(&t))
 }
 
 #[cfg(test)]
@@ -456,6 +693,36 @@ mod tests {
         assert_eq!(sym.kind, SymbolKind::Method);
         assert_eq!(sym.owner.as_deref(), Some("Lcom/example/Util;"));
         assert_eq!(sym.proto.as_deref(), Some("(I)"));
+    }
+
+    /// The descriptor walk must survive a capital `L` inside the simple
+    /// name (`rfind('L')` would yield `List;`).
+    #[test]
+    fn smali_invoke_target_keeps_the_package_of_a_capital_l_class() {
+        let src = SMALI.replace(
+            "invoke-static {v0}, Lcom/example/Util;->helper(I)I",
+            "invoke-static {v0}, Ljava/util/List;->size()I",
+        );
+        let s = byte_at(&src, "size()I");
+        let sym = smali_resolve("Lcom/example/A;#smali", &src, s)
+            .2
+            .expect("resolved");
+        assert_eq!(sym.owner.as_deref(), Some("Ljava/util/List;"));
+    }
+
+    /// Same walk on the field path (`iget` owner).
+    #[test]
+    fn smali_field_target_keeps_the_package_of_a_capital_l_class() {
+        let src = SMALI.replace(
+            "invoke-static {v0}, Lcom/example/Util;->helper(I)I",
+            "iget v0, p0, Landroid/widget/LinearLayout;->mBaselineAlignedChildIndex:I",
+        );
+        let s = byte_at(&src, "mBaselineAlignedChildIndex");
+        let sym = smali_resolve("Lcom/example/A;#smali", &src, s)
+            .2
+            .expect("resolved");
+        assert_eq!(sym.kind, SymbolKind::Field);
+        assert_eq!(sym.owner.as_deref(), Some("Landroid/widget/LinearLayout;"));
     }
 
     /// A self-method invoke in another method still resolves its true class.
@@ -523,15 +790,104 @@ mod tests {
     }
 
     #[test]
-    fn java_qualified_call_owner_is_unknown() {
+    fn java_static_call_owner_is_the_receiver_class() {
         let src = "class A {\n  void m() { B.foo(); }\n}";
         let s = src.find("foo").unwrap();
         let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
         assert_eq!(sym.kind, SymbolKind::Method);
+        assert_eq!(sym.owner.as_deref(), Some("LB;"));
+    }
+
+    #[test]
+    fn java_qualified_call_uses_the_declared_receiver_type() {
+        let src = "class A {\n  void m() { com.x.B b = null; b.foo(); }\n}";
+        let s = src.find("foo").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
+        assert_eq!(sym.owner.as_deref(), Some("Lcom/x/B;"));
+    }
+
+    #[test]
+    fn java_simple_receiver_type_resolves_through_imports() {
+        let src = "import com.x.Bar;\nclass A {\n  void m(Bar b) { b.foo(); }\n}";
+        let s = src.find("foo").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
+        assert_eq!(sym.owner.as_deref(), Some("Lcom/x/Bar;"));
+    }
+
+    #[test]
+    fn java_receiver_type_ignores_a_this_assignment_above() {
+        // `this.mContext = v0;` must not make `this` look like v0's type.
+        let src = "class A {\n  void m() {\n    this.mContext = v0;\n    v0.foo();\n  }\n}";
+        let s = src.find("foo").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
+        assert_eq!(sym.owner, None);
+    }
+
+    #[test]
+    fn java_primitive_local_is_not_a_type() {
+        let src = "class A {\n  void m() {\n    int v0 = 0;\n    v0.foo();\n  }\n}";
+        let s = src.find("foo").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
+        assert_eq!(sym.owner, None);
+    }
+
+    #[test]
+    fn java_undeclared_lowercase_receiver_stays_unknown() {
+        let src = "class A {\n  void m() { obj.foo(); }\n}";
+        let s = src.find("foo").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
+        assert_eq!(sym.owner, None);
+    }
+
+    #[test]
+    fn java_super_call_resolves_the_parent() {
+        let src = "class A extends com.y.P {\n  void m() { super.foo(); }\n}";
+        let s = src.find("foo").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 3, "foo").expect("resolved");
+        assert_eq!(sym.owner.as_deref(), Some("Lcom/y/P;"));
+    }
+
+    #[test]
+    fn java_qualified_field_uses_the_declared_receiver_type() {
+        let src = "class A {\n  void m(com.x.B b) { b.count = 1; }\n}";
+        let s = src.find("count").unwrap();
+        let sym = java_resolve("LA;", src, s, s + 5, "count").expect("resolved");
+        assert_eq!(sym.kind, SymbolKind::Field);
+        assert_eq!(sym.owner.as_deref(), Some("Lcom/x/B;"));
+    }
+
+    #[test]
+    fn declaration_line_finds_smali_member_lines() {
+        let src = SMALI;
+        assert_eq!(declaration_line(src, "COUNT", SymbolKind::Field), Some(2));
+        // `foo` is declared on line 8; line 20 also calls it.
+        assert_eq!(declaration_line(src, "foo", SymbolKind::Method), Some(8));
+        assert_eq!(declaration_line(src, "nope", SymbolKind::Method), None);
+    }
+
+    #[test]
+    fn declaration_line_takes_an_uninitialised_java_field() {
+        let src =
+            "class A {\n  private final String mName;\n  void m() {\n    mName.length();\n  }\n}\n";
+        assert_eq!(declaration_line(src, "mName", SymbolKind::Field), Some(1));
+    }
+
+    #[test]
+    fn identifier_occurrence_skips_substring_and_qualified_hits() {
+        assert_eq!(identifier_occurrence("a.find_all(x)", "find"), None);
         assert_eq!(
-            sym.owner, None,
-            "the declaring class of a qualified call is not provable"
+            identifier_occurrence("  List find(int k) {", "find"),
+            Some(7)
         );
+        assert_eq!(identifier_occurrence("x.helper(1)", "helper"), Some(2));
+    }
+
+    #[test]
+    fn declaration_line_finds_java_member_lines() {
+        let src = "class A {\n  int count = 0;\n  void foo() {}\n  void bar() { a.foo(); }\n}";
+        assert_eq!(declaration_line(src, "count", SymbolKind::Field), Some(1));
+        assert_eq!(declaration_line(src, "foo", SymbolKind::Method), Some(2));
+        assert_eq!(declaration_line(src, "nope", SymbolKind::Method), None);
     }
 
     #[test]

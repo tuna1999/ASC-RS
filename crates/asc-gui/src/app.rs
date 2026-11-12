@@ -85,6 +85,11 @@ pub struct AscApp {
     pub(crate) selected_class: Option<String>,
     pub(crate) active_doc: Option<Arc<Document>>,
     pub(crate) pending_scroll: Option<usize>,
+    /// Go-to-declaration member target — `(descriptor, name, kind)` — held
+    /// until that exact document is on screen, because its declaration line
+    /// can only be located in it (a line in the source document would be
+    /// meaningless, and a stale entry must not hijack another document).
+    pub(crate) pending_member: Option<(String, String, crate::semantic::SymbolKind)>,
     pub(crate) show_explorer: bool,
     pub(crate) show_inspector: bool,
     pub(crate) show_bottom: bool,
@@ -195,6 +200,7 @@ impl AscApp {
             selected_class: None,
             active_doc: None,
             pending_scroll: None,
+            pending_member: None,
             show_explorer: true,
             show_inspector: true,
             show_bottom: true,
@@ -315,6 +321,17 @@ impl AscApp {
         }
         let owner = r.owner.as_ref()?;
         Some((owner.clone(), r.name.clone()))
+    }
+
+    /// The (declaring class, field name) the active selection resolved to,
+    /// under the same proof rule as [`Self::resolved_method`].
+    pub(crate) fn resolved_field(&self) -> Option<(String, String)> {
+        let sel = self.active_symbol_sel()?;
+        let r = sel.resolved.as_ref()?;
+        if r.kind != crate::semantic::SymbolKind::Field {
+            return None;
+        }
+        Some((r.owner.clone()?, r.name.clone()))
     }
 
     /// Why the method-scoped actions (ShowSmaliMethod / ShowCallees) and
@@ -534,8 +551,14 @@ impl AscApp {
         // (F2) before the navigation scroll target is set below, so the
         // rebind's own scroll hint is overridden by the explicit target.
         self.reconcile_find_to_document();
-        // Scroll target persists until the document is visible.
-        self.pending_scroll = Some(line.unwrap_or(0));
+        // Scroll target persists until the document is visible. An explicit
+        // line wins; otherwise a pending member line (located once its
+        // document exists) gets the slot instead of a bare top-of-file.
+        self.pending_scroll = if line.is_some() || self.pending_member.is_none() {
+            Some(line.unwrap_or(0))
+        } else {
+            None
+        };
     }
 
     /// Spawn a decompile task for `descriptor` (deduplicated).
@@ -576,6 +599,22 @@ impl AscApp {
             // A view key is never a class descriptor; `spawn_decompile`
             // rejects everything that is not exactly a class descriptor.
             None => self.spawn_decompile(key, ctx),
+        }
+    }
+
+    /// Assign the pending go-to-declaration member's line in `doc` to
+    /// `pending_scroll`, if the pending member belongs to that document.
+    /// Used by the code area when the target document becomes visible.
+    pub(crate) fn take_pending_member_line(&mut self, doc: &Document) {
+        let Some((descriptor, name, kind)) = self.pending_member.clone() else {
+            return;
+        };
+        if descriptor != doc.descriptor {
+            return;
+        }
+        self.pending_member = None;
+        if let Some(line) = crate::semantic::declaration_line(&doc.source, &name, kind) {
+            self.pending_scroll = Some(line);
         }
     }
 
@@ -1040,6 +1079,16 @@ impl AscApp {
                     self.set_status(format!("findrefs running: {}", self.search.input), true);
                 }
             }
+            Command::FindRefsOfClicked { descriptor } => {
+                if let Some(session) = &self.session {
+                    let apk = session.path().to_path_buf();
+                    self.tasks.spawn_findrefs_class(&apk, &descriptor, ctx);
+                    self.unpin_bottom_focus();
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::References;
+                    self.set_status(format!("references: {descriptor}"), true);
+                }
+            }
             Command::FindReferences => {
                 // References to the active class: an engine type-query
                 // keyed on the full descriptor, routed to the
@@ -1221,6 +1270,29 @@ impl AscApp {
                     self.queue(Command::RunSearch);
                     return;
                 }
+                // A class reference resolves to the class-references lane,
+                // which is its own keyword search (audit F2 note: class
+                // usages are covered, not degraded to a global search).
+                if let Some(sel) = self.active_symbol_sel()
+                    && let Some(r) = sel
+                        .resolved
+                        .as_ref()
+                        .filter(|r| r.kind == crate::semantic::SymbolKind::Class)
+                {
+                    self.queue(Command::FindRefsOfClicked {
+                        descriptor: r.name.clone(),
+                    });
+                    return;
+                }
+                if let Some((class, field)) = self.resolved_field() {
+                    self.search.input = field;
+                    self.search.class_filter =
+                        asc_core::normalize_class_name(&class).unwrap_or(class);
+                    self.search.kind = SearchKind::MemberField;
+                    self.focus_search = true;
+                    self.queue(Command::RunSearch);
+                    return;
+                }
                 self.queue(Command::GlobalSearch);
             }
             Command::GoToDeclaration => {
@@ -1231,7 +1303,8 @@ impl AscApp {
                 // unresolved identifier, an owner we could not prove — is
                 // refused instead of re-opening the document on screen.
                 let sel = self.active_symbol_sel();
-                let target = match sel.and_then(|s| s.resolved.as_ref()) {
+                let resolved = sel.and_then(|s| s.resolved.clone());
+                let target = match &resolved {
                     Some(r) if r.kind == crate::semantic::SymbolKind::Class => Some(r.name.clone()),
                     Some(r) if r.owner.is_some() => r.owner.clone(),
                     _ => None,
@@ -1243,6 +1316,12 @@ impl AscApp {
                     );
                     return;
                 };
+                // A member target also aims at its declaration line inside
+                // the target document; the line is located there, so it can
+                // only be resolved once that document exists (F2).
+                self.pending_member = resolved
+                    .filter(|r| r.kind != crate::semantic::SymbolKind::Class)
+                    .map(|r| (descriptor.clone(), r.name.clone(), r.kind));
                 self.queue(Command::OpenClass {
                     descriptor,
                     pin: false,

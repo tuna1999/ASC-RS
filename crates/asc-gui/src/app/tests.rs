@@ -1175,6 +1175,197 @@ fn go_to_declaration_resolves_the_declared_class() {
 /// *declared* class of a resolved method (audit F2, real click path).
 /// A local identifier (not a method) is not dispatched as a method usage —
 /// it degrades to a plain global search instead.
+///
+/// The code area really consumes a pending member line on the target
+/// document (the unit test above only proves the locator; this proves the
+/// wiring, which a bare `pending_scroll = Some(0)` would hide).
+#[test]
+fn code_area_consumes_the_pending_member_line() {
+    let mut app = empty_app();
+    let target = "\
+.class Lcom/foo/B;
+.super Ljava/lang/Object;
+.method public helper(I)V
+    .registers 2
+    return-void
+.end method
+";
+    let doc = Arc::new(Document::new(
+        "Lcom/foo/B;".into(),
+        "classes.dex".into(),
+        target.into(),
+    ));
+    let ctx = egui::Context::default();
+    app.documents.put(doc.clone());
+    app.pending_member = Some((
+        "Lcom/foo/B;".to_string(),
+        "helper".to_string(),
+        crate::semantic::SymbolKind::Method,
+    ));
+    // Exactly what GoToDeclaration does after recording the member.
+    app.navigate_to("Lcom/foo/B;", false, None, NavOrigin::Declaration, &ctx);
+    assert_eq!(
+        app.pending_scroll, None,
+        "no bare top-of-file scroll while a member line is pending"
+    );
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), app);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(
+        h.state().pending_member,
+        None,
+        "the code area consumed the pending member"
+    );
+    assert_eq!(
+        h.state().pending_scroll,
+        None,
+        "and scrolled once, not every frame"
+    );
+}
+
+/// A class reference answers `X` with the class-references lane keyed on the
+/// clicked descriptor (JADX-GUI-002 class usages), never a global search.
+#[test]
+fn find_usages_of_a_clicked_class_uses_the_class_lane() {
+    let smali = "\
+.class Lcom/foo/A;
+.super Ljava/lang/Object;
+.method public m()V
+    .registers 1
+    new-instance v0, Lcom/foo/Bar;
+    return-void
+.end method
+";
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.active_doc = Some(Arc::new(Document::new(
+        "Lcom/foo/A;#smali".into(),
+        "classes.dex".into(),
+        smali.into(),
+    )));
+    app.tabs.open_pinned("Lcom/foo/A;#smali");
+    app.symbol_sel = Some(click_selection("Lcom/foo/A;#smali", smali, "Lcom/foo/Bar;"));
+    app.dispatch(Command::FindUsagesOfClicked, &ctx);
+    assert!(
+        app.commands.iter().any(|c| matches!(
+            c,
+            Command::FindRefsOfClicked { descriptor } if descriptor == "Lcom/foo/Bar;"
+        )),
+        "class lane keyed on the clicked class, not the document's: {:?}",
+        app.commands
+    );
+    assert!(
+        !app.commands
+            .iter()
+            .any(|c| matches!(c, Command::GlobalSearch)),
+        "a resolved class never degrades to global search"
+    );
+}
+
+/// Field usages go through the same lane as methods, pinned to the field's
+/// declaring class (JADX-GUI-002 coverage beyond methods).
+#[test]
+fn find_usages_field_query_via_click() {
+    let smali = "\
+.class Lcom/foo/A;
+.super Ljava/lang/Object;
+.field private count:I
+.method public m()V
+    .registers 2
+    iget v0, p0, Lcom/foo/B;->hits:I
+    return-void
+.end method
+";
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.active_doc = Some(Arc::new(Document::new(
+        "Lcom/foo/A;#smali".into(),
+        "classes.dex".into(),
+        smali.into(),
+    )));
+    app.tabs.open_pinned("Lcom/foo/A;#smali");
+    app.symbol_sel = Some(click_selection("Lcom/foo/A;#smali", smali, "hits"));
+    app.dispatch(Command::FindUsagesOfClicked, &ctx);
+    assert_eq!(app.search.kind, SearchKind::MemberField);
+    assert_eq!(app.search.input, "hits");
+    assert!(
+        app.search.class_filter.contains("foo/B"),
+        "class filter pinned to the field's declaring class: {:?}",
+        app.search.class_filter
+    );
+    assert!(
+        app.commands.iter().any(|c| matches!(c, Command::RunSearch)),
+        "RunSearch queued"
+    );
+}
+
+/// A member go-to-declaration also aims at the member's declaration line in
+/// the target document, and the code area consumes it there (JADX-GUI-003).
+#[test]
+fn go_to_declaration_targets_the_member_line() {
+    let smali = "\
+.class Lcom/foo/A;
+.super Ljava/lang/Object;
+.method public m()V
+    .registers 2
+    invoke-virtual {v0}, Lcom/foo/B;->helper(I)V
+    return-void
+.end method
+";
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.active_doc = Some(Arc::new(Document::new(
+        "Lcom/foo/A;#smali".into(),
+        "classes.dex".into(),
+        smali.into(),
+    )));
+    app.tabs.open_pinned("Lcom/foo/A;#smali");
+    app.symbol_sel = Some(click_selection("Lcom/foo/A;#smali", smali, "helper"));
+    app.dispatch(Command::GoToDeclaration, &ctx);
+    match &app.commands[0] {
+        Command::OpenClass { descriptor, .. } => assert_eq!(descriptor, "Lcom/foo/B;"),
+        other => panic!("expected OpenClass, got {other:?}"),
+    }
+    assert_eq!(
+        app.pending_member,
+        Some((
+            "Lcom/foo/B;".to_string(),
+            "helper".to_string(),
+            crate::semantic::SymbolKind::Method
+        )),
+        "the member line is aimed at in the target document"
+    );
+    assert_eq!(
+        app.pending_scroll, None,
+        "no bare top-of-file scroll while a member line is pending"
+    );
+    // The target document, once on screen, yields the declaration line.
+    let target = "\
+.class Lcom/foo/B;
+.super Ljava/lang/Object;
+.method public helper(I)V
+    .registers 2
+    return-void
+.end method
+";
+    let doc = Document::new("Lcom/foo/B;".into(), "classes.dex".into(), target.into());
+    // Another document must not consume the pending member.
+    let other = Document::new("Lcom/foo/C;".into(), "classes.dex".into(), target.into());
+    app.take_pending_member_line(&other);
+    assert!(
+        app.pending_member.is_some(),
+        "wrong document keeps it pending"
+    );
+    // The target document scrolls to the `.method` line, not the top.
+    app.take_pending_member_line(&doc);
+    assert_eq!(app.pending_scroll, Some(2));
+    assert_eq!(app.pending_member, None, "consumed once");
+}
+
 #[test]
 fn find_usages_method_query_via_click() {
     let src = "class A {\n  void m() {\n    doThing();\n  }\n}\n";
@@ -3060,6 +3251,135 @@ fn incomplete_class_strings_result_is_not_reported_complete() {
     assert!(!r.complete, "a partial class-strings scan is not complete");
     assert_eq!(r.errors.len(), 1, "the failure must be surfaced");
     assert_eq!(r.rows.len(), 1, "partial data is still shown");
+}
+
+/// Hand-visual repro for the go-to-declaration line jump: a Smali click on
+/// an `invoke-*`/field target must land on the member's declaration line
+/// (`.method`/`.field` in Smali, the declaring Java line in a decompiled
+/// document), not at the top of the file (JADX-GUI-003).
+#[test]
+fn visual_shots_declaration_jump() {
+    if std::env::var("ASC_GUI_SHOTS").is_err() {
+        eprintln!("ASC_GUI_SHOTS not set; skipping");
+        return;
+    }
+    let Some(apk) = corpus() else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let _guard = render_lock();
+    let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&shots).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    crate::design::apply(&h.ctx);
+    let ctx0 = h.ctx.clone();
+    h.state_mut().open_path(&apk, &ctx0);
+    for _ in 0..400 {
+        h.step();
+        if h.state().session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Land on a Smali view with a cross-class invoke, click its target and
+    // ctrl+click it.
+    let target = "Landroid/support/v4/app/INotificationSideChannel$Stub$Proxy;";
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .navigate_to(target, true, None, crate::app::NavOrigin::Tree, &ctx);
+    for _ in 0..400 {
+        h.step();
+        let ready = h
+            .state()
+            .active_doc
+            .as_ref()
+            .is_some_and(|d| d.descriptor == target);
+        if ready {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Let every tab job settle first (the boot tab lands last and would
+    // otherwise steal the active document), then drop the boot tab
+    // (`Landroid/os/Parcel;`, absent from the fixture) so the target owns
+    // `active_class_descriptor` for the Smali request.
+    for _ in 0..300 {
+        h.step();
+        let state = h.state();
+        let busy = state
+            .tabs
+            .tabs()
+            .iter()
+            .any(|t| matches!(t.status, crate::state::tabs::TabStatus::Loading));
+        // The boot tab appears asynchronously; wait for it to show up
+        // *before* dropping it, or it lands again afterwards.
+        if !busy && state.tabs.tabs().len() >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    {
+        let app = h.state_mut();
+        app.close_tab("Landroid/os/Parcel;");
+        app.tabs.open_pinned(target);
+        app.active_doc = app.documents.get(target);
+    }
+    assert_eq!(
+        h.state().active_class_descriptor(),
+        Some(target),
+        "the Smali request must target the pinned class"
+    );
+    h.state_mut().queue(Command::ShowSmali);
+    for _ in 0..400 {
+        h.step();
+        let ready = h
+            .state()
+            .active_doc
+            .as_ref()
+            .is_some_and(|d| d.descriptor.contains("#smali"));
+        if ready {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let (doc_descriptor, src) = {
+        let doc = h.state().active_doc.as_ref().expect("smali view");
+        (doc.descriptor.clone(), doc.source.clone())
+    };
+    // A member whose declaring class really exists in the fixture: the
+    // sibling `_Parcel`'s static `access` field.
+    let byte = src
+        .find("INotificationSideChannel$_Parcel;->access")
+        .map(|b| b + "INotificationSideChannel$_Parcel;->".len())
+        .expect("a reference to the sibling `_Parcel` in the listing");
+    let doc = {
+        let app = h.state_mut();
+        let doc = app.active_doc.as_ref().expect("doc").clone();
+        app.on_symbol_click(&doc, byte, true);
+        doc
+    };
+    let from = doc_descriptor;
+    drop(doc);
+    for _ in 0..400 {
+        h.step();
+        let done = h.state().pending_member.is_none()
+            && h.state().active_doc.is_some()
+            && h.state().tabs.active_descriptor() != Some(target);
+        if done {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    for _ in 0..3 {
+        h.step();
+    }
+    let img = h.render().expect("render");
+    let path = shots.join("declaration_jump.png");
+    img.save(&path).unwrap();
+    eprintln!("shot: {} (from {from})", path.display());
 }
 
 /// v0.9.0 feature shots: method Smali tab, callees rows, open-tabs

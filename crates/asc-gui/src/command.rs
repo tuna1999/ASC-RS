@@ -34,6 +34,12 @@ pub enum Command {
     /// land in the bottom-panel REFERENCES tab. Powers
     /// `ASC-RS-GUI-002` (used by class X inline button).
     UsedByClass,
+    /// Class-scoped find triggered by `X` on a clicked `L…;` reference:
+    /// the class-references lane keyed on the *clicked* descriptor (the
+    /// active tab's class would be the wrong target).
+    FindRefsOfClicked {
+        descriptor: String,
+    },
     /// Member-scoped find triggered by `X` on the clicked identifier.
     /// Wraps `RunSearch` with `SearchKind::Method` and the click's
     /// token + descriptor pre-filled (workflow B).

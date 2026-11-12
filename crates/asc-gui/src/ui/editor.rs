@@ -468,6 +468,16 @@ impl AscApp {
         });
     }
 
+    /// Record a code-surface click at `byte`: selects the identifier and,
+    /// with Ctrl held, jumps to its declaration — the JADX gesture, i.e. the
+    /// same resolution `Ctrl+D` uses on the current selection.
+    pub(crate) fn on_symbol_click(&mut self, doc: &Document, byte: usize, ctrl: bool) {
+        self.symbol_sel = symbol_selection_for(&doc.descriptor, &doc.source, byte);
+        if ctrl {
+            self.queue(Command::GoToDeclaration);
+        }
+    }
+
     fn draw_code(&mut self, ui: &mut egui::Ui, doc: &Arc<Document>) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
@@ -477,6 +487,9 @@ impl AscApp {
 
         // Highlight the find match / navigation target line.
         let scroll_target = self.nav_or_find_line();
+        if self.pending_scroll.is_none() {
+            self.take_pending_member_line(doc);
+        }
         let pending = self.pending_scroll.take();
         let mut scroll = egui::ScrollArea::both()
             .auto_shrink([false, false])
@@ -548,11 +561,8 @@ impl AscApp {
                                     .nth(col)
                                     .map(|(b, _)| b)
                                     .unwrap_or(line.len());
-                                self.symbol_sel = symbol_selection_for(
-                                    &doc.descriptor,
-                                    &doc.source,
-                                    line_abs + byte,
-                                );
+                                let ctrl = ui.input(|i| i.modifiers.ctrl);
+                                self.on_symbol_click(doc, line_abs + byte, ctrl);
                             }
                         }
                         hovered |= resp.hovered();
@@ -637,6 +647,27 @@ pub(crate) fn symbol_selection_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ctrl+click records the selection and queues the declaration jump in
+    /// one gesture; a plain click only selects (JADX-GUI-003).
+    #[test]
+    fn ctrl_click_jumps_to_the_declaration() {
+        let src = "class A {\n  void m() {\n    B.foo();\n  }\n}\n";
+        let doc =
+            crate::state::documents::Document::new("LA;".into(), "classes.dex".into(), src.into());
+        let mut app = AscApp::new(None);
+        let byte = src.find("foo").unwrap();
+        app.on_symbol_click(&doc, byte, false);
+        assert!(app.commands.is_empty(), "a plain click only selects");
+        assert!(app.symbol_sel.is_some());
+        app.on_symbol_click(&doc, byte, true);
+        assert!(
+            app.commands
+                .iter()
+                .any(|c| matches!(c, Command::GoToDeclaration)),
+            "ctrl+click queues the jump"
+        );
+    }
 
     /// `symbol_selection_for` returns the clicked identifier, the
     /// enclosing method's byte range, and every code-state
