@@ -383,9 +383,22 @@ made the oracle reproducible.
   `REGRESSION-OK(UNVERIFIED)` / `REGRESSION-OK(UNSUPPORTED)` /
   `NOT_RUN` — skipped oracle rows are never counted as verified passes. The
   source-derived regression is wired into CI (Linux leg).
-- **Remaining blockers:** aapt2 real-AXML fixtures (one per rule group,
-  no Android SDK build host in CI) and a second android-all build to
-  exercise the flag-off trio; every other row is gated in CI.
+- **aapt2 real-AXML fixtures: DONE (2026-11-12).**
+  `tests/fixtures/uri_apk/` holds one aapt2-built APK carrying every row as its
+  own activity plus the `cases.txt` expectation table; the generator is
+  `tests/fixtures/uri_apk/build.py` (built with aapt2 2.20-16666295 against the
+  API 35 `android.jar`), and `asc-manifest`'s
+  `aapt2_uri_group_fixtures_match_expected` drives the evaluator off the real
+  AXML decode instead of the JSON model — 51 rows, all equal to
+  `source_expected`. No build host is needed in CI because the APK is committed;
+  only regenerating it needs `AAPT2` + `ANDROID_JAR`. Two generator facts:
+  aapt2 collapses `\\` to a single backslash in attribute values (so the
+  builder doubles literal backslashes), and it cannot create files outside
+  `target/` on this Windows box (link into `target/`, then copy). The exact mechanism
+  (Defender/CFA vs. another AppContainer policy) was never confirmed — only the
+  behaviour, which reproduces with unsigned binaries of any language.
+- **Remaining blocker:** a second android-all build to exercise the flag-off
+  trio; every other row is gated in CI.
 
 
 
@@ -410,9 +423,9 @@ reuse per R4 (`UriDependency`), verdict + reasons per §4. Pure function:
   framework jar) for each fixture URI; compare verdicts. Record the
   oracle recipe + version in the compatibility matrix.
 - Real APKs: none of the five corpus APKs contains the element (byte
-  search for `uri-relative-filter-group`, 2026-10-08), so coverage needs
-  new fixtures: one aapt2-built APK per rule group (no Android SDK on
-  this machine at research time — aapt2 is a prerequisite), plus any
+  search for `uri-relative-filter-group`, 2026-10-08), so coverage needed
+  new fixtures: one aapt2-built APK per rule group — now committed in
+  `tests/fixtures/uri_apk/` (see 5.1.1 / the blocker note above) — plus any
   externally collected API-35 APK that uses the element (dev-only
   fixture, `docs/CORPUS.md` policy) — differential the ASC-RS verdict
   against the oracle's.
@@ -437,7 +450,14 @@ suite and the oracle differential registered in
    local name, `URI_RELATIVE_ATTRS`), or does the build rewrite them?
    Runtime `writeToXml` writes an internal `uriRelativeFilter` form with
    integer `part`/`pattern` attributes — that is the *runtime* serializer,
-   not necessarily what aapt2 emits. Needs one real APK to confirm.
+   not necessarily what aapt2 emits.
+   **Resolved (2026-11-12, `tests/fixtures/uri_apk/`):** aapt2 2.20 keeps
+   the source element and attribute names (`<uri-relative-filter-group>`,
+   `android:pathAdvancedPattern`, …) exactly as `URI_RELATIVE_ATTRS` maps
+   them, so the integer `part`/`pattern` form never appears in a compiled
+   manifest. Consequence worth knowing: aapt2 applies its own backslash
+   unescape to attribute values (`\\` → `\`) before writing the pool, so a
+   generator must double a literal backslash.
 2. **Flag coverage.** `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` is an
    aconfig flag: verdicts must state the assumed flag state, and the
    "flag off" verdict is a separate row, not a footnote.

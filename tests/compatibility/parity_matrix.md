@@ -166,7 +166,14 @@ Current state after the oracle run (2026-10-12):
   never counted as confirmed;
 - the 3 flag-off rows are UNVERIFIED(FLAG): the aconfig flag is frozen at
   framework build time, so a second android-all build is needed;
-- aapt2-built real-APK fixtures for the element are still missing.
+- aapt2-built real-APK fixtures: **done 2026-11-12** —
+  `tests/fixtures/uri_apk/uri_groups.apk` (51 activities, one per row,
+  aapt2 2.20-16666295 against the API 35 `android.jar`, table in
+  `cases.txt`, generator `build.py`) with the unit test
+  `asc-manifest aapt2_uri_group_fixtures_match_expected` feeding
+  `evaluate_filter_uri` from the real AXML decode; all 51 rows equal
+  `source_expected`. It proves parser+evaluator on aapt2 bytes, not Android
+  equivalence — that stays the Robolectric rows above.
 
 The source-derived regression runs here and is green:
 `python tests/differential/run_uri_oracle.py` drives

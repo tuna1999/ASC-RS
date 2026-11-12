@@ -2580,3 +2580,51 @@ fn cleartext_default_keys_off_the_effective_target_sdk() {
     assert!(build(33, None, Some(true)).effective_uses_cleartext_traffic());
     assert!(!build(21, None, Some(false)).effective_uses_cleartext_traffic());
 }
+
+/// The aapt2-built fixture APK carries one activity per acceptance case
+/// (`tests/fixtures/uri_match_cases.json` → `tests/fixtures/uri_apk/`), so the
+/// real AXML decode path is what feeds the evaluator: attribute ids, element
+/// nesting and `android:` names all come from aapt2, not from hand-built blobs.
+/// Regenerate the pair with `tests/fixtures/uri_apk/build.py` when the case
+/// table changes.
+#[test]
+fn aapt2_uri_group_fixtures_match_expected() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/uri_apk");
+    let table = std::fs::read_to_string(dir.join("cases.txt")).expect("cases.txt");
+    let info = crate::parse_from_apk(dir.join("uri_groups.apk")).expect("fixture APK parses");
+
+    assert_eq!(info.package.as_deref(), Some("asc.rs.urifixture"));
+    assert_eq!(
+        info.target_sdk,
+        Some(35),
+        "the group layer only exists at API 35"
+    );
+
+    let mut checked = 0usize;
+    for line in table.lines() {
+        let mut it = line.split('\t');
+        let (id, uri, flag_on, expected) = match (it.next(), it.next(), it.next(), it.next()) {
+            (Some(a), Some(b), Some(c), Some(d)) => (a, b, c == "1", d),
+            _ => panic!("malformed cases.txt line: {line:?}"),
+        };
+        let suffix = format!(".c_{id}");
+        let entry = info
+            .activities
+            .iter()
+            .find(|a| a.name.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("activity for {id} missing from the fixture APK"));
+        let filter = entry
+            .intent_filters
+            .first()
+            .unwrap_or_else(|| panic!("activity for {id} has no intent filter"));
+        let got = match crate::uri_match::evaluate_filter_uri(filter, uri, flag_on).outcome {
+            crate::uri_match::UriMatchVerdict::Matches => "matches",
+            crate::uri_match::UriMatchVerdict::CannotMatch => "cannot_match",
+            crate::uri_match::UriMatchVerdict::Unknown => "unknown",
+        };
+        assert_eq!(got, expected, "{id} ({uri}, flag_on={flag_on})");
+        checked += 1;
+    }
+    assert_eq!(checked, info.activities.len(), "one case per activity");
+    assert!(checked >= 51, "case table shrank unexpectedly: {checked}");
+}
