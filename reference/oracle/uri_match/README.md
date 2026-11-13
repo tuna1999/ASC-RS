@@ -23,31 +23,34 @@ called `success` / closed.
 | ASC-RS side | `tests/differential/run_uri_oracle.py` + `asc-manifest/examples/eval_uri.rs` — **runnable, green vs `source_expected`** |
 | Oracle side | Gradle + Robolectric project below — **COMPILES and RUNS** against the real framework on this machine (JDK 17.0.20.1 + Gradle 8.10.2, both portable/local; the build classpath was corrected, see build.gradle) |
 | Framework artifact | `org.robolectric:android-all-instrumented:15-robolectric-12650502-i7` (verified present in the jar; records in `provenance.framework_artifact`) |
-| Observed flag state | `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` = **ON** (read at runtime from the relocated `android.content.pm.Flags`, recorded in `provenance.flag_state_actual`) |
-| Result | 51 cases: **36 ORACLE-CONFIRMED, 12 ORACLE-OPEN, 3 UNVERIFIED(FLAG)**, 0 mismatches. Exit 0. |
+| Observed flag state | read at runtime from the relocated `android.content.pm.Flags`, recorded in `provenance.flag_state_actual`; `-Duri.force.flag=off` installs a proxy override so one build delivers both states |
+| Result | 53 cases over two runs (flag on / forced off): **53 ORACLE-CONFIRMED, 0 UNVERIFIED(FLAG)**, 0 mismatches. Exit 0 each. |
 
 Run (real, this machine):
 ```
-python tests/differential/run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json
+python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_on.json
+python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_off.json
 ```
 ```
-51 cases; 0 source-mismatches; 0 oracle-mismatches.
-36 ORACLE-CONFIRMED; 12 ORACLE-OPEN (asc-rs `unknown` surfaced); 3 UNVERIFIED (flag-state not exercisable in this build).
+50 ORACLE-CONFIRMED; 0 ORACLE-OPEN (asc-rs `unknown` surfaced); 3 UNVERIFIED (flag-state not exercisable in this build).
+3 ORACLE-CONFIRMED; 0 ORACLE-OPEN (asc-rs `unknown` surfaced); 50 UNVERIFIED (flag-state not exercisable in this build).
 ```
 
-The **flag-OFF** state (fixtures `T19`–`T21`) is NOT reproducible with any
-published Robolectric android-all: the android-all build freezes the aconfig
-flag at the AOSP default (`ON`), and Robolectric publishes exactly one
-android-all per SDK. Exercising OFF would require a maintainer-built android-all
-with the flag disabled. Those 3 rows are therefore reported `UNVERIFIED(FLAG)`,
-never confirmed. This is the honest, intended outcome (README "Flag handling").
+The android-all build freezes the aconfig flag at the AOSP default (`ON`), so
+a plain run can only exercise the flag-ON rows. The **flag-OFF** rows
+(`T19`–`T21`) are exercised by the SAME build with `-Duri.force.flag=off`:
+`Flags` keeps its implementation in the private static `FEATURE_FLAGS` field
+(the aconfig custom-flags hook) and the harness swaps it for a
+`java.lang.reflect.Proxy` over the `FeatureFlags` interface that answers
+`relativeReferenceIntentFilters()` with `false` and delegates every other
+flag. The runtime state is still READ, never assumed, so the file stays
+self-describing (`flag_state_actual: false`, `exercised_flag_off: 3`, the 50
+flag-ON rows in `flag_skipped`).
 
-No Android-equivalence claim is made for the 12 ORACLE-OPEN rows (asc-rs
-deliberately returns `unknown` for glob/advanced-pattern/opaque/bound-overflow
-inputs whose AOSP branch asc-rs does not model). The harness reports them as
-open findings — a possible future engine improvement — never as oracle
-agreement. A genuine `SOURCE-MISMATCH` / `ORACLE-MISMATCH` only appears when a
-real divergence exists.
+No Android-equivalence claim is made for a case asc-rs resolves as `unknown`
+(`ORACLE-OPEN`); there are none left — the glob, advanced-pattern and
+malformed-escape rows are all implemented. A genuine `SOURCE-MISMATCH` /
+`ORACLE-MISMATCH` only appears when a real divergence exists.
 
 ## Layout
 
@@ -68,7 +71,8 @@ The fixture is read **straight from the repo** via `-Duri.fixtures` (set in
 - Network to Maven Central / Google Maven (Robolectric resolves
   `android-all-instrumented` and the androidx.test AAR at build/test time;
   ~200 MB first download, cached in the Gradle user home)
-- A verified way to control `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` (below)
+- A verified way to control `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS`: no
+  second artifact needed — `-Duri.force.flag=off` proxies it (below)
 
 These were installed and the full pipeline run for real on 2026-10-12: see
 "Status". The `build.gradle` was corrected from the earlier un-proven draft —
@@ -86,14 +90,21 @@ classpath, relocated hidden `Flags` API — see the header comment in
    ```
    cd reference/oracle/uri_match
    URI_FLAG_MECHANISM="android-all:15-robolectric-12650502 frozen aconfig default" \
-     gradle test --tests '*.UriOracle'         # writes build/oracle_verdicts.json
+     gradle test --tests '*.UriOracle'         # writes build/oracle_verdicts.json (flag ON)
+   cp build/oracle_verdicts.json ../../tests/fixtures/oracle_verdicts_api35_flag_on.json
+   # flag OFF from the same build (same output path — copy between runs):
+   URI_FLAG_MECHANISM="… frozen aconfig default, forced off via Flags.FEATURE_FLAGS proxy" \
+     JAVA_TOOL_OPTIONS=-Duri.force.flag=off gradle test --tests '*.UriOracle'
+   cp build/oracle_verdicts.json ../../tests/fixtures/oracle_verdicts_api35_flag_off.json
    # or, if a wrapper was generated: ./gradlew test --tests '*.UriOracle'
    # Without URI_FLAG_MECHANISM the file is marked UNVERIFIED_SKIPPED and the
    # runner rejects it (a real flag mechanism must be asserted).
    ```
-3. **Diff** (ASC-RS vs source_expected AND vs the framework oracle):
+3. **Diff** (ASC-RS vs source_expected AND vs the framework oracle), once per
+   file — each confirms only the rows its own flag state exercised:
    ```
-   python tests/differential/run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json
+   python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_on.json
+   python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_off.json
    ```
    Exit 0 only when every ASC-RS verdict equals `source_expected` and the
    oracle for every case the oracle actually exercised. Any divergence is a
@@ -116,11 +127,15 @@ exercised:
 - **flag off**: `paths == null → authMatch` (groups ignored). Fixtures with
   `flag_on: false` (T19–T21).
 
-**The flag is NOT runtime-toggleable from Robolectric.** It is frozen at
-framework build time. `UriOracle` therefore does **not** assume which state it
-is in — it **reads the actual state** via
-`Flags.relativeReferenceIntentFilters()` and records it as
-`provenance.flag_state_actual`:
+**The flag has no runtime API.** It is frozen at framework build time.
+`-Duri.force.flag=off` sidesteps that: the generated `Flags` class caches its
+implementation in the private static `FEATURE_FLAGS` field (the aconfig
+custom-flags hook), so the harness swaps that field for a
+`java.lang.reflect.Proxy` over the `FeatureFlags` interface which answers
+`relativeReferenceIntentFilters()` with `false` and delegates every other flag
+to the frozen implementation. `UriOracle` still **reads the actual state**
+after installing the override via `Flags.relativeReferenceIntentFilters()` and
+records it as `provenance.flag_state_actual`:
 
 - A case whose required `flag_on` equals `flag_state_actual` is exercised and
   a verdict is emitted.
@@ -152,12 +167,11 @@ whose `status` is `UNVERIFIED_SKIPPED`, which omits `flag_state_actual`, or
 which lacks a real `framework_artifact` / `api_level_observed` is **rejected by
 the runner** — it can never produce `ORACLE-CONFIRMED`.
 
-**Exercising both states requires two builds** (the flag is frozen per build):
-run the same physical fixtures against two android-all artifacts with the flag
-in opposite states, producing two `oracle_verdicts.json` files. Each diff
-confirms only the cases its build exercised; the union of the two runs covers
-both flag states. A single run confirming only one flag state leaves the other
-state's rows `UNVERIFIED(FLAG)`, which is the honest, intended outcome.
+**Both states come from one build**: pass `-Duri.force.flag=off` (e.g. through
+`JAVA_TOOL_OPTIONS`) and the harness installs the `FEATURE_FLAGS` proxy before
+reading the state, so the same fixtures produce a flag-off `oracle_verdicts.json`
+with the flag-on rows in `flag_skipped`. Two android-all artifacts are only
+needed if a future flag cannot be proxied.
 
 ## Verdict mapping
 
@@ -209,7 +223,7 @@ binary manifests. The pipeline was PROVEN end-to-end this session:
   the fixture JSON; it needs an APK-derived-filter entry point or a parallel
   JSON producer).
 - honour the flag-state caveat: this aapt2/android.jar path does not change
-  the aconfig flag (frozen ON here); flag-off parity stays `UNVERIFIED(FLAG)`
-  exactly as the framework oracle.
+  the aconfig flag (frozen ON), so flag-off comparisons need the forced
+  `-Duri.force.flag=off` run described in "Flag handling".
 - the external tools are NOT vendored: aapt2 + `platform-35`/`android.jar`
   (and JDK/Gradle) are local prerequisites. Do not pin them into the repo.

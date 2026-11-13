@@ -145,12 +145,47 @@ public class UriOracle {
     }
 
     /**
+     * Report the flag OFF in a build whose frozen value is ON (or vice versa
+     * is not needed: the frozen build here is ON). The generated flags class
+     * keeps its implementation in the private static `FEATURE_FLAGS` field —
+     * the aconfig custom-flags hook — so a dynamic proxy over that interface
+     * answers `relativeReferenceIntentFilters()` with `false` and delegates
+     * every other flag to the frozen implementation.
+     */
+    static void forceFlagOff() throws Exception {
+        Class<?> iface = Class.forName(
+            "com.android.internal.hidden_from_bootclasspath.android.content.pm.FeatureFlags");
+        java.lang.reflect.Field field = Flags.class.getDeclaredField("FEATURE_FLAGS");
+        field.setAccessible(true);
+        Object real = field.get(null);
+        Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+            iface.getClassLoader(), new Class<?>[] {iface}, (p, m, a) -> {
+                if ("relativeReferenceIntentFilters".equals(m.getName())) return Boolean.FALSE;
+                try {
+                    return real == null ? null : m.invoke(real, a);
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            });
+        field.set(null, proxy);
+    }
+
+    /**
      * The build's ACTUAL frozen aconfig flag state that gates the group-aware
      * branch of `IntentFilter.matchData`. Returns null only if the generated
      * flags class cannot be read (build mismatch) — the caller must fail
-     * closed then, never assume a value.
+     * closed then, never assume a value. `-Duri.force.flag=off` installs the
+     * override first, so the reported value is the one the process really
+     * matches with.
      */
     static Boolean actualFlagOn() {
+        if ("off".equals(System.getProperty("uri.force.flag", ""))) {
+            try {
+                forceFlagOff();
+            } catch (Throwable t) {
+                return null;               // an override that cannot install is unprovable
+            }
+        }
         try {
             return Flags.relativeReferenceIntentFilters();
         } catch (Throwable t) {

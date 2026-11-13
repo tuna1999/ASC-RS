@@ -171,22 +171,27 @@ jobs:
         # Two layers, both gated on the Linux leg:
         #   1. every fixture's `source_expected` (pinned android-15.0.0_r1
         #      source) — a SOURCE-MISMATCH is a real bug;
-        #   2. the committed Robolectric run
-        #      (tests/fixtures/oracle_verdicts_api35_flag_on.json). The runner
-        #      validates its provenance (framework, api_level, observed api
-        #      level, flag mechanism, exercised case ids) before emitting any
-        #      ORACLE-CONFIRMED, so CI asserts the framework's committed
-        #      answers without an Android SDK on the runner. Regenerating the
-        #      file needs JDK + Gradle (reference/oracle/uri_match/) and stays
-        #      manual.
+        #   2. the committed Robolectric runs — one per flag state
+        #      (tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json). Each
+        #      case belongs to exactly one state (`flag_on`), so a file only
+        #      confirms the cases it could really exercise and lists the rest
+        #      as flag_skipped. The runner validates provenance (framework,
+        #      api_level, observed api level, flag mechanism, exercised case
+        #      ids) before emitting any ORACLE-CONFIRMED, so CI asserts the
+        #      framework's committed answers without an Android SDK on the
+        #      runner. Regenerating the files needs JDK + Gradle
+        #      (reference/oracle/uri_match/, `-Duri.force.flag=off` for the
+        #      off file) and stays manual.
         # Missing/duplicate/unexpected ids, invalid provenance, UNVERIFIED_SKIPPED
         # and any ORACLE-MISMATCH exit non-zero.
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          python tests/differential/run_uri_oracle.py \
-            --oracle tests/fixtures/oracle_verdicts_api35_flag_on.json
+          for state in on off; do
+            python tests/differential/run_uri_oracle.py \
+              --oracle "tests/fixtures/oracle_verdicts_api35_flag_${state}.json"
+          done
 
       - name: URI oracle harness regression tests
         # Tests the judging logic in run_uri_oracle.py: provenance gating,

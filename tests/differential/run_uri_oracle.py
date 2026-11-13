@@ -38,9 +38,11 @@ or reports UNVERIFIED_SKIPPED. Skipped oracle rows are NEVER counted as
 verified passes, and ORACLE-CONFIRMED is never emitted without a proven run.
 
 Flag handling / why this is strict: the group-aware branch of AOSP
-`IntentFilter.matchData` is gated by the frozen build-time aconfig flag
-`Flags.relativeReferenceIntentFilters()`, which Robolectric cannot toggle at
-runtime. `UriOracle` therefore reads the build's ACTUAL flag state and only
+`IntentFilter.matchData` is gated by the aconfig flag
+`Flags.relativeReferenceIntentFilters()`, frozen per build; a run with
+`-Duri.force.flag=off` proxies it so one build delivers both states, one
+oracle file each (`tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json`).
+`UriOracle` reads the build's ACTUAL flag state after installing any override and only
 emits a verdict for a case whose required `flag_on` equals that state; every
 other case lands in `provenance.flag_skipped`. Verdicts for the wrong flag
 state are impossible (they are not produced), and the runner refuses to confirm
@@ -48,7 +50,8 @@ any case the oracle file does not prove it exercised in the right state.
 
 Usage (from repo root, with asc-rs workspace buildable):
   python tests/differential/run_uri_oracle.py
-  python tests/differential/run_uri_oracle.py --oracle reference/oracle/uri_match/build/oracle_verdicts.json
+  python tests/differential/run_uri_oracle.py \
+      --oracle tests/fixtures/oracle_verdicts_api35_flag_on.json   # or _flag_off.json
 Exit codes: 0 = asc-rs matches source_expected (and the oracle for every case
 the oracle actually exercised); 1 = any hard error or genuine mismatch.
 """

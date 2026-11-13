@@ -4,13 +4,13 @@ Date: 2026-10-08 · updated 2026-10-29 · branch `master` · status:
 **5.1–5.5 shipped in `asc-rs manifest --match-uri <uri>` (text + additive
 JSON), evaluator in `asc-manifest::uri_match`; the 5.4 AOSP-oracle
 differential is GATED in CI against the committed Robolectric run
-(`tests/fixtures/oracle_verdicts_api35_flag_on.json`: 48 ORACLE-CONFIRMED,
-0 ORACLE-OPEN, 3 flag-state UNVERIFIED, 0 mismatches) and the real-APK
+(`tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json`: 53
+ORACLE-CONFIRMED across the two flag states, 0 ORACLE-OPEN, 0 mismatches) and the real-APK
 aapt2 fixtures are committed. Every row the oracle resolved is implemented
 in the evaluator — including the `pathPattern`/`pathAdvancedPattern` globs,
-the lenient `UriCodec` decode and the absent group caps (v0.24.0); only a
-flag-state row stays UNVERIFIED, because the frozen Robolectric build
-cannot toggle the aconfig flag.**
+the lenient `UriCodec` decode and the absent group caps (v0.24.0). No row is
+UNVERIFIED any more: the three flag-off rows come from the same build with
+the aconfig flag forced off (v0.24.3).**
 
 ASC-RS today parses `<uri-relative-filter-group>` children of an
 `<intent-filter>` and reports them verbatim (`asc-manifest`
@@ -355,8 +355,15 @@ made the oracle reproducible.
   required `flag_on` equals it; every other case lands in
   `provenance.flag_skipped`. If the flag state cannot be read the test fails
   closed (writes nothing, `status` `UNVERIFIED_SKIPPED`). The flag is NOT
-  runtime-toggleable from Robolectric, so exercising both states takes two
-  android-all builds (an `UNKNOWN`/absent `flag_mechanism` ⇒ `UNVERIFIED_SKIPPED`).
+  runtime-toggleable through an Android API, but `-Duri.force.flag=off`
+  installs an override: `Flags` keeps its implementation in the private
+  static `FEATURE_FLAGS` field (the aconfig custom-flags hook) and the test
+  swaps it for a `java.lang.reflect.Proxy` that answers
+  `relativeReferenceIntentFilters()` with `false` and delegates every other
+  flag. One build therefore covers both states — the flag-on run writes
+  `…_flag_on.json`, a run with `-Duri.force.flag=off` writes
+  `…_flag_off.json` (an `UNKNOWN`/absent `flag_mechanism` ⇒
+  `UNVERIFIED_SKIPPED`).
   The runner (`run_uri_oracle.py`) treats any such file — missing/invalid/
   `UNVERIFIED_SKIPPED` provenance, or missing/duplicate/unexpected verdicts —
   as a hard error (exit 1) and never emits `ORACLE-CONFIRMED` from it; a
@@ -364,12 +371,12 @@ made the oracle reproducible.
   `build/oracle_verdicts.json` `{verdicts, provenance}`. **Compiled and run
   on 2026-10-12** (JDK 17.0.20.1, Gradle 8.10.2, Robolectric 4.14.1,
   `android-all-instrumented:15-robolectric-12650502-i7`): 48 flag-on cases
-  exercised, 3 flag-off rows skipped by construction, 0 mismatches. The
-  result is committed as
-  `tests/fixtures/oracle_verdicts_api35_flag_on.json` and **asserted in CI**
-  (Linux leg) via `run_uri_oracle.py --oracle …`; the live Gradle project
-  (`reference/oracle/uri_match/`, gitignored) is only needed to regenerate
-  it.
+  exercised by the default run and 3 flag-off ones by the forced run, 0
+  mismatches. The results are committed as
+  `tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json` and **asserted in
+  CI** (Linux leg) via `run_uri_oracle.py --oracle …`, once per file; the live
+  Gradle project (`reference/oracle/uri_match/`, gitignored) is only needed to
+  regenerate them.
 - **Fixture coverage grew to 51 cases** — added the missing acceptance rows
   T9, T15b, T17, T21, T22, T26, T27, T28 plus D1–D4 (scheme mismatch, host
   mismatch, wildcard apex/not-sibling boundaries, ASCII case-insensitive host)
@@ -393,8 +400,8 @@ made the oracle reproducible.
   `target/` on this Windows box (link into `target/`, then copy). The exact mechanism
   (Defender/CFA vs. another AppContainer policy) was never confirmed — only the
   behaviour, which reproduces with unsigned binaries of any language.
-- **Remaining blocker:** a second android-all build to exercise the flag-off
-  trio; every other row is gated in CI.
+- **No remaining oracle blocker:** the flag-off trio is exercised by the
+  forced run described above, so all 53 fixture rows are gated in CI.
 
 
 
