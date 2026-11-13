@@ -30,7 +30,7 @@ const SMALL_HINT: usize = 8;
 /// `;` is appended if missing; leading `L` is added if missing).
 ///
 /// Returns `None` for an empty / whitespace-only pattern.
-pub(crate) fn normalize_descriptor(pattern: &str) -> Option<String> {
+pub fn normalize_descriptor(pattern: &str) -> Option<String> {
     let mut s = pattern.trim().to_string();
     if s.is_empty() {
         return None;

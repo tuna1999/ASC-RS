@@ -47,7 +47,7 @@ mod scan;
 mod strings_of;
 pub use crate::callees::{Callee, CalleesReport, callees_of};
 pub use crate::error::SearchError;
-pub use crate::locator::{class_defines, resolve_target_ids};
+pub use crate::locator::{class_defines, normalize_descriptor, resolve_target_ids};
 pub use crate::owner::{CodeOwner, CodeOwners};
 pub use crate::query::{ClassConstraint, Query};
 pub use crate::scan::{DexSearchReport, RefHit, TargetSets, find_refs};

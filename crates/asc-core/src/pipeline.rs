@@ -1197,7 +1197,7 @@ fn scan_one_for_class(
         if class_defines(&view, target) {
             return Ok(Some(ClassHit {
                 name: logical_dex_name(entry_name, offsets.len(), i),
-                class: target.to_owned(),
+                class: asc_query::normalize_descriptor(target).unwrap_or_else(|| target.to_owned()),
                 // Caller attaches the entry bytes (copy-on-hit; see
                 // find_defining_dex / run_callees).
                 bytes: Vec::new(),
@@ -2379,6 +2379,23 @@ mod tests {
         b[0x68..0x6C].copy_from_slice(&(size - IDS_LEN as u32).to_le_bytes()); // data_size
         b[0x6C..0x70].copy_from_slice(&(IDS_LEN as u32).to_le_bytes()); // data_off
         b
+    }
+
+    /// A dotted target resolves to the descriptor form, so every
+    /// downstream consumer (disassembler, member info echo) gets the
+    /// stored spelling instead of the caller's.
+    #[test]
+    fn scan_one_for_class_returns_the_descriptor_form() {
+        let dex = unit_dex("Lp/A;", true);
+        let hit = scan_one_for_class("classes.dex", &dex, "p.A")
+            .unwrap()
+            .expect("class is defined");
+        assert_eq!(hit.class, "Lp/A;");
+        assert!(
+            scan_one_for_class("classes.dex", &dex, "p.B")
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn defining_dex_buf(class: &str) -> Vec<u8> {
