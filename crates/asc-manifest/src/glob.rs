@@ -252,6 +252,9 @@ fn parse_advanced(pattern: &str) -> Result<Vec<Tok>, String> {
     if in_set {
         return Err("set was not terminated".into());
     }
+    if in_range {
+        return Err("range not ended with '}'".into());
+    }
     Ok(out)
 }
 
@@ -449,5 +452,7 @@ mod tests {
         assert!(advanced_match("*a", "a").is_err());
         assert!(advanced_match("a{}", "a").is_err());
         assert!(advanced_match("a{3,1}", "a").is_err());
+        // dangling `{`: the loop ends with `in_range` still set.
+        assert!(advanced_match("a{", "a").is_err());
     }
 }

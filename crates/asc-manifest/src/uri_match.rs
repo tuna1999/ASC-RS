@@ -83,8 +83,8 @@ struct UriParts {
 /// Percent-decode `s` as `UriCodec.appendDecoded(.., throwOnFailure = false)`
 /// does, which is what `Uri.Part.getDecoded()` uses — decoding never fails:
 /// a truncated escape appends `U+FFFD` and ends the part, a non-hex digit
-/// appends `U+FFFD` followed by the byte accumulated so far and skips the
-/// offending character, and undecodable bytes become `U+FFFD`.
+/// appends `U+FFFD` followed by the byte accumulated so far after consuming
+/// that one character, and undecodable bytes become `U+FFFD`.
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -102,22 +102,26 @@ fn percent_decode(s: &str) -> String {
             break;
         }
         let mut acc = 0u8;
-        let mut ok = true;
-        for k in 1..=2 {
+        // `k` is the offset of the digit being read: 1 then 2. A bad digit
+        // advances past itself and leaves the following character to be
+        // decoded literally, exactly like `appendDecoded`.
+        let mut k = 1;
+        while k <= 2 {
             match hex_val(bytes[i + k]) {
-                Some(v) => acc = acc.wrapping_mul(16).wrapping_add(v),
-                None => {
-                    ok = false;
-                    break;
+                Some(v) => {
+                    acc = acc.wrapping_mul(16).wrapping_add(v);
+                    k += 1;
                 }
+                None => break,
             }
         }
-        if ok {
-            out.push(acc);
-        } else {
+        if k <= 2 {
             out.extend_from_slice(REPLACEMENT.as_bytes());
             out.push(acc);
+            i += k + 1;
+            continue;
         }
+        out.push(acc);
         i += 3;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -370,8 +374,8 @@ fn group_layer(groups: &[UriRelativeFilterGroup], p: &UriParts) -> (Tri, Vec<Str
         (true, true) => (
             Tri::Unknown,
             vec![
-                "group-layer verdict depends on an earlier group whose matching is \
-                 oracle-unevaluated (ordered first-match)"
+                "group-layer verdict depends on an earlier group that matches only \
+                 through a pattern the platform refuses to parse (ordered first-match)"
                     .to_string(),
             ],
         ),
@@ -438,6 +442,29 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
     // leaves them inert: the match stays at the scheme level.
     match eff.dependency {
         UriDependency::NoScheme => {
+            // `matchData` returns `NO_MATCH_DATA` outright for any data when
+            // the filter declares neither a mimeType nor a scheme; with a
+            // mimeType it only admits an absent, `content:` or `file:` scheme.
+            if eff.mime_types.is_empty() {
+                return verdict(
+                    UriMatchVerdict::CannotMatch,
+                    on,
+                    vec![
+                        "no scheme and no mimeType declared: the data layer can never match (R4)"
+                            .to_string(),
+                    ],
+                );
+            }
+            let scheme = p.scheme.as_deref().unwrap_or("");
+            if !matches!(scheme, "" | "content" | "file") {
+                return verdict(
+                    UriMatchVerdict::CannotMatch,
+                    on,
+                    vec![format!(
+                        "mimeType-only filter admits no scheme, `content:` or `file:`, not `{scheme}` (R4)"
+                    )],
+                );
+            }
             return verdict(
                 UriMatchVerdict::Matches,
                 on,
@@ -520,7 +547,7 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
             reasons.extend(grp_reasons);
             if reasons.is_empty() {
                 reasons
-                    .push("path/group match depends on an oracle-unevaluated pattern".to_string());
+                    .push("path/group match depends on an unparsable advanced pattern".to_string());
             }
             verdict(UriMatchVerdict::Unknown, on, reasons)
         }
@@ -557,7 +584,7 @@ fn sibling_or(paths: &[crate::PathMatcher], path: Option<&str>) -> (Tri, Vec<Str
     } else if any_unknown {
         (
             Tri::Unknown,
-            vec!["filter-level path match depends on an oracle-unevaluated pattern".to_string()],
+            vec!["filter-level path match depends on an unparsable advanced pattern".to_string()],
         )
     } else {
         (Tri::Cannot, Vec::new())
@@ -741,6 +768,34 @@ mod tests {
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/a/b", true).outcome,
             UriMatchVerdict::Matches
+        );
+    }
+
+    #[test]
+    fn scheme_less_filter_needs_a_mime_type() {
+        // T8 holds only when a host is declared. With no scheme anywhere,
+        // `matchData` rejects any data outright unless a mimeType is
+        // declared, and then admits only an absent, `content:` or `file:`
+        // scheme — a host/path-only filter is a definite rejection.
+        let mut f = base_filter(vec![], vec![]);
+        f.data[0].scheme = None;
+        f.data[0].host = None;
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a", true).outcome,
+            UriMatchVerdict::CannotMatch
+        );
+        f.data[0].mime_type = Some("image/png".to_string());
+        assert_eq!(
+            evaluate_filter_uri(&f, "content://example.com/a", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "file://example.com/a", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a", true).outcome,
+            UriMatchVerdict::CannotMatch
         );
     }
 
@@ -1660,19 +1715,20 @@ mod tests {
             );
         };
         // The first bad digit leaves the accumulator at 0, so a NUL byte
-        // follows the replacement character.
-        path("/\u{fffd}\u{0}", "https://example.com/%GG");
-        path("/a\u{fffd}\u{0}b", "https://example.com/a%GGb");
+        // follows the replacement character; only the bad digit itself is
+        // consumed, so the next character decodes literally.
+        path("/\u{fffd}\u{0}G", "https://example.com/%GG");
+        path("/a\u{fffd}\u{0}Gb", "https://example.com/a%GGb");
         path("/\u{fffd}", "https://example.com/%A");
         // `%3G`: the `3` is the partial byte, so `U+FFFD`+ETX.
         path("/\u{fffd}\u{3}", "https://example.com/%3G");
         path("/\u{fffd}", "https://example.com/%FF");
         path("/\u{fffd}", "https://example.com/%C3");
-        // The authority decodes the same way: `%m` replaces, and the escape
-        // still consumes a second character (`p`).
+        // The authority decodes the same way: `%m` replaces `m`, and `p` is
+        // then a literal, breaking the host.
         let f = base_filter(vec![], vec![]);
         let mut f_bad = f;
-        f_bad.data[0].host = Some("exa\u{fffd}\u{0}le.com".to_string());
+        f_bad.data[0].host = Some("exa\u{fffd}\u{0}ple.com".to_string());
         assert_eq!(
             evaluate_filter_uri(&f_bad, "https://exa%mple.com/a", true).outcome,
             UriMatchVerdict::Matches

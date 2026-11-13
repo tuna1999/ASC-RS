@@ -4,11 +4,13 @@ Date: 2026-10-08 · updated 2026-10-29 · branch `master` · status:
 **5.1–5.5 shipped in `asc-rs manifest --match-uri <uri>` (text + additive
 JSON), evaluator in `asc-manifest::uri_match`; the 5.4 AOSP-oracle
 differential is GATED in CI against the committed Robolectric run
-(`tests/fixtures/oracle_verdicts_api35_flag_on.json`: 36 ORACLE-CONFIRMED,
-12 ORACLE-OPEN, 3 flag-state UNVERIFIED, 0 mismatches). Real-APK aapt2
-fixtures remain pending, and glob/decoding rows stay `unknown` in the
-evaluator until implemented — the oracle already resolved them, and those
-rows are surfaced as ORACLE-OPEN, never counted as confirmed.**
+(`tests/fixtures/oracle_verdicts_api35_flag_on.json`: 48 ORACLE-CONFIRMED,
+0 ORACLE-OPEN, 3 flag-state UNVERIFIED, 0 mismatches) and the real-APK
+aapt2 fixtures are committed. Every row the oracle resolved is implemented
+in the evaluator — including the `pathPattern`/`pathAdvancedPattern` globs,
+the lenient `UriCodec` decode and the absent group caps (v0.24.0); only a
+flag-state row stays UNVERIFIED, because the frozen Robolectric build
+cannot toggle the aconfig flag.**
 
 ASC-RS today parses `<uri-relative-filter-group>` children of an
 `<intent-filter>` and reports them verbatim (`asc-manifest`
@@ -188,10 +190,9 @@ private boolean matchQuery(PatternMatcher pe, String query) {
 - The three-valued verdict is mandatory: an unevaluable construct
   (flag-off ambiguity, unsupported pattern, malformed group) yields
   `unknown`, never `matches`.
-- Bounds: reuse the existing untrusted-input caps (MUTF-8 1 MiB, depth 64)
-  and add explicit ones for groups per filter, `<data>` per group,
-  matchers per element and pattern length; exceeding a cap yields
-  `unknown` with a reason, not a silent truncation.
+- Bounds: reuse the existing untrusted-input caps (MUTF-8 1 MiB, depth 64).
+  The framework caps no group, `<data>` or matcher count, so the layer is
+  evaluated in full; only a URI over 1 MiB is `unknown` (with a reason).
 
 ## 5. Roadmap
 
@@ -269,16 +270,11 @@ consulted.
 → T6/T7; sibling path overriding a block group → T9/T10. Flag-off variant →
 T19–T21.
 
-**Glob-family rows (T16–T18, and the `pattern`/`advanced` parts of T22/T26/T27):
-the fixture file records `unknown`**, not the source-derived `matches` /
-`cannot match` above, because ASC-RS deliberately refuses to decide
-`Pattern`/`AdvancedPattern` glob matchers until §6.3's oracle run confirms
-their semantics. That is a documented, honest divergence — an `unknown` is
-never coerced into a definite verdict to make a test pass. T17's row is
-`unknown` for the same reason (the source-derived "cannot match" stays an
-open oracle expectation). The `pathPattern`/`pathAdvancedPattern` fixtures all
-exercise the `unknown` verdict for regression; the framework answer, once the
-oracle runs, is a real finding to reconcile.
+**Glob-family rows (T16–T18, and the `pattern`/`advanced` parts of T22/T26/T27)
+are decided**: the fixture file records the source-derived verdicts, the
+oracle confirmed all four framework rows, and `asc-manifest::glob` implements
+`PatternMatcher` for both kinds (v0.24.0). Only an advanced pattern the
+platform itself refuses to parse stays `unknown`.
 
 **Implementation status (2026-10-09).** 5.2+5.3 shipped as
 `asc-manifest::uri_match::evaluate_filter_uri(filter, uri, assume_flag_on)`
@@ -458,17 +454,17 @@ suite and the oracle differential registered in
    "flag off" verdict is a separate row, not a footnote.
 3. **`PatternMatcher` corner cases** (lazy `.*` stops at the first literal
    occurrence, greedy `*`, `[ ]` sets and `{ }` ranges in the advanced
-   form, escaping `\\*`): the oracle now answers these (the glob rows are
-   ORACLE-OPEN in the committed run), but ASC-RS still returns `Unknown`
-   until the semantics are implemented from those answers — an ORACLE-OPEN
-   row is a surfaced gap, never a confirmed pass.
+   form, escaping `\\*`): the oracle answered these and ASC-RS implements
+   them (`crates/asc-manifest/src/glob.rs`); the divergence is that a
+   dangling `{` is an `Err` here where Java's zero-padded `int[]` degrades it
+   to `{0,0}`.
 4. **Decoding details.** Resolved from the pinned API 35 source (2026-10-09):
    `Uri.getPath()/getQuery()/getFragment()` percent-decode with
    `convertPlus=false`, so `%21`→`!` and a literal `+` **stays** `+` (Fixed to
-   return Unknown only for bad escapes / non-UTF-8; the `;` fallback applies
-   only when the query has no `&`). Still an oracle boundary: how
-   `PatternMatcher` treats a decoded `+`/`%XX` inside a glob pattern, and the
-   1 MiB URI cap vs. any real-world ceiling.
+   is lenient (`throwOnFailure = false`): a bad escape yields `U+FFFD`, never
+   `unknown`; the `;` fallback applies only when the query has no `&`). Open:
+   how `PatternMatcher` treats a decoded `+`/`%XX` inside a glob pattern, and
+   the 1 MiB URI cap vs. any real-world ceiling.
 5. **Not in scope for the first cut:** intent *resolution* scoring
    (priority, categories, MIME types, `<queries>`), `android:autoVerify`
    App Links verification, `pathAdvancedPattern` performance parity.
