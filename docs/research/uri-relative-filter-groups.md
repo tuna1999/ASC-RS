@@ -176,6 +176,7 @@ private boolean matchQuery(PatternMatcher pe, String query) {
 | R8 | QUERY = any single parameter, split `&` then `;` | `matchQuery` |
 | R9 | Five pattern kinds per attribute; `AdvancedPattern` = regex-like subset, `Pattern` = glob subset with documented non-backtracking behaviour | `<data>` docs |
 | R10 | Flag off ⇒ groups ignored (filter behaves as if the group layer were absent) | `Flags.relativeReferenceIntentFilters()` |
+| R11 | Type layer last and decisive when the intent type is null: `wildcardWithMimegroups=false`, `findMimeType(null)=false` ⇒ any `mimeType` in the filter is `NO_MATCH_TYPE` after the URI layer ran | `matchData` :1733-1735, :1815-1823, :3154-3156 |
 
 ## 4. Contract consequences for ASC-RS
 
@@ -187,6 +188,10 @@ private boolean matchQuery(PatternMatcher pe, String query) {
   supplied; without a URI the warning stays).
 - JSON: additive fields only (`matches` / `cannot_match` / `unknown` with
   a reason list). Existing consumers must not have to change.
+- The evaluator supplies no intent type (the oracle calls
+  `matchData(null, scheme, uri)`), so a filter declaring `mimeType` is
+  `cannot_match` — the URI layer is still evaluated first and a definite
+  URI-layer rejection keeps its own reason.
 - The three-valued verdict is mandatory: an unevaluable construct
   (flag-off ambiguity, unsupported pattern, malformed group) yields
   `unknown`, never `matches`.
@@ -466,7 +471,8 @@ suite and the oracle differential registered in
    how `PatternMatcher` treats a decoded `+`/`%XX` inside a glob pattern, and
    the 1 MiB URI cap vs. any real-world ceiling.
 5. **Not in scope for the first cut:** intent *resolution* scoring
-   (priority, categories, MIME types, `<queries>`), `android:autoVerify`
+   (priority, categories, `<queries>`; a supplied intent type — R11 pins
+   what a null type means), `android:autoVerify`
    App Links verification, `pathAdvancedPattern` performance parity.
 
 ## 7. Explicit non-claims
@@ -505,6 +511,13 @@ Three framework facts the same audit corrected, each proven by the oracle run:
   bytes become `U+FFFD`. `percent_decode` is now total (no `Option`), so the P1
   rows are `matches` rather than `Unknown` and a matcher sees the exact
   replacement characters.
+
+- **The type layer is decisive and never satisfied.** Matching runs with a
+  null intent type, so `wildcardWithMimegroups` is false, `findMimeType(null)`
+  is false and a filter that declares any `mimeType` ends in `NO_MATCH_TYPE`
+  once the URI layer ran: `evaluate_filter_uri` reports `cannot_match` for it
+  even when scheme, host and path all match. The evaluator takes no intent
+  type, so this is a non-claim against manifests consumed with a type.
 
 `tests/fixtures/uri_apk/cases.txt` + `tests/fixtures/uri_match_cases.json`
 carry the corrected expectations. Oracle run: 51 cases, 0 source-mismatches,

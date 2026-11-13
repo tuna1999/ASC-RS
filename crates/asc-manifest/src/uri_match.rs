@@ -22,11 +22,15 @@
 //! - **R8** QUERY matches any single parameter, split on `&` then `;`.
 //! - **R10** groups are ignored when the platform flag is off.
 //!
+//! **Type layer (R11)**: no intent type is ever supplied — the oracle calls
+//! `matchData(null, scheme, uri)` — so `findMimeType(null)` is false and a
+//! filter that declares a `mimeType` is a definite rejection once the URI
+//! layer has been evaluated, whatever the layers said.
+//!
 //! Verdicts are **three-valued** (§4): `Matches` / `CannotMatch` /
-//! `Unknown`. `Unknown` is returned for anything this module refuses to
-//! claim — pattern (glob / advanced) matchers and decoding corner cases
-//! that the AOSP API 35 oracle (§6.3 / §6.4) must decide before they can
-//! be asserted. Nothing fabricates a match.
+//! `Unknown`. `Unknown` is returned only when the URI is opaque/malformed or
+//! too long, or when an advanced pattern the platform refuses to parse
+//! decides the outcome. Nothing fabricates a match.
 //!
 //! Bounds (§4): a URI over 1 MiB is `Unknown`. The group/data/matcher counts
 //! are not capped anywhere in the framework, so the layer is always evaluated
@@ -423,6 +427,24 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
     };
     let eff = f.effective_data();
 
+    // Type layer (last in `matchData`, and the last word therefore): the
+    // intent type is never supplied here — the oracle calls
+    // `matchData(null, scheme, uri)` and so does this evaluator — so
+    // `findMimeType(null)` is false and any filter that declares a MIME type
+    // is a definite rejection once the URI layer has been evaluated.
+    let mime_gate = |mut v: Verdict| -> Verdict {
+        if eff.mime_types.is_empty() || v.outcome == UriMatchVerdict::CannotMatch {
+            return v;
+        }
+        v.outcome = UriMatchVerdict::CannotMatch;
+        v.reasons.push(
+            "filter declares a MIME type and matching runs with a null intent type \
+             (`findMimeType(null)` is false)"
+                .to_string(),
+        );
+        v
+    };
+
     // Scheme precondition: the data URI must carry a declared scheme.
     if !eff.schemes.is_empty() {
         let ok = p.scheme.as_ref().is_some_and(|s| eff.schemes.contains(s));
@@ -444,42 +466,33 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
         UriDependency::NoScheme => {
             // `matchData` returns `NO_MATCH_DATA` outright for any data when
             // the filter declares neither a mimeType nor a scheme; with a
-            // mimeType it only admits an absent, `content:` or `file:` scheme.
-            if eff.mime_types.is_empty() {
-                return verdict(
-                    UriMatchVerdict::CannotMatch,
-                    on,
-                    vec![
-                        "no scheme and no mimeType declared: the data layer can never match (R4)"
-                            .to_string(),
-                    ],
-                );
-            }
-            let scheme = p.scheme.as_deref().unwrap_or("");
-            if !matches!(scheme, "" | "content" | "file") {
-                return verdict(
-                    UriMatchVerdict::CannotMatch,
-                    on,
-                    vec![format!(
-                        "mimeType-only filter admits no scheme, `content:` or `file:`, not `{scheme}` (R4)"
-                    )],
-                );
-            }
-            return verdict(
-                UriMatchVerdict::Matches,
-                on,
-                vec![
-                    "no scheme declared: host/port/path/group layer is not even consulted (R4)"
-                        .to_string(),
-                ],
-            );
+            // mimeType it only admits an absent, `content:` or `file:` scheme
+            // — and then stops at the type layer, which never matches here.
+            let reason = if eff.mime_types.is_empty() {
+                "no scheme and no mimeType declared: the data layer can never match (R4)"
+                    .to_string()
+            } else {
+                let scheme = p.scheme.as_deref().unwrap_or("");
+                if !matches!(scheme, "" | "content" | "file") {
+                    return verdict(
+                        UriMatchVerdict::CannotMatch,
+                        on,
+                        vec![format!(
+                            "mimeType-only filter admits no scheme, `content:` or `file:`, not `{scheme}` (R4)"
+                        )],
+                    );
+                }
+                "mimeType-only filter: only the type layer is left, and it has no intent type (R4)"
+                    .to_string()
+            };
+            return mime_gate(verdict(UriMatchVerdict::CannotMatch, on, vec![reason]));
         }
         UriDependency::NoHost => {
-            return verdict(
+            return mime_gate(verdict(
                 UriMatchVerdict::Matches,
                 on,
                 vec!["no host declared: path/group layer is not even consulted (R4)".to_string()],
-            );
+            ));
         }
         UriDependency::Complete => {
             let host_ok = match &p.host {
@@ -504,17 +517,17 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
     // applies whenever there is no sibling path at all (groups are ignored).
     if !on {
         if eff.paths.is_empty() {
-            return verdict(
+            return mime_gate(verdict(
                 UriMatchVerdict::Matches,
                 on,
                 vec![
                     "authMatch: no path matcher and the group layer is ignored (flag off)"
                         .to_string(),
                 ],
-            );
+            ));
         }
     } else if eff.paths.is_empty() && f.uri_relative_groups.is_empty() {
-        return verdict(
+        return mime_gate(verdict(
             UriMatchVerdict::Matches,
             on,
             vec![
@@ -522,7 +535,7 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
                  relative group narrow it"
                     .to_string(),
             ],
-        );
+        ));
     }
 
     // R5: sibling path matchers are ORed with the group layer.
@@ -536,12 +549,12 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
     // OR over the three-valued layer results: a definite match wins; else any
     // uncertainty wins; else no-match.
     match (sib, grp) {
-        (Tri::Match, _) => verdict(
+        (Tri::Match, _) => mime_gate(verdict(
             UriMatchVerdict::Matches,
             on,
             vec!["a filter-level path matcher matched (R5)".to_string()],
-        ),
-        (_, Tri::Match) => verdict(UriMatchVerdict::Matches, on, grp_reasons),
+        )),
+        (_, Tri::Match) => mime_gate(verdict(UriMatchVerdict::Matches, on, grp_reasons)),
         (Tri::Unknown, _) | (_, Tri::Unknown) => {
             let mut reasons = sib_reasons;
             reasons.extend(grp_reasons);
@@ -549,7 +562,7 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
                 reasons
                     .push("path/group match depends on an unparsable advanced pattern".to_string());
             }
-            verdict(UriMatchVerdict::Unknown, on, reasons)
+            mime_gate(verdict(UriMatchVerdict::Unknown, on, reasons))
         }
         (Tri::Cannot, _) => {
             let mut reasons = grp_reasons;
@@ -784,18 +797,40 @@ mod tests {
             evaluate_filter_uri(&f, "https://example.com/a", true).outcome,
             UriMatchVerdict::CannotMatch
         );
+        // A declared mimeType then admits `content:`/`file:` past the data
+        // layer but stops at the type layer, which never matches a null
+        // intent type.
         f.data[0].mime_type = Some("image/png".to_string());
         assert_eq!(
             evaluate_filter_uri(&f, "content://example.com/a", true).outcome,
-            UriMatchVerdict::Matches
+            UriMatchVerdict::CannotMatch
         );
         assert_eq!(
             evaluate_filter_uri(&f, "file://example.com/a", true).outcome,
-            UriMatchVerdict::Matches
+            UriMatchVerdict::CannotMatch
         );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/a", true).outcome,
             UriMatchVerdict::CannotMatch
+        );
+    }
+
+    #[test]
+    fn declared_mime_type_rejects_a_matched_uri() {
+        // The evaluator supplies no intent type, so a mimeType anywhere in
+        // the filter is the last word: scheme+host matching cannot rescue it.
+        let mut f = base_filter(vec![], vec![]);
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/a", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        f.data[0].mime_type = Some("image/*".to_string());
+        let v = evaluate_filter_uri(&f, "https://example.com/a", true);
+        assert_eq!(v.outcome, UriMatchVerdict::CannotMatch);
+        assert!(
+            v.reasons.iter().any(|r| r.contains("null intent type")),
+            "{:?}",
+            v.reasons
         );
     }
 
