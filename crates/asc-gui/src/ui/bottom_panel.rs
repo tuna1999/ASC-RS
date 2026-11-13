@@ -132,36 +132,7 @@ impl AscApp {
                 )
                 .on_hover_text("substring match on the class descriptor (off = exact)");
             }
-            // Search history dropdown (ASC-GUI-036 / JADX-GUI-013):
-            // entries filter on the current input as you type. Owned
-            // clones — the popup closure mutates the controller.
-            let history: Vec<_> = self
-                .search
-                .history_filtered(&self.search.input)
-                .into_iter()
-                .cloned()
-                .collect();
-            let history_button = egui::RichText::new(format!("hist ({})", history.len())).small();
-            ui.menu_button(history_button, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        for e in &history {
-                            let text = if e.class_filter.is_empty() {
-                                format!("{}  {}", e.kind.label(), e.input)
-                            } else {
-                                format!("{}  {}  in {}", e.kind.label(), e.input, e.class_filter)
-                            };
-                            if ui
-                                .selectable_label(false, egui::RichText::new(text).small())
-                                .clicked()
-                            {
-                                self.search.apply_history(e.clone());
-                                ui.close();
-                            }
-                        }
-                    });
-            });
+            self.draw_search_history_menu(ui);
             // `findrefs_live`, not `findrefs_running`: a cancelled or
             // superseded worker keeps churning until it lands, but its
             // result is discarded on arrival — so claiming a request is
@@ -187,6 +158,39 @@ impl AscApp {
         });
     }
 
+    /// Search history dropdown (ASC-GUI-036 / JADX-GUI-013): entries
+    /// filter on the current input as you type. Owned clones — the popup
+    /// closure mutates the controller.
+    fn draw_search_history_menu(&mut self, ui: &mut egui::Ui) {
+        let history: Vec<_> = self
+            .search
+            .history_filtered(&self.search.input)
+            .into_iter()
+            .cloned()
+            .collect();
+        let history_button = egui::RichText::new(format!("hist ({})", history.len())).small();
+        ui.menu_button(history_button, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for e in &history {
+                        let text = if e.class_filter.is_empty() {
+                            format!("{}  {}", e.kind.label(), e.input)
+                        } else {
+                            format!("{}  {}  in {}", e.kind.label(), e.input, e.class_filter)
+                        };
+                        if ui
+                            .selectable_label(false, egui::RichText::new(text).small())
+                            .clicked()
+                        {
+                            self.search.apply_history(e.clone());
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    }
+
     /// REFERENCES tab: callers of the active class (Analysis ▸ Find
     /// references, or the palette).
     fn draw_references(&mut self, ui: &mut egui::Ui) {
@@ -208,6 +212,17 @@ impl AscApp {
     /// this renders. Empty filters ask the engine for every entry, so
     /// the tab opens on a full listing the user can narrow.
     fn draw_resources(&mut self, ui: &mut egui::Ui) {
+        self.draw_resources_filter(ui);
+        if let Some(value) = self.draw_resources_body(ui) {
+            ui.ctx().copy_text(value.clone());
+            self.last_clipboard = Some(value);
+            self.set_status("copied resource value", true);
+        }
+    }
+
+    /// Resources filter row (key/value substring, id, Load); queues the scan
+    /// itself so the caller only renders.
+    fn draw_resources_filter(&mut self, ui: &mut egui::Ui) {
         #[allow(non_snake_case)] // design-token alias (matches the previous `use DARK as T` idiom)
         let T = crate::design::tokens();
         let mut run = false;
@@ -248,17 +263,22 @@ impl AscApp {
         if run {
             self.queue(Command::ShowResources);
         }
+    }
 
+    /// Resources report body; returns the clicked value to copy.
+    fn draw_resources_body(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        #[allow(non_snake_case)] // design-token alias
+        let T = crate::design::tokens();
         // Render inside a scope so the immutable report borrow ends
-        // before the copy-to-clipboard branch mutates `self`.
-        let copied = {
+        // before the caller mutates `self`.
+        {
             let Some(r) = self.resources.as_ref() else {
                 ui.weak("no resources.arsc loaded — Analysis ▸ Browse resources (APK only)");
-                return;
+                return None;
             };
             if !r.arsc_present {
                 ui.weak("this APK has no resources.arsc");
-                return;
+                return None;
             }
             let entries: usize = r.packages.iter().map(|p| p.entries).sum();
             let configs: usize = r.packages.iter().map(|p| p.configs).sum();
@@ -341,11 +361,6 @@ impl AscApp {
                     }
                 });
             copied
-        };
-        if let Some(value) = copied {
-            ui.ctx().copy_text(value.clone());
-            self.last_clipboard = Some(value);
-            self.set_status("copied resource value", true);
         }
     }
 
