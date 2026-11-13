@@ -369,7 +369,9 @@ fn match_char(
     let c = u32::from(text[im]);
     let in_set = || {
         tokens[set_start..set_end]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|r| (bound(r[0]) as u32) <= c && c <= (bound(r[1]) as u32))
     };
     match kind {
