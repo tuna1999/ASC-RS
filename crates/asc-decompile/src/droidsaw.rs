@@ -36,7 +36,9 @@ use droidsaw_dex::{
     classes::decompile_class_with_census, parser::DexFile, r8_inversion::build_trampoline_census,
 };
 
-use crate::disasm::render_class;
+use crate::disasm::{
+    MethodInfo, method_info, render_class, render_class_bytecode, render_class_cfg,
+};
 use crate::{ClassDecompiler, DecompileError, normalize_class_name};
 
 /// DEX magic prefix `dex\n` plus the 3-byte version (`035`..=`041`).
@@ -68,6 +70,92 @@ impl DroidsawBackend {
     /// Build a backend instance with an empty parse cache.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Raw bytecode table for one class (offset, code units, mnemonic), the
+    /// same shape as [`ClassDecompiler::disassemble`] but without operands.
+    pub fn disassemble_bytecode(
+        &self,
+        dex_bytes: &[u8],
+        target: &str,
+        method: Option<&str>,
+    ) -> Result<String, DecompileError> {
+        gate_input(dex_bytes)?;
+        let descriptor = normalize_class_name(target)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            let dex = self.parsed(dex_bytes)?;
+            let Some((_idx, class_def)) = dex.find_class(&descriptor) else {
+                return Err(DecompileError::ClassNotFound(descriptor.clone()));
+            };
+            let table = render_class_bytecode(&dex, dex_bytes, &descriptor, class_def, method)?;
+            if let Some(name) = method
+                && !table.contains(&format!(" {name}("))
+            {
+                return Err(DecompileError::MethodNotFound(format!(
+                    "{descriptor}->{name}"
+                )));
+            }
+            Ok(table)
+        }))
+        .unwrap_or_else(|_| {
+            Err(DecompileError::BackendError(
+                "droidsaw-dex panicked during disassemble_bytecode".into(),
+            ))
+        })
+    }
+
+    /// Control-flow summary of `descriptor` (ASC-RS-GUI-104).
+    pub fn disassemble_cfg(
+        &self,
+        dex_bytes: &[u8],
+        target: &str,
+        method: Option<&str>,
+    ) -> Result<String, DecompileError> {
+        gate_input(dex_bytes)?;
+        let descriptor = normalize_class_name(target)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            let dex = self.parsed(dex_bytes)?;
+            let Some((_idx, class_def)) = dex.find_class(&descriptor) else {
+                return Err(DecompileError::ClassNotFound(descriptor.clone()));
+            };
+            let text = render_class_cfg(&dex, &descriptor, class_def, method)?;
+            if let Some(name) = method
+                && !text.contains(&format!("->{name}\n"))
+            {
+                return Err(DecompileError::MethodNotFound(format!(
+                    "{descriptor}->{name}"
+                )));
+            }
+            Ok(text)
+        }))
+        .unwrap_or_else(|_| {
+            Err(DecompileError::BackendError(
+                "droidsaw-dex panicked during disassemble_cfg".into(),
+            ))
+        })
+    }
+
+    /// Signature + access flags of `descriptor->method` (ASC-RS-GUI-007).
+    pub fn method_info(
+        &self,
+        dex_bytes: &[u8],
+        target: &str,
+        method: &str,
+    ) -> Result<MethodInfo, DecompileError> {
+        gate_input(dex_bytes)?;
+        let descriptor = normalize_class_name(target)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            let dex = self.parsed(dex_bytes)?;
+            let Some((_idx, class_def)) = dex.find_class(&descriptor) else {
+                return Err(DecompileError::ClassNotFound(descriptor.clone()));
+            };
+            method_info(&dex, &descriptor, class_def, method)
+        }))
+        .unwrap_or_else(|_| {
+            Err(DecompileError::BackendError(
+                "droidsaw-dex panicked during method_info".into(),
+            ))
+        })
     }
 }
 

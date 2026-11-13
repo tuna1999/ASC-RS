@@ -47,6 +47,7 @@ pub mod class_name;
 pub mod format;
 pub mod hermes;
 pub mod inspect;
+pub mod mapping;
 pub mod native;
 mod paranoid;
 pub mod pipeline;
@@ -67,10 +68,12 @@ pub use crate::format::{
 pub use crate::inspect::{InspectReport, format_inspect_text, run_inspect};
 pub use crate::native::{NativeReport, format_native_text, run_native};
 pub use crate::pipeline::{
-    CalleesJob, CalleesResult, ClassStringsJob, ClassStringsResult, CoreError, DisasmJob,
-    DisasmOptions, DisasmResult, FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions,
-    GetClassResult, ListClassesJob, ListClassesOptions, ListClassesResult, logical_dex_name,
-    run_callees, run_class_strings, run_disasm, run_findrefs, run_getclass, run_listclasses,
+    CallTreeJob, CallTreeOptions, CallTreeResult, CalleesJob, CalleesResult, ClassStringsJob,
+    ClassStringsResult, CoreError, DisasmJob, DisasmOptions, DisasmResult, FindRefsJob,
+    FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult, ListClassesJob,
+    ListClassesOptions, ListClassesResult, MemberInfo, MemberInfoJob, logical_dex_name,
+    run_bytecode, run_call_tree, run_callees, run_cfg, run_class_strings, run_disasm, run_findrefs,
+    run_findrefs_stream, run_getclass, run_listclasses, run_member_info,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::resources::{

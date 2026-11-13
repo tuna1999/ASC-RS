@@ -434,6 +434,349 @@ fn render_body(
     Ok(())
 }
 
+/// Bytecode table for one class: offset, raw code units and mnemonic for
+/// every instruction, then each payload's address and size.
+///
+/// Operands are NOT resolved — the point is the bytes, which the Smali
+/// listing deliberately hides behind names. `method` filters by exact name
+/// like the Smali path.
+pub(crate) fn render_class_bytecode(
+    dex: &DexFile,
+    bytes: &[u8],
+    descriptor: &str,
+    class_def: &ClassDefItem,
+    method: Option<&str>,
+) -> Result<String, DecompileError> {
+    let mut out = String::with_capacity(4096);
+    let _ = writeln!(
+        out,
+        "# raw bytecode of {descriptor}; offsets are code units, one `ident size` header word pair per payload"
+    );
+    let class_data = if class_def.class_data_off == 0 {
+        &EMPTY_CLASS_DATA
+    } else {
+        dex.class_datas
+            .get(&class_def.class_data_off)
+            .ok_or_else(|| {
+                DecompileError::BackendError(format!(
+                    "class {descriptor}: class_data_off {:#x} missing from parse",
+                    class_def.class_data_off
+                ))
+            })?
+    };
+    for em in class_data
+        .direct_methods
+        .iter()
+        .chain(class_data.virtual_methods.iter())
+    {
+        let bootstrap = ctx(descriptor, em.code_off, None);
+        let method_id = dex.methods.get(em.method_idx.0 as usize).ok_or_else(|| {
+            err(
+                &bootstrap,
+                format!("method id {} out of range", em.method_idx.0),
+            )
+        })?;
+        let name = string_at(dex, method_id.name_idx, &bootstrap)?;
+        if method.is_some_and(|f| f != name) {
+            continue;
+        }
+        let who = format!("{descriptor}->{name}");
+        let c = ctx(&who, em.code_off, None);
+        let proto = dex
+            .protos
+            .get(method_id.proto_idx.0 as usize)
+            .ok_or_else(|| {
+                err(
+                    &c,
+                    format!("proto id {} out of range", method_id.proto_idx.0),
+                )
+            })?;
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "{} {name}({}){}  flags={:#06x}",
+            type_at(dex, class_def.class_idx, &c)?,
+            type_list_at(dex, proto.parameters_off, &c)?,
+            type_at(dex, proto.return_type_idx, &c)?,
+            em.access_flags
+        );
+        if em.code_off == 0 {
+            let _ = writeln!(out, "  (no code item)");
+            continue;
+        }
+        let code = dex.code_items.get(&em.code_off).ok_or_else(|| {
+            err(
+                &c,
+                format!("code_item at {:#x} missing from parse", em.code_off),
+            )
+        })?;
+        let _ = writeln!(
+            out,
+            "  registers={} ins={} outs={} tries={}",
+            code.registers_size,
+            code.ins_size,
+            code.outs_size,
+            code.tries.len()
+        );
+        render_body_bytecode(&mut out, bytes, &who, em.code_off, code)?;
+    }
+    Ok(out)
+}
+
+/// Whole-class control-flow summary (ASC-RS-GUI-104): per method, the
+/// basic blocks and their edges, built by droidsaw's CFG pass. Block
+/// bodies stay instruction-count sized — the bytecode table carries the
+/// bytes.
+pub(crate) fn render_class_cfg(
+    dex: &DexFile,
+    descriptor: &str,
+    class_def: &ClassDefItem,
+    method: Option<&str>,
+) -> Result<String, DecompileError> {
+    let mut out = String::with_capacity(4096);
+    let _ = writeln!(
+        out,
+        "# control flow of {descriptor}; blocks are code-unit ranges, `->` lines are edges"
+    );
+    let class_data = dex
+        .class_datas
+        .get(&class_def.class_data_off)
+        .unwrap_or(&EMPTY_CLASS_DATA);
+    for em in class_data
+        .direct_methods
+        .iter()
+        .chain(class_data.virtual_methods.iter())
+    {
+        let bootstrap = ctx(descriptor, em.code_off, None);
+        let method_id = dex.methods.get(em.method_idx.0 as usize).ok_or_else(|| {
+            err(
+                &bootstrap,
+                format!("method id {} out of range", em.method_idx.0),
+            )
+        })?;
+        let name = string_at(dex, method_id.name_idx, &bootstrap)?;
+        if method.is_some_and(|f| f != name) {
+            continue;
+        }
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{descriptor}->{name}");
+        if em.code_off == 0 {
+            let _ = writeln!(out, "  (no code item)");
+            continue;
+        }
+        let who = format!("{descriptor}->{name}");
+        let c = ctx(&who, em.code_off, None);
+        let code = dex.code_items.get(&em.code_off).ok_or_else(|| {
+            err(
+                &c,
+                format!("code_item at {:#x} missing from parse", em.code_off),
+            )
+        })?;
+        let cfg = droidsaw_dex::cfg::Cfg::build(code)
+            .map_err(|e| err(&c, format!("cfg build failed: {e}")))?;
+        if cfg.blocks.is_empty() {
+            let _ = writeln!(out, "  (no instructions)");
+            continue;
+        }
+        for block in &cfg.blocks {
+            let end = block.start_addr
+                + block
+                    .instructions
+                    .iter()
+                    .map(|i| u32::from(i.size))
+                    .sum::<u32>();
+            let _ = writeln!(
+                out,
+                "  B{}: {:#06x}..{:#06x} ({} insn)",
+                block.id.0,
+                block.start_addr,
+                end,
+                block.instructions.len()
+            );
+            for edge in &block.successors {
+                let _ = writeln!(
+                    out,
+                    "    -> B{} ({})",
+                    edge.target.0,
+                    edge_kind_name(&edge.kind)
+                );
+            }
+        }
+        for region in &cfg.exception_regions {
+            let _ = writeln!(
+                out,
+                "  try {:#06x}..{:#06x} -> {} handler(s)",
+                region.start_addr,
+                region.end_addr,
+                region.handler_blocks.len()
+            );
+        }
+    }
+    Ok(out)
+}
+
+fn edge_kind_name(kind: &droidsaw_dex::cfg::EdgeKind) -> String {
+    use droidsaw_dex::cfg::EdgeKind;
+    match kind {
+        EdgeKind::FallThrough => "fall-through".into(),
+        EdgeKind::Branch => "branch".into(),
+        EdgeKind::SwitchCase(k) => format!("case {k}"),
+        EdgeKind::SwitchDefault => "default".into(),
+        EdgeKind::ExceptionHandler(t) => format!("catch type #{}", t.0),
+        EdgeKind::ExceptionCatchAll => "catch all".into(),
+    }
+}
+
+/// One method's declared signature and access flags (ASC-RS-GUI-007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodInfo {
+    /// Method name as declared.
+    pub name: String,
+    /// `(params)ret` in descriptor form.
+    pub proto: String,
+    /// Raw `access_flags` word.
+    pub flags: u32,
+}
+
+/// Names of the DEX access bits set in `flags`, in spec order. Unknown
+/// bits are dropped; the raw word stays available for display.
+pub fn access_flag_names(flags: u32) -> Vec<&'static str> {
+    const BITS: [(u32, &str); 14] = [
+        (0x0001, "public"),
+        (0x0002, "private"),
+        (0x0004, "protected"),
+        (0x0008, "static"),
+        (0x0010, "final"),
+        (0x0020, "synchronized"),
+        (0x0040, "volatile/bridge"),
+        (0x0080, "transient/varargs"),
+        (0x0100, "native"),
+        (0x0200, "interface"),
+        (0x0400, "abstract"),
+        (0x1000, "synthetic"),
+        (0x1_0000, "constructor"),
+        (0x2_0000, "declared-synchronized"),
+    ];
+    BITS.iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// Signature and flags of the first method named `method` in `descriptor`.
+/// Overloads beyond the first are not distinguished — the inspector shows
+/// the declaration the click resolved to by name, exactly like the Smali
+/// and bytecode lanes.
+pub(crate) fn method_info(
+    dex: &DexFile,
+    descriptor: &str,
+    class_def: &ClassDefItem,
+    method: &str,
+) -> Result<MethodInfo, DecompileError> {
+    let class_data = dex
+        .class_datas
+        .get(&class_def.class_data_off)
+        .unwrap_or(&EMPTY_CLASS_DATA);
+    for em in class_data
+        .direct_methods
+        .iter()
+        .chain(class_data.virtual_methods.iter())
+    {
+        let c = ctx(descriptor, em.code_off, None);
+        let method_id = dex
+            .methods
+            .get(em.method_idx.0 as usize)
+            .ok_or_else(|| err(&c, format!("method id {} out of range", em.method_idx.0)))?;
+        let name = string_at(dex, method_id.name_idx, &c)?;
+        if name != method {
+            continue;
+        }
+        let proto = dex
+            .protos
+            .get(method_id.proto_idx.0 as usize)
+            .ok_or_else(|| {
+                err(
+                    &c,
+                    format!("proto id {} out of range", method_id.proto_idx.0),
+                )
+            })?;
+        return Ok(MethodInfo {
+            name,
+            proto: format!(
+                "({}){}",
+                type_list_at(dex, proto.parameters_off, &c)?,
+                type_at(dex, proto.return_type_idx, &c)?
+            ),
+            flags: em.access_flags,
+        });
+    }
+    Err(DecompileError::MethodNotFound(format!(
+        "{descriptor}->{method}"
+    )))
+}
+
+/// One instruction per line: `offset: raw units mnemonic`. Payload bodies are
+/// summarised by size only; their bytes are in the instruction stream anyway.
+/// Code units a payload occupies: `4 + 2n` packed switch, `2 + 4n`
+/// sparse switch, and `4 + ceil(bytes/2)` for fill-array (its `len` is an
+/// element count; the code-unit count comes from the byte length).
+fn payload_units(payload: &PayloadData) -> usize {
+    match payload {
+        PayloadData::PackedSwitch { targets, .. } => 4 + 2 * targets.len(),
+        PayloadData::SparseSwitch { keys, .. } => 2 + 4 * keys.len(),
+        PayloadData::FillArrayData { data, .. } => 4 + data.len().div_ceil(2),
+    }
+}
+
+fn render_body_bytecode(
+    out: &mut String,
+    bytes: &[u8],
+    who: &str,
+    code_off: u32,
+    code: &CodeItem,
+) -> Result<(), DecompileError> {
+    let c = ctx(who, code_off, None);
+    if let Some(v) = code.invariant_violations.first() {
+        return Err(err(
+            &c,
+            format!(
+                "code_item has {} code-item invariant violation(s), first: {v:?}",
+                code.invariant_violations.len()
+            ),
+        ));
+    }
+    let insns_off = code_off as usize + 16;
+    for insn in &code.instructions {
+        if code.payloads.contains_key(&insn.addr) {
+            continue;
+        }
+        let mut units = String::new();
+        for k in 0..usize::from(insn.size) {
+            let at = insns_off + insn.addr as usize * 2 + k * 2;
+            let raw = bytes.get(at..at + 2).ok_or_else(|| {
+                err(
+                    &c,
+                    format!("instruction at {:#x} runs past the file end", insn.addr),
+                )
+            })?;
+            let _ = write!(units, "{:04x} ", u16::from_le_bytes([raw[0], raw[1]]));
+        }
+        let _ = writeln!(
+            out,
+            "  {:04x}: {:width$}{}",
+            insn.addr,
+            units,
+            insn.op.mnemonic(),
+            width = 18
+        );
+    }
+    for (addr, payload) in &code.payloads {
+        let len = payload_units(payload);
+        let _ = writeln!(out, "  {:04x}: <payload, {len} units>", addr);
+    }
+    Ok(())
+}
+
 /// Every address that needs a `:label`, in one namespace: branch targets,
 /// payload addresses, switch payload targets, try start/end and handler
 /// addresses. Addresses past the last instruction are the legitimate
@@ -1007,6 +1350,25 @@ fn wide_literal(value: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_units_count_code_units_not_elements() {
+        let wide = PayloadData::FillArrayData {
+            element_width: 4,
+            data: vec![0; 16],
+        };
+        assert_eq!(payload_units(&wide), 12, "4 header + 8 body units");
+        let narrow = PayloadData::FillArrayData {
+            element_width: 1,
+            data: vec![0; 3],
+        };
+        assert_eq!(payload_units(&narrow), 6, "odd byte rounds up");
+        let packed = PayloadData::PackedSwitch {
+            first_key: 0,
+            targets: vec![1, 2, 3],
+        };
+        assert_eq!(payload_units(&packed), 10);
+    }
 
     #[test]
     fn escape_matches_baksmali_for_ascii() {

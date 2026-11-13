@@ -5,7 +5,7 @@
 //! `.class`, `.method`/`.end method` pairing, filter selectivity) rather
 //! than pinning bytes.
 
-use asc_core::{CoreError, DisasmJob, DisasmOptions, run_disasm};
+use asc_core::{CoreError, DisasmJob, DisasmOptions, run_bytecode, run_disasm};
 
 /// A class with methods in `com.aurora.store_60.apk`; used as the
 /// positive fixture for the APK and the raw-DEX paths.
@@ -142,4 +142,32 @@ fn raw_dex_input_works_without_rebuild() {
     assert!(listing.contains(&format!(".class public L{target}")) || listing.contains(".class "));
     assert!(listing.contains(".method "));
     assert!(listing.contains("\n.end method"));
+}
+
+/// The bytecode table keeps offsets and raw code units and drops resolved
+/// operands — the mirror image of the Smali listing's trade.
+#[test]
+fn bytecode_table_carries_offsets_and_raw_units() {
+    let Some(p) = apk() else { return };
+    let table = run_bytecode(
+        &DisasmJob::new(&p, TARGET, Some("<clinit>")),
+        &DisasmOptions::default(),
+    )
+    .map(|r| r.listing)
+    .expect("bytecode");
+    assert!(table.contains("# raw bytecode of "), "{table}");
+    assert!(!table.contains(".method"), "{table}");
+    let mut lines = table
+        .lines()
+        .filter(|l| l.len() > 6 && l.starts_with("  ") && l.as_bytes()[6] == b':');
+    let first = lines.next().expect("an instruction line");
+    let mut parts = first.split_whitespace();
+    let offset = parts.next().expect("offset");
+    assert_eq!(offset.len(), 5, "`0000:` offset, got {offset}");
+    let unit = parts.next().expect("raw unit");
+    assert!(
+        u16::from_str_radix(unit, 16).is_ok(),
+        "hex unit, got {unit}"
+    );
+    assert!(parts.next().is_some(), "mnemonic after the units");
 }

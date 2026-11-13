@@ -313,6 +313,19 @@ pub struct DisasmResult {
 /// offset order, expand each entry (handling DEX-041 containers),
 /// run `find_refs` per view, and aggregate into a [`SearchReport`].
 pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchReport, CoreError> {
+    run_findrefs_stream(job, opts, &mut |_| {})
+}
+
+/// [`run_findrefs`] with an incremental sink (ASC-RS-GUI-109): after each
+/// DEX entry is scanned, `sink` receives the matches that entry added.
+/// The caller still gets the whole report, so the final state is
+/// identical to the non-streaming call — the sink only makes early
+/// results visible while later entries are still scanning.
+pub fn run_findrefs_stream(
+    job: &FindRefsJob,
+    opts: &FindRefsOptions,
+    sink: &mut dyn FnMut(&DexResults),
+) -> Result<SearchReport, CoreError> {
     let apk = Apk::open(&job.apk)?;
     check_raw_dex(&apk)?;
     let entries = apk.dex_entries();
@@ -329,6 +342,7 @@ pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchR
     };
     let xor = xor_decoders.as_deref();
     let mut report = SearchReport::empty();
+    let mut streamed = 0usize;
     let budget = effective_budget(opts.scan_budget_bytes);
     for entry in entries {
         // Process-wide budget: reserve the declared entry size for as
@@ -363,6 +377,12 @@ pub fn run_findrefs(job: &FindRefsJob, opts: &FindRefsOptions) -> Result<SearchR
             xor,
             &mut report,
         );
+        // Everything the entry added, per logical DEX view (the sink gets
+        // the whole batch so rows can carry the DEX name).
+        for dex in report.results.iter().skip(streamed) {
+            sink(dex);
+        }
+        streamed = report.results.len();
     }
     Ok(report)
 }
@@ -1271,12 +1291,51 @@ pub fn run_disasm(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult,
     disasm_winner(hit, &job.method, opts, started)
 }
 
+/// Raw bytecode table for one class: the same scan as [`run_disasm`] with the
+/// operand-free renderer (offset, code units, mnemonic per instruction).
+pub fn run_bytecode(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult, CoreError> {
+    let target = job.target.clone();
+    let started = std::time::Instant::now();
+    let apk = Arc::new(Apk::open(&job.apk)?);
+    check_raw_dex(&apk)?;
+    let entries = apk.dex_entries();
+    if entries.is_empty() {
+        return Err(CoreError::ClassNotFound(target));
+    }
+    let hit = find_defining_dex(
+        &apk,
+        &entries,
+        opts.threads.max(1),
+        &target,
+        opts.scan_budget_bytes,
+    )?;
+    disasm_winner_mode(hit, &job.method, opts, started, DisasmForm::Bytecode)
+}
+
 /// Feed the winning DEX to the backend and render the listing.
 fn disasm_winner(
     hit: ClassHit,
     method: &Option<String>,
     opts: &DisasmOptions,
     started: std::time::Instant,
+) -> Result<DisasmResult, CoreError> {
+    disasm_winner_mode(hit, method, opts, started, DisasmForm::Smali)
+}
+
+/// Which listing form a winner emits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DisasmForm {
+    Smali,
+    Bytecode,
+    Cfg,
+}
+
+fn disasm_winner_mode(
+    hit: ClassHit,
+    method: &Option<String>,
+    opts: &DisasmOptions,
+    started: std::time::Instant,
+    form: DisasmForm,
 ) -> Result<DisasmResult, CoreError> {
     // A DEX-041 container packs several logical DEXes into one entry;
     // droidsaw-dex parses a single file from offset 0, so hand it just
@@ -1290,9 +1349,14 @@ fn disasm_winner(
         Cow::Owned(member[..size].to_vec())
     };
     let backend = asc_decompile::droidsaw::DroidsawBackend::new();
-    let listing = backend
-        .disassemble(&dex_bytes, &hit.class, method.as_deref())
-        .map_err(map_disasm_error)?;
+    let listing = match form {
+        DisasmForm::Smali => backend.disassemble(&dex_bytes, &hit.class, method.as_deref()),
+        DisasmForm::Bytecode => {
+            backend.disassemble_bytecode(&dex_bytes, &hit.class, method.as_deref())
+        }
+        DisasmForm::Cfg => backend.disassemble_cfg(&dex_bytes, &hit.class, method.as_deref()),
+    }
+    .map_err(map_disasm_error)?;
     if opts.debug {
         eprintln!("[DEBUG] Hit DEX: {}", hit.name);
         eprintln!(
@@ -1390,6 +1454,191 @@ pub fn run_callees(job: &CalleesJob) -> Result<CalleesResult, CoreError> {
         });
     }
     Err(CoreError::ClassNotFound(job.target.clone()))
+}
+
+// -------------------- call tree pipeline ---------------------
+
+/// One transitive call-graph run: expand `target::method` `depth` hops.
+#[derive(Debug, Clone)]
+pub struct CallTreeJob {
+    /// Path to the APK or raw `.dex`.
+    pub apk: std::path::PathBuf,
+    /// Class descriptor (`Lcom/foo/Bar;`).
+    pub target: String,
+    /// Method name (every overload is scanned).
+    pub method: String,
+}
+
+impl CallTreeJob {
+    pub fn new(
+        apk: impl Into<std::path::PathBuf>,
+        target: impl Into<String>,
+        method: impl Into<String>,
+    ) -> Self {
+        Self {
+            apk: apk.into(),
+            target: target.into(),
+            method: method.into(),
+        }
+    }
+}
+
+/// Breadth expansion limits. Both are hard: the walk stops at whichever is
+/// reached first and reports `truncated`, because an unbounded graph is the
+/// whole point of avoiding one.
+#[derive(Debug, Clone, Copy)]
+pub struct CallTreeOptions {
+    /// Hops below the root method (`0` = root only, no edges).
+    pub depth: u8,
+    /// Node budget across all depths.
+    pub max_nodes: usize,
+    /// Bytes of DEX entries this run may keep decoded at once.
+    pub scan_budget_bytes: usize,
+}
+
+impl Default for CallTreeOptions {
+    fn default() -> Self {
+        Self {
+            depth: 2,
+            max_nodes: 200,
+            scan_budget_bytes: 0,
+        }
+    }
+}
+
+/// One edge of the call tree. `to_class`/`to_member` is the callee, `from_*`
+/// the caller it was reached from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTreeNode {
+    /// Declaring class of the caller.
+    pub from_class: String,
+    /// Caller method name.
+    pub from_member: String,
+    /// Declaring class of the callee.
+    pub to_class: String,
+    /// Callee member (`name` or `name:type`).
+    pub to_member: String,
+    /// DEX entry the calling site was found in (empty when unknown).
+    pub to_dex: String,
+    /// 1-based hop below the root.
+    pub depth: u8,
+    /// Invocation sites inside the caller body.
+    pub sites: usize,
+}
+
+/// A transitive call tree, flattened breadth-first.
+#[derive(Debug, Clone, Default)]
+pub struct CallTreeResult {
+    /// DEX entries the walk touched, in first-hit order.
+    pub dex_names: Vec<String>,
+    /// Edges, root first, breadth-first.
+    pub nodes: Vec<CallTreeNode>,
+    /// Walker / code-item / lookup failures. The reachable part above is
+    /// still valid.
+    pub errors: Vec<SearchError>,
+    /// `true` when `depth` or `max_nodes` cut the walk.
+    pub truncated: bool,
+}
+
+/// Expand `job.target::job.method` breadth-first for `opts.depth` hops
+/// (ASC-RS-GUI-105).
+///
+/// One-hop resolution is [`run_callees`]; this layers expansion on top and
+/// therefore carries its own budget: every hop is a full class scan per
+/// callee, so `max_nodes` bounds the work, not the graph.
+pub fn run_call_tree(
+    job: &CallTreeJob,
+    opts: &CallTreeOptions,
+) -> Result<CallTreeResult, CoreError> {
+    let apk = Apk::open(&job.apk)?;
+    check_raw_dex(&apk)?;
+    let entries = apk.dex_entries();
+    if entries.is_empty() {
+        return Err(CoreError::ClassNotFound(job.target.clone()));
+    }
+    let budget = effective_budget(opts.scan_budget_bytes);
+    let mut result = CallTreeResult::default();
+    let mut queue: std::collections::VecDeque<(String, String, u8)> = Default::default();
+    queue.push_back((job.target.clone(), job.method.clone(), 0));
+    let mut enqueued = 0usize;
+    while let Some((class, member, depth)) = queue.pop_front() {
+        if depth >= opts.depth {
+            result.truncated = true;
+            continue;
+        }
+        let report = callees_one(&apk, &entries, &class, &member, budget)?;
+        let hop_dex = report.dex_name.clone().unwrap_or_default();
+        if let Some(name) = report.dex_name
+            && !result.dex_names.contains(&name)
+        {
+            result.dex_names.push(name);
+        }
+        result.errors.extend(report.errors);
+        for callee in report.callees {
+            let (to_class, to_member) = match callee.target.split_once("->") {
+                Some((c, m)) => (c.to_owned(), m.to_owned()),
+                None => continue,
+            };
+            if enqueued >= opts.max_nodes {
+                result.truncated = true;
+                break;
+            }
+            enqueued += 1;
+            result.nodes.push(CallTreeNode {
+                from_class: class.clone(),
+                from_member: member.clone(),
+                to_class: to_class.clone(),
+                to_member: to_member.clone(),
+                to_dex: hop_dex.clone(),
+                depth: depth + 1,
+                sites: callee.sites,
+            });
+            queue.push_back((to_class, to_member, depth + 1));
+        }
+        if enqueued >= opts.max_nodes {
+            break;
+        }
+    }
+    Ok(result)
+}
+
+/// One hop of the tree, with the DEX name kept next to the report.
+struct HopReport {
+    dex_name: Option<String>,
+    callees: Vec<asc_query::Callee>,
+    errors: Vec<SearchError>,
+}
+
+fn callees_one(
+    apk: &Apk,
+    entries: &[asc_apk::DexEntry],
+    target: &str,
+    method: &str,
+    budget: usize,
+) -> Result<HopReport, CoreError> {
+    for entry in entries {
+        let _guard = crate::budget::acquire(budget, entry.uncompressed_size as usize)?;
+        let eb = apk.read_entry(entry)?;
+        let Some(hit) = scan_one_for_class(&entry.name, eb.as_slice(), target)? else {
+            continue;
+        };
+        let view = DexView::parse_at(eb.as_slice(), hit.header_off)?;
+        let report = asc_query::callees_of(&view, &hit.class, method);
+        return Ok(HopReport {
+            errors: report
+                .errors
+                .iter()
+                .map(|e| SearchError::from_engine(&hit.name, e))
+                .collect(),
+            dex_name: Some(hit.name),
+            callees: report.callees,
+        });
+    }
+    Ok(HopReport {
+        dex_name: None,
+        callees: Vec::new(),
+        errors: Vec::new(),
+    })
 }
 
 // ------------------- class-strings pipeline -------------------
@@ -2418,4 +2667,92 @@ mod tests {
             Err(CoreError::WorkerPanicked(_))
         ));
     }
+}
+
+/// Control-flow summary of one class (ASC-RS-GUI-104): the same scan as
+/// [`run_bytecode`] with the block/edge renderer.
+pub fn run_cfg(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult, CoreError> {
+    let target = job.target.clone();
+    let started = std::time::Instant::now();
+    let apk = Arc::new(Apk::open(&job.apk)?);
+    check_raw_dex(&apk)?;
+    let entries = apk.dex_entries();
+    if entries.is_empty() {
+        return Err(CoreError::ClassNotFound(target));
+    }
+    let hit = find_defining_dex(
+        &apk,
+        &entries,
+        opts.threads.max(1),
+        &target,
+        opts.scan_budget_bytes,
+    )?;
+    disasm_winner_mode(hit, &job.method, opts, started, DisasmForm::Cfg)
+}
+
+// ------------------- member info pipeline -------------------
+
+/// One `descriptor->method` signature/flags lookup (ASC-RS-GUI-007).
+#[derive(Debug, Clone)]
+pub struct MemberInfoJob {
+    /// Path to the APK or raw `.dex`.
+    pub apk: std::path::PathBuf,
+    /// Class descriptor (`Lcom/foo/Bar;`).
+    pub target: String,
+    /// Method name (overloads share a name; the first declaration wins).
+    pub method: String,
+}
+
+impl MemberInfoJob {
+    pub fn new(
+        apk: impl Into<std::path::PathBuf>,
+        target: impl Into<String>,
+        method: impl Into<String>,
+    ) -> Self {
+        Self {
+            apk: apk.into(),
+            target: target.into(),
+            method: method.into(),
+        }
+    }
+}
+
+/// What the inspector needs about one method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberInfo {
+    /// Class that declares it.
+    pub descriptor: String,
+    /// Declared name.
+    pub name: String,
+    /// `(params)ret` descriptor.
+    pub proto: String,
+    /// Raw `access_flags` word.
+    pub flags: u32,
+    /// Human names of the set access bits.
+    pub flag_names: Vec<&'static str>,
+}
+
+pub fn run_member_info(job: &MemberInfoJob) -> Result<MemberInfo, CoreError> {
+    let apk = Apk::open(&job.apk)?;
+    check_raw_dex(&apk)?;
+    for entry in apk.dex_entries() {
+        let _guard = crate::budget::acquire(effective_budget(0), entry.uncompressed_size as usize)?;
+        let eb = apk.read_entry(&entry)?;
+        let Some(mut hit) = scan_one_for_class(&entry.name, eb.as_slice(), &job.target)? else {
+            continue;
+        };
+        hit.bytes = eb.into_vec();
+        let backend = asc_decompile::droidsaw::DroidsawBackend::default();
+        let info = backend
+            .method_info(&hit.bytes, &hit.class, &job.method)
+            .map_err(map_disasm_error)?;
+        return Ok(MemberInfo {
+            descriptor: hit.class,
+            flag_names: asc_decompile::disasm::access_flag_names(info.flags),
+            name: info.name,
+            proto: info.proto,
+            flags: info.flags,
+        });
+    }
+    Err(CoreError::ClassNotFound(job.target.clone()))
 }
