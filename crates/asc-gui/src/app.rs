@@ -1553,6 +1553,30 @@ impl AscApp {
     /// `dispatch` arm group: routing by engine analysis request.
     fn dispatch_analysis(&mut self, cmd: &Command, ctx: &egui::Context) {
         match cmd {
+            Command::GlobalSearch
+            | Command::RunSearch
+            | Command::FindRefsOfClicked { .. }
+            | Command::FindReferences
+            | Command::SearchMapping
+            | Command::UsedByClass
+            | Command::FindUsagesOfClicked
+            | Command::CancelTask => self.dispatch_search(cmd, ctx),
+            Command::ShowSmali
+            | Command::ShowMemberInfo { .. }
+            | Command::ShowBytecode
+            | Command::ShowSmaliMethod
+            | Command::ShowCallees
+            | Command::ShowCallTree
+            | Command::ShowCfg => self.dispatch_view(cmd, ctx),
+            Command::ShowClassStrings | Command::ShowResources => self.dispatch_inventory(cmd, ctx),
+            Command::GoToDeclaration => self.dispatch_declaration(cmd, ctx),
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+
+    /// Applies the `search` lane of the analysis commands.
+    fn dispatch_search(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
             Command::GlobalSearch | Command::RunSearch => {
                 self.focus_search = true;
                 if matches!(cmd, Command::RunSearch)
@@ -1606,125 +1630,6 @@ impl AscApp {
                 } else {
                     self.set_status("open a class first", false);
                 }
-            }
-            Command::ShowSmali => {
-                // Smali listing of the active class, opened as a
-                // `#smali`-keyed document/tab. Cache hit and cache miss
-                // are the *same* navigation now: `navigate_to` reuses a
-                // cached listing or re-issues the disasm job for a view
-                // key. The old miss-only branch bypassed the navigation
-                // history, so the listing could never be reached by
-                // Back/Forward and the recorded location stayed the Java
-                // class (audit F2).
-                let Some(descriptor) = self.active_class_descriptor().map(str::to_string) else {
-                    self.set_status("open a class first", false);
-                    return;
-                };
-                let key = crate::task::TaskManager::smali_key(&descriptor, None);
-                self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-            }
-            Command::ShowMemberInfo { descriptor, method } => {
-                let Some(session) = &self.session else { return };
-                let apk = session.path().to_path_buf();
-                self.tasks.spawn_member_info(&apk, descriptor, method, ctx);
-            }
-            Command::ShowBytecode
-            | Command::ShowSmaliMethod
-            | Command::ShowCallees
-            | Command::ShowCallTree
-            | Command::ShowCfg => {
-                // Both act on the clicked identifier, only while it
-                // applies to the document on screen AND resolves to a
-                // method with a known declaring class (audit F2: the
-                // document on screen is never the target class).
-                let Some((descriptor, method)) = self.resolved_method() else {
-                    self.set_status(
-                        self.method_action_block().unwrap_or("no method selected"),
-                        false,
-                    );
-                    return;
-                };
-                let Some(session) = &self.session else { return };
-                let apk = session.path().to_path_buf();
-                if matches!(cmd, Command::ShowBytecode) {
-                    let key = crate::task::TaskManager::bytecode_key(&descriptor, Some(&method));
-                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-                    return;
-                }
-                if matches!(cmd, Command::ShowCfg) {
-                    let key = crate::task::TaskManager::cfg_key(&descriptor, Some(&method));
-                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-                    return;
-                }
-                if matches!(cmd, Command::ShowCallTree) {
-                    self.tasks.spawn_call_tree(&apk, &descriptor, &method, ctx);
-                    self.unpin_bottom_focus();
-                    self.show_bottom = true;
-                    self.bottom_tab = BottomTab::References;
-                    self.set_status(format!("call tree: {descriptor}->{method}"), true);
-                    return;
-                }
-                if matches!(cmd, Command::ShowCallees) {
-                    self.tasks.spawn_callees(&apk, &descriptor, &method, ctx);
-                    self.unpin_bottom_focus();
-                    self.show_bottom = true;
-                    self.bottom_tab = BottomTab::References;
-                    self.set_status(format!("callees: {descriptor}->{method}"), true);
-                    return;
-                }
-                let key = crate::task::TaskManager::smali_key(&descriptor, Some(&method));
-                self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-            }
-            Command::ShowClassStrings => {
-                // Class-scoped: the class of the active tab / tree
-                // selection — never a `#smali` view key and never a
-                // method's declaring class (this shows *this* class's
-                // own strings).
-                let Some(descriptor) = self.active_class_descriptor().map(str::to_string) else {
-                    self.set_status("select a class first", false);
-                    return;
-                };
-                let Some(session) = &self.session else { return };
-                self.tasks
-                    .spawn_class_strings(session.path(), &descriptor, ctx);
-                self.unpin_bottom_focus();
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::References;
-                self.set_status(format!("strings: {descriptor}"), true);
-            }
-            Command::ShowResources => {
-                // `resources.arsc` inventory / lookup / search (APK
-                // only; the engine rejects a raw DEX). Empty filters
-                // mean "list every entry" — the panel defaults to a
-                // full listing the user can then narrow.
-                let Some(session) = &self.session else {
-                    self.set_status("open an APK first", false);
-                    return;
-                };
-                let id = match parse_resource_id(&self.resources_id) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        self.set_status(format!("resources: {e}"), false);
-                        return;
-                    }
-                };
-                let pattern = self.resources_pattern.trim().to_string();
-                let label = match (id, pattern.is_empty()) {
-                    (Some(id), _) => format!("resources 0x{id:08x}"),
-                    (None, false) => format!("resources {pattern:?}"),
-                    (None, true) => "resources *".to_string(),
-                };
-                let query = asc_core::ResourcesQuery {
-                    id,
-                    pattern: Some(pattern),
-                    limit: RESOURCES_ROW_LIMIT,
-                };
-                let apk = session.path().to_path_buf();
-                self.tasks.spawn_resources(&apk, query, label, ctx);
-                self.unpin_bottom_focus();
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::Resources;
-                self.set_status("resources: scanning…", true);
             }
             Command::SearchMapping => {
                 let Some((_, index)) = &self.mapping else {
@@ -1817,6 +1722,149 @@ impl AscApp {
                 }
                 self.queue(Command::GlobalSearch);
             }
+            Command::CancelTask => {
+                self.tasks.cancel_kind(TaskKind::FindRefs);
+                self.set_status("search cancelled", false);
+            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+    /// Applies the `view` lane of the analysis commands.
+    fn dispatch_view(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
+            Command::ShowSmali => {
+                // Smali listing of the active class, opened as a
+                // `#smali`-keyed document/tab. Cache hit and cache miss
+                // are the *same* navigation now: `navigate_to` reuses a
+                // cached listing or re-issues the disasm job for a view
+                // key. The old miss-only branch bypassed the navigation
+                // history, so the listing could never be reached by
+                // Back/Forward and the recorded location stayed the Java
+                // class (audit F2).
+                let Some(descriptor) = self.active_class_descriptor().map(str::to_string) else {
+                    self.set_status("open a class first", false);
+                    return;
+                };
+                let key = crate::task::TaskManager::smali_key(&descriptor, None);
+                self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+            }
+            Command::ShowMemberInfo { descriptor, method } => {
+                let Some(session) = &self.session else { return };
+                let apk = session.path().to_path_buf();
+                self.tasks.spawn_member_info(&apk, descriptor, method, ctx);
+            }
+            Command::ShowBytecode
+            | Command::ShowSmaliMethod
+            | Command::ShowCallees
+            | Command::ShowCallTree
+            | Command::ShowCfg => {
+                // Both act on the clicked identifier, only while it
+                // applies to the document on screen AND resolves to a
+                // method with a known declaring class (audit F2: the
+                // document on screen is never the target class).
+                let Some((descriptor, method)) = self.resolved_method() else {
+                    self.set_status(
+                        self.method_action_block().unwrap_or("no method selected"),
+                        false,
+                    );
+                    return;
+                };
+                let Some(session) = &self.session else { return };
+                let apk = session.path().to_path_buf();
+                if matches!(cmd, Command::ShowBytecode) {
+                    let key = crate::task::TaskManager::bytecode_key(&descriptor, Some(&method));
+                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+                    return;
+                }
+                if matches!(cmd, Command::ShowCfg) {
+                    let key = crate::task::TaskManager::cfg_key(&descriptor, Some(&method));
+                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+                    return;
+                }
+                if matches!(cmd, Command::ShowCallTree) {
+                    self.tasks.spawn_call_tree(&apk, &descriptor, &method, ctx);
+                    self.unpin_bottom_focus();
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::References;
+                    self.set_status(format!("call tree: {descriptor}->{method}"), true);
+                    return;
+                }
+                if matches!(cmd, Command::ShowCallees) {
+                    self.tasks.spawn_callees(&apk, &descriptor, &method, ctx);
+                    self.unpin_bottom_focus();
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::References;
+                    self.set_status(format!("callees: {descriptor}->{method}"), true);
+                    return;
+                }
+                let key = crate::task::TaskManager::smali_key(&descriptor, Some(&method));
+                self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+    /// Applies the `inventory` lane of the analysis commands.
+    fn dispatch_inventory(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
+            Command::ShowClassStrings => {
+                // Class-scoped: the class of the active tab / tree
+                // selection — never a `#smali` view key and never a
+                // method's declaring class (this shows *this* class's
+                // own strings).
+                let Some(descriptor) = self.active_class_descriptor().map(str::to_string) else {
+                    self.set_status("select a class first", false);
+                    return;
+                };
+                let Some(session) = &self.session else { return };
+                self.tasks
+                    .spawn_class_strings(session.path(), &descriptor, ctx);
+                self.unpin_bottom_focus();
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::References;
+                self.set_status(format!("strings: {descriptor}"), true);
+            }
+            Command::ShowResources => {
+                // `resources.arsc` inventory / lookup / search (APK
+                // only; the engine rejects a raw DEX). Empty filters
+                // mean "list every entry" — the panel defaults to a
+                // full listing the user can then narrow.
+                let Some(session) = &self.session else {
+                    self.set_status("open an APK first", false);
+                    return;
+                };
+                let id = match parse_resource_id(&self.resources_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.set_status(format!("resources: {e}"), false);
+                        return;
+                    }
+                };
+                let pattern = self.resources_pattern.trim().to_string();
+                let label = match (id, pattern.is_empty()) {
+                    (Some(id), _) => format!("resources 0x{id:08x}"),
+                    (None, false) => format!("resources {pattern:?}"),
+                    (None, true) => "resources *".to_string(),
+                };
+                let query = asc_core::ResourcesQuery {
+                    id,
+                    pattern: Some(pattern),
+                    limit: RESOURCES_ROW_LIMIT,
+                };
+                let apk = session.path().to_path_buf();
+                self.tasks.spawn_resources(&apk, query, label, ctx);
+                self.unpin_bottom_focus();
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::Resources;
+                self.set_status("resources: scanning…", true);
+            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+
+    /// Applies the `declaration` lane of the analysis commands. It only
+    /// queues an open, so it needs no frame context.
+    fn dispatch_declaration(&mut self, cmd: &Command, _ctx: &egui::Context) {
+        match cmd {
             Command::GoToDeclaration => {
                 // Workflow D: open the class that actually *declares*
                 // the selected symbol (audit F2). A class reference opens
@@ -1850,10 +1898,6 @@ impl AscApp {
                     line: None,
                     origin: NavOrigin::Declaration,
                 });
-            }
-            Command::CancelTask => {
-                self.tasks.cancel_kind(TaskKind::FindRefs);
-                self.set_status("search cancelled", false);
             }
             other => unreachable!("misrouted {other:?}"),
         }
