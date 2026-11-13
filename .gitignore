@@ -50,3 +50,7 @@ probe*.rs
 *.nam
 *.til
 *.i64
+# --- Repowise index + OMP agent session state (tool-local, never shared) ---
+/.omp/
+/.repowise/
+/.repowise-workspace/

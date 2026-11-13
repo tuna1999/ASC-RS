@@ -68,7 +68,6 @@
 //! }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/asc-dex/0.13.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 // `unsafe` is not used inside the crate.
 
