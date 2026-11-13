@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use asc_apk::elf::{ElfPath, parse_elf};
-use asc_apk::{Apk, InflateLimits};
+use asc_apk::{Apk, DexEntry, InflateLimits};
 use asc_dex::DexView;
 use asc_dex::ids::TypeIdx;
 use serde::Serialize;
@@ -148,12 +148,12 @@ fn walk_view(
     view: &DexView<'_>,
     dex: &str,
     out: &mut Vec<NativeMethod>,
-    err: &mut impl FnMut(String),
+    errors: &mut Vec<String>,
 ) -> bool {
     let mut complete = true;
     for i in 0..view.class_def_count() {
         let Ok(def) = view.class_def(i) else {
-            err(format!("{dex}: class_def {i} unreadable"));
+            push_error(errors, format!("{dex}: class_def {i} unreadable"));
             complete = false;
             continue;
         };
@@ -164,7 +164,7 @@ fn walk_view(
             Ok(Some(d)) => d,
             Ok(None) => continue,
             Err(e) => {
-                err(format!("{dex}: class_data of class_def {i}: {e}"));
+                push_error(errors, format!("{dex}: class_data of class_def {i}: {e}"));
                 complete = false;
                 continue;
             }
@@ -192,10 +192,10 @@ fn walk_view(
                     ))
                 })();
                 let Some((class, name, params, ret)) = built else {
-                    err(format!(
-                        "{dex}: native method_idx {} unresolvable",
-                        m.method_idx.0
-                    ));
+                    push_error(
+                        errors,
+                        format!("{dex}: native method_idx {} unresolvable", m.method_idx.0),
+                    );
                     complete = false;
                     continue;
                 };
@@ -224,191 +224,39 @@ fn is_lib_entry(name: &str) -> bool {
         && name.to_ascii_lowercase().ends_with(".so")
 }
 
+/// Keep the first [`MAX_ERRORS`] messages; the cap stops a
+/// pathological APK from turning into an error avalanche.
+fn push_error(errors: &mut Vec<String>, e: String) {
+    if errors.len() < MAX_ERRORS {
+        errors.push(e);
+    }
+}
+
 /// Inventory native libraries and native methods of `path` (APK or DEX).
 pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
     let apk = Apk::open(path)?;
     let mut errors: Vec<String> = Vec::new();
-    let mut err = |e: String| {
-        if errors.len() < MAX_ERRORS {
-            errors.push(e);
-        }
-    };
     let mut complete = true;
     let cap = InflateLimits::with_max_output(FILE_CAP).unwrap_or_default();
 
     // Libraries, one buffer at a time; keep only `Java_*` export names.
-    let mut libs = Vec::new();
-    let mut bound: HashMap<String, Vec<usize>> = HashMap::new();
-    for e in apk.entries().filter(|e| is_lib_entry(&e.name)) {
-        let abi_dir = e
-            .name
-            .strip_prefix("lib/")
-            .and_then(|r| r.split_once('/'))
-            .map(|(a, _)| a.to_string());
-        let mut lib = LibInfo {
-            name: e.name.clone(),
-            abi_dir,
-            size: e.uncompressed_size,
-            elf: None,
-            abi_mismatch: None,
-            jni_onload: false,
-            jni_onunload: false,
-            export_count: 0,
-            java_export_count: 0,
-            matched_methods: 0,
-            complete: false,
-            notes: Vec::new(),
-        };
-        if e.uncompressed_size as usize > FILE_CAP {
-            lib.notes
-                .push(format!("exceeds {} MiB cap; not parsed", FILE_CAP >> 20));
-        } else {
-            match apk.read_entry_with_limits(&e, cap) {
-                Err(x) => lib.notes.push(format!("read failed: {x}")),
-                Ok(bytes) => match parse_elf(bytes.as_slice()) {
-                    Err(x) => lib.notes.push(format!("ELF parse failed: {x}")),
-                    Ok(elf) => {
-                        let idx = libs.len();
-                        lib.jni_onload = elf.exports.iter().any(|n| n == "JNI_OnLoad");
-                        lib.jni_onunload = elf.exports.iter().any(|n| n == "JNI_OnUnload");
-                        lib.export_count = elf.exports.len();
-                        for n in elf.exports.iter().filter(|n| n.starts_with("Java_")) {
-                            lib.java_export_count += 1;
-                            let v = bound.entry(n.clone()).or_default();
-                            if v.last() != Some(&idx) {
-                                v.push(idx);
-                            }
-                        }
-                        lib.abi_mismatch = lib
-                            .abi_dir
-                            .as_deref()
-                            .and_then(abi_machine)
-                            .map(|m| m != elf.machine);
-                        lib.elf = Some(ElfSummary {
-                            bits: elf.bits,
-                            endian: if elf.little_endian { "little" } else { "big" },
-                            machine: elf.machine,
-                            machine_name: machine_name(elf.machine),
-                            symbol_source: match elf.path {
-                                ElfPath::Sections => "sections",
-                                ElfPath::Dynamic => "dynamic",
-                                ElfPath::None => "none",
-                            },
-                            symbols_seen: elf.symbols_seen,
-                        });
-                        lib.complete = elf.complete;
-                        lib.notes.extend(elf.notes);
-                    }
-                },
-            }
-        }
-        if !lib.complete {
-            complete = false;
-            err(format!("{}: {}", lib.name, lib.notes.join("; ")));
-        }
-        libs.push(lib);
-    }
+    let (mut libs, bound) = scan_libs(&apk, cap, &mut errors, &mut complete);
 
     // Native methods across every logical DEX.
-    let mut methods = Vec::new();
-    for e in apk.dex_entries() {
-        if e.uncompressed_size as usize > FILE_CAP {
-            err(format!("{}: exceeds {} MiB cap", e.name, FILE_CAP >> 20));
-            complete = false;
-            continue;
-        }
-        let bytes = match apk.read_entry_with_limits(&e, cap) {
-            Ok(b) => b,
-            Err(x) => {
-                err(format!("{}: read failed: {x}", e.name));
-                complete = false;
-                continue;
-            }
-        };
-        let b = bytes.as_slice();
-        let offsets = if b.starts_with(b"dex\n041\0") {
-            DexView::logical_header_offsets(b).ok()
-        } else {
-            Some(vec![0])
-        };
-        let Some(offsets) = offsets else {
-            err(format!("{}: DEX-041 container unreadable", e.name));
-            complete = false;
-            continue;
-        };
-        for (i, off) in offsets.iter().enumerate() {
-            let name = logical_dex_name(&e.name, offsets.len(), i);
-            match DexView::parse_at(b, *off) {
-                Ok(v) => complete &= walk_view(&v, &name, &mut methods, &mut err),
-                Err(x) => {
-                    err(format!("{name}: parse failed: {x}"));
-                    complete = false;
-                }
-            }
-        }
-    }
+    let mut methods = scan_methods(&apk, cap, &mut errors, &mut complete);
 
-    for m in &mut methods {
-        for n in [&m.short_jni, &m.long_jni] {
-            for &i in bound.get(n).into_iter().flatten() {
-                let l = &libs[i].name;
-                if !m.matched_libs.contains(l) {
-                    m.matched_libs.push(l.clone());
-                    libs[i].matched_methods += 1;
-                }
-            }
-        }
-        m.matched_libs.sort();
-    }
+    bind_exports(&mut methods, &mut libs, &bound);
     let matched = methods
         .iter()
         .filter(|m| !m.matched_libs.is_empty())
         .count();
     let direct_count = methods.iter().filter(|m| m.kind == "direct").count();
-    let note = if methods.is_empty() {
-        None
-    } else if matched == 0 {
-        Some(
-            "no native method is bound by an exported Java_* name; dynamic registration \
-             (RegisterNatives) is possible but not verified"
-                .to_string(),
-        )
-    } else if matched < methods.len() {
-        Some(format!(
-            "{} of {} native methods have no name-matched export; dynamic registration \
-             is possible for those (not verified)",
-            methods.len() - matched,
-            methods.len()
-        ))
-    } else {
-        None
-    };
     // ABI splits means "native code may be missing", not "no native
     // code". Augment the note instead of overriding it.
-    let libs_empty = libs.is_empty();
-    let mut split_note: Option<String> = None;
-    if libs_empty
-        && !apk.is_raw_dex()
-        && let Ok(m) = asc_manifest::parse_from_apk(path)
-    {
-        let requires = m
-            .required_split_types
-            .as_deref()
-            .is_some_and(|v| v.contains("abi"))
-            || m.split_types.as_deref().is_some_and(|v| v.contains("abi"))
-            || m.application.meta_data.iter().any(|md| {
-                md.name == "com.android.vending.splits.required"
-                    && md.value.as_deref() == Some("true")
-            });
-        if requires {
-            split_note = Some(
-                "no lib/*.so in this APK, but the manifest requires ABI split(s); \
-                 native libraries likely live in split APKs that were not provided"
-                    .to_string(),
-            );
-        }
-    }
-    let note = match (note, split_note) {
+    let note = match (
+        binding_note(&methods, matched),
+        abi_split_note(&apk, path, libs.is_empty()),
+    ) {
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
@@ -425,6 +273,227 @@ pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
         note,
         errors,
         complete,
+    })
+}
+
+/// Read and parse every `lib/`+`assets/` `.so`, returning the
+/// inventories plus the `Java_*` export → library index it found.
+fn scan_libs(
+    apk: &Apk,
+    cap: InflateLimits,
+    errors: &mut Vec<String>,
+    complete: &mut bool,
+) -> (Vec<LibInfo>, HashMap<String, Vec<usize>>) {
+    let mut libs = Vec::new();
+    let mut bound: HashMap<String, Vec<usize>> = HashMap::new();
+    for e in apk.entries().filter(|e| is_lib_entry(&e.name)) {
+        let lib = scan_lib(apk, &e, cap, &mut bound, libs.len());
+        if !lib.complete {
+            *complete = false;
+            push_error(errors, format!("{}: {}", lib.name, lib.notes.join("; ")));
+        }
+        libs.push(lib);
+    }
+    (libs, bound)
+}
+
+/// One library: read it under the cap, summarise its ELF if it parses,
+/// and index its `Java_*` exports under `idx`.
+fn scan_lib(
+    apk: &Apk,
+    e: &DexEntry,
+    cap: InflateLimits,
+    bound: &mut HashMap<String, Vec<usize>>,
+    idx: usize,
+) -> LibInfo {
+    let abi_dir = e
+        .name
+        .strip_prefix("lib/")
+        .and_then(|r| r.split_once('/'))
+        .map(|(a, _)| a.to_string());
+    let mut lib = LibInfo {
+        name: e.name.clone(),
+        abi_dir,
+        size: e.uncompressed_size,
+        elf: None,
+        abi_mismatch: None,
+        jni_onload: false,
+        jni_onunload: false,
+        export_count: 0,
+        java_export_count: 0,
+        matched_methods: 0,
+        complete: false,
+        notes: Vec::new(),
+    };
+    if e.uncompressed_size as usize > FILE_CAP {
+        lib.notes
+            .push(format!("exceeds {} MiB cap; not parsed", FILE_CAP >> 20));
+        return lib;
+    }
+    match apk.read_entry_with_limits(e, cap) {
+        Err(x) => lib.notes.push(format!("read failed: {x}")),
+        Ok(bytes) => match parse_elf(bytes.as_slice()) {
+            Err(x) => lib.notes.push(format!("ELF parse failed: {x}")),
+            Ok(elf) => {
+                lib.jni_onload = elf.exports.iter().any(|n| n == "JNI_OnLoad");
+                lib.jni_onunload = elf.exports.iter().any(|n| n == "JNI_OnUnload");
+                lib.export_count = elf.exports.len();
+                for n in elf.exports.iter().filter(|n| n.starts_with("Java_")) {
+                    lib.java_export_count += 1;
+                    let v = bound.entry(n.clone()).or_default();
+                    if v.last() != Some(&idx) {
+                        v.push(idx);
+                    }
+                }
+                lib.abi_mismatch = lib
+                    .abi_dir
+                    .as_deref()
+                    .and_then(abi_machine)
+                    .map(|m| m != elf.machine);
+                lib.elf = Some(ElfSummary {
+                    bits: elf.bits,
+                    endian: if elf.little_endian { "little" } else { "big" },
+                    machine: elf.machine,
+                    machine_name: machine_name(elf.machine),
+                    symbol_source: match elf.path {
+                        ElfPath::Sections => "sections",
+                        ElfPath::Dynamic => "dynamic",
+                        ElfPath::None => "none",
+                    },
+                    symbols_seen: elf.symbols_seen,
+                });
+                lib.complete = elf.complete;
+                lib.notes.extend(elf.notes);
+            }
+        },
+    }
+    lib
+}
+
+/// Walk every logical DEX of the APK and collect its native methods.
+fn scan_methods(
+    apk: &Apk,
+    cap: InflateLimits,
+    errors: &mut Vec<String>,
+    complete: &mut bool,
+) -> Vec<NativeMethod> {
+    let mut methods = Vec::new();
+    for e in apk.dex_entries() {
+        if !scan_dex_entry(apk, &e, cap, &mut methods, errors) {
+            *complete = false;
+        }
+    }
+    methods
+}
+
+/// Native methods of one `classes*.dex` entry. `false` when anything
+/// there could not be read or parsed in full.
+fn scan_dex_entry(
+    apk: &Apk,
+    e: &DexEntry,
+    cap: InflateLimits,
+    methods: &mut Vec<NativeMethod>,
+    errors: &mut Vec<String>,
+) -> bool {
+    if e.uncompressed_size as usize > FILE_CAP {
+        push_error(
+            errors,
+            format!("{}: exceeds {} MiB cap", e.name, FILE_CAP >> 20),
+        );
+        return false;
+    }
+    let bytes = match apk.read_entry_with_limits(e, cap) {
+        Ok(b) => b,
+        Err(x) => {
+            push_error(errors, format!("{}: read failed: {x}", e.name));
+            return false;
+        }
+    };
+    let b = bytes.as_slice();
+    let offsets = if b.starts_with(b"dex\n041\0") {
+        DexView::logical_header_offsets(b).ok()
+    } else {
+        Some(vec![0])
+    };
+    let Some(offsets) = offsets else {
+        push_error(errors, format!("{}: DEX-041 container unreadable", e.name));
+        return false;
+    };
+    let mut complete = true;
+    for (i, off) in offsets.iter().enumerate() {
+        let name = logical_dex_name(&e.name, offsets.len(), i);
+        match DexView::parse_at(b, *off) {
+            Ok(v) => complete &= walk_view(&v, &name, methods, errors),
+            Err(x) => {
+                push_error(errors, format!("{name}: parse failed: {x}"));
+                complete = false;
+            }
+        }
+    }
+    complete
+}
+
+/// Join native methods to the libraries exporting their short/long JNI
+/// name. A name match is a candidate link, not proof of linkage.
+fn bind_exports(
+    methods: &mut [NativeMethod],
+    libs: &mut [LibInfo],
+    bound: &HashMap<String, Vec<usize>>,
+) {
+    for m in methods.iter_mut() {
+        for n in [&m.short_jni, &m.long_jni] {
+            for &i in bound.get(n).into_iter().flatten() {
+                let l = &libs[i].name;
+                if !m.matched_libs.contains(l) {
+                    m.matched_libs.push(l.clone());
+                    libs[i].matched_methods += 1;
+                }
+            }
+        }
+        m.matched_libs.sort();
+    }
+}
+
+/// Note about how many native methods lack a name-matched export.
+fn binding_note(methods: &[NativeMethod], matched: usize) -> Option<String> {
+    if methods.is_empty() {
+        None
+    } else if matched == 0 {
+        Some(
+            "no native method is bound by an exported Java_* name; dynamic registration \
+             (RegisterNatives) is possible but not verified"
+                .to_string(),
+        )
+    } else if matched < methods.len() {
+        Some(format!(
+            "{} of {} native methods have no name-matched export; dynamic registration \
+             is possible for those (not verified)",
+            methods.len() - matched,
+            methods.len()
+        ))
+    } else {
+        None
+    }
+}
+
+/// Note when the manifest demands ABI splits this APK does not carry.
+fn abi_split_note(apk: &Apk, path: &Path, libs_empty: bool) -> Option<String> {
+    if !libs_empty || apk.is_raw_dex() {
+        return None;
+    }
+    let m = asc_manifest::parse_from_apk(path).ok()?;
+    let requires = m
+        .required_split_types
+        .as_deref()
+        .is_some_and(|v| v.contains("abi"))
+        || m.split_types.as_deref().is_some_and(|v| v.contains("abi"))
+        || m.application.meta_data.iter().any(|md| {
+            md.name == "com.android.vending.splits.required" && md.value.as_deref() == Some("true")
+        });
+    requires.then(|| {
+        "no lib/*.so in this APK, but the manifest requires ABI split(s); \
+         native libraries likely live in split APKs that were not provided"
+            .to_string()
     })
 }
 

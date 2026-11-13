@@ -111,7 +111,9 @@ pub use crate::leb::{
 pub use crate::map::{MapItem, MapIter};
 pub use crate::mutf8::{MAX_STRING_SCAN, decode_lossy as decode_mutf8_lossy, find_terminator};
 pub use crate::pools::{
-    DexStringRef, FieldIdItem, FieldIter, FieldOrMethod, MethodHandleItem, MethodIdItem,
-    MethodIter, ProtoIdItem, ProtoIter, StringIter, TypeIter, TypeList, TypeListIter, is_no_index,
+    DexStringRef, FieldIdItem, FieldOrMethod, MethodHandleItem, MethodIdItem, TypeList,
+    TypeListIter,
 };
-pub use crate::view::DexView;
+pub use crate::view::{
+    DexView, FieldIter, MethodIter, ProtoIter, StringIter, TypeIter, is_no_index,
+};

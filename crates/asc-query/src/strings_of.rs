@@ -52,73 +52,9 @@ pub struct ClassStringsReport {
 pub fn strings_of_class(view: &DexView, class: &str) -> ClassStringsReport {
     let mut errors: Vec<SearchError> = Vec::new();
     let mut complete = true;
-    let mut code_offs: Vec<u32> = Vec::new();
-    let mut found_class = false;
-    for i in 0..view.class_def_count() {
-        let def = match view.class_def(i) {
-            Ok(def) => def,
-            Err(source) => {
-                errors.push(SearchError::Locator {
-                    pool: "class_defs",
-                    source,
-                });
-                complete = false;
-                continue;
-            }
-        };
-        let cls_sidx = match view.type_(def.class) {
-            Ok(sidx) => sidx,
-            Err(source) => {
-                errors.push(SearchError::Locator {
-                    pool: "type_ids",
-                    source,
-                });
-                complete = false;
-                continue;
-            }
-        };
-        let desc = match view.string(cls_sidx) {
-            Ok(desc) => desc,
-            Err(source) => {
-                errors.push(SearchError::Locator {
-                    pool: "string_ids",
-                    source,
-                });
-                complete = false;
-                continue;
-            }
-        };
-        if desc.decode_lossy() != class {
-            continue;
-        }
-        found_class = true;
-        if def.class_data_off != 0 {
-            match view.class_data(def.class_data_off) {
-                Ok(Some(data)) => {
-                    for em in data
-                        .direct_methods
-                        .iter()
-                        .chain(data.virtual_methods.iter())
-                    {
-                        if em.code_off != 0 {
-                            code_offs.push(em.code_off);
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(source) => {
-                    errors.push(SearchError::Locator {
-                        pool: "class_data",
-                        source,
-                    });
-                    complete = false;
-                }
-            }
-        }
-        // The descriptor is unique in class_defs; stop early.
-        break;
-    }
-    if !found_class {
+    let Some(code_offs) =
+        crate::class_code::code_offs_of(view, class, None, &mut errors, &mut complete)
+    else {
         errors.push(SearchError::Locator {
             pool: "class_defs",
             source: asc_dex::error::DexError::Malformed("class not defined in this DEX"),
@@ -128,14 +64,29 @@ pub fn strings_of_class(view: &DexView, class: &str) -> ClassStringsReport {
             errors,
             complete: false,
         };
-    }
+    };
 
+    let strings = collect_strings(view, &code_offs, &mut errors, &mut complete);
+    ClassStringsReport {
+        strings,
+        errors,
+        complete,
+    }
+}
+
+/// Walk every body in `code_offs` and tally the distinct string constants.
+fn collect_strings(
+    view: &DexView,
+    code_offs: &[u32],
+    errors: &mut Vec<SearchError>,
+    complete: &mut bool,
+) -> Vec<ClassString> {
     let mut out: Vec<ClassString> = Vec::new();
     // Dedup index: first-encounter order lives in `out`, the map only
     // answers "seen already, and at which slot". A linear
     // `out.iter().find` here was O(distinct²) for string-heavy classes.
     let mut seen: HashMap<String, usize> = HashMap::new();
-    for code_off in code_offs {
+    for &code_off in code_offs {
         let ci = match view.code_item(code_off) {
             Ok(Some(ci)) => ci,
             Ok(None) => {
@@ -145,12 +96,12 @@ pub fn strings_of_class(view: &DexView, class: &str) -> ClassStringsReport {
                         "code_off resolved to no code_item",
                     ),
                 });
-                complete = false;
+                *complete = false;
                 continue;
             }
             Err(source) => {
                 errors.push(SearchError::Code { code_off, source });
-                complete = false;
+                *complete = false;
                 continue;
             }
         };
@@ -159,7 +110,7 @@ pub fn strings_of_class(view: &DexView, class: &str) -> ClassStringsReport {
             Ok(walker) => walker,
             Err(source) => {
                 errors.push(SearchError::WalkerInit { code_off, source });
-                complete = false;
+                *complete = false;
                 continue;
             }
         };
@@ -174,7 +125,7 @@ pub fn strings_of_class(view: &DexView, class: &str) -> ClassStringsReport {
                         insn_offset: crate::scan::insn_offset_of(&source),
                         source,
                     });
-                    complete = false;
+                    *complete = false;
                     break;
                 }
             };
@@ -198,16 +149,12 @@ pub fn strings_of_class(view: &DexView, class: &str) -> ClassStringsReport {
                                 index: idx.0,
                                 source,
                             });
-                            complete = false;
+                            *complete = false;
                         }
                     }
                 }
             }
         }
     }
-    ClassStringsReport {
-        strings: out,
-        errors,
-        complete,
-    }
+    out
 }

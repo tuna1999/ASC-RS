@@ -18,7 +18,7 @@
 
 use crate::dex_ids::*;
 use crate::error::BytecodeError;
-use crate::opcode::{PayloadKind, make_ref, opcode_info, payload_extent, read_index};
+use crate::opcode::{PayloadKind, RefKind, opcode_info, payload_extent, read_index};
 
 /// A reference operand located inside a Dalvik instruction.
 ///
@@ -35,6 +35,21 @@ pub enum DexRef {
     Proto(ProtoIdx),
     CallSite(CallSiteIdx),
     MethodHandle(MethodHandleIdx),
+}
+
+/// Wrap a raw `u32` index in the appropriate [`DexRef`] variant for a
+/// given [`RefKind`].
+#[inline]
+fn make_ref(kind: RefKind, idx: u32) -> DexRef {
+    match kind {
+        RefKind::String => DexRef::String(StringIdx(idx)),
+        RefKind::Type => DexRef::Type(TypeIdx(idx)),
+        RefKind::Field => DexRef::Field(FieldIdx(idx)),
+        RefKind::Method => DexRef::Method(MethodIdx(idx)),
+        RefKind::Proto => DexRef::Proto(ProtoIdx(idx)),
+        RefKind::CallSite => DexRef::CallSite(CallSiteIdx(idx)),
+        RefKind::MethodHandle => DexRef::MethodHandle(MethodHandleIdx(idx)),
+    }
 }
 
 /// One reference-bearing Dalvik instruction.

@@ -13,8 +13,6 @@
 //! 16-bit code units from the start of the instruction, matching the
 //! encoding diagrams on <https://source.android.com/docs/core/runtime/instruction-formats>.
 
-use crate::dex_ids::*;
-
 /// Dalvik instruction format tag.
 ///
 /// Names match the canonical AOSP / source.android.com tables
@@ -684,21 +682,5 @@ pub(crate) fn read_index(insns: &[u8], insn_byte_off: usize, slot: RefSlot) -> u
             (lo as u32) | ((hi as u32) << 16)
         }
         other => unreachable!("RefSlot.bits must be 16 or 32, got {other}"),
-    }
-}
-
-/// Wrap a raw `u32` index in the appropriate [`DexRef`] variant for a
-/// given [`RefKind`].
-#[inline]
-pub(crate) fn make_ref(kind: RefKind, idx: u32) -> crate::walker::DexRef {
-    use crate::walker::DexRef;
-    match kind {
-        RefKind::String => DexRef::String(StringIdx(idx)),
-        RefKind::Type => DexRef::Type(TypeIdx(idx)),
-        RefKind::Field => DexRef::Field(FieldIdx(idx)),
-        RefKind::Method => DexRef::Method(MethodIdx(idx)),
-        RefKind::Proto => DexRef::Proto(ProtoIdx(idx)),
-        RefKind::CallSite => DexRef::CallSite(CallSiteIdx(idx)),
-        RefKind::MethodHandle => DexRef::MethodHandle(MethodHandleIdx(idx)),
     }
 }

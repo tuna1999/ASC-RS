@@ -211,28 +211,82 @@ pub(crate) fn emit(
     lo.kept_method_handle_count = maps.method_handles.len();
     lo.version = view.version();
 
-    // ---------- string_data region ----------
+    let per_string_off = emit_string_data(view, plan, &mut out, &mut lo)?;
+    emit_interfaces(view, closure, maps, &mut out, &mut lo)?;
+    let proto_params_off = emit_proto_type_lists(closure, maps, &mut out, &mut lo)?;
+    emit_static_values(view, closure, maps, &mut out, &mut lo)?;
+    let call_site_data_offs = emit_call_sites(closure, maps, &mut out, &mut lo)?;
+    emit_annotations(view, closure, maps, &mut out, &mut lo)?;
+    let dbg_off_per_method = emit_debug_info(closure, maps, &mut out, &mut lo)?;
+    let new_code_off_per_method = emit_code_items(
+        view,
+        closure,
+        maps,
+        plan,
+        &dbg_off_per_method,
+        &mut out,
+        &mut lo,
+    )?;
+    emit_class_data(closure, maps, &new_code_off_per_method, &mut out, &mut lo)?;
+    emit_string_ids(&per_string_off, &mut out, &mut lo);
+    emit_type_ids(closure, maps, &mut out, &mut lo)?;
+    emit_proto_ids(closure, maps, &proto_params_off, &mut out, &mut lo)?;
+    emit_field_ids(closure, maps, &mut out, &mut lo)?;
+    emit_method_ids(closure, maps, &mut out, &mut lo)?;
+    emit_call_site_ids(&call_site_data_offs, maps, &mut out, &mut lo);
+    emit_method_handles(closure, maps, &mut out, &mut lo)?;
+    lo.target_new_type_idx = emit_class_defs(closure, maps, &mut out, &mut lo)?;
+
+    // ---------- map_list ----------
     align_to_4(&mut out);
+    lo.map_off = out.len() as u32;
+    emit_map_list(&mut out, &lo)?;
+
+    // ---------- header ----------
+    let final_size = out.len();
+    write_header(&mut out, view, closure, &lo, final_size)?;
+
+    // ---------- SHA-1 signature + Adler-32 checksum ----------
+    seal(&mut out);
+
+    lo.out = out;
+    Ok(lo)
+}
+
+/// Emit one string_data record per planned slot; return their offsets.
+fn emit_string_data(
+    view: &DexView<'_>,
+    plan: &Plan,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<Vec<u32>, RebuildError> {
+    align_to_4(out);
     lo.string_data_off = out.len() as u32;
     let mut per_string_off: Vec<u32> = Vec::with_capacity(plan.order.len());
     for slot in &plan.order {
         per_string_off.push(out.len() as u32);
         match slot {
-            Slot::Old(old_idx) => {
-                push_raw_string_data(&mut out, &view.string(StringIdx(*old_idx))?)
-            }
-            Slot::New(units) => push_new_string_data(&mut out, units),
+            Slot::Old(old_idx) => push_raw_string_data(out, &view.string(StringIdx(*old_idx))?),
+            Slot::New(units) => push_new_string_data(out, units),
         }
     }
     lo.string_data_size = (out.len() as u32) - lo.string_data_off;
     lo.string_data_count = plan.order.len() as u32;
+    Ok(per_string_off)
+}
 
-    // ---------- type_list (interfaces) ----------
-    let mut proto_params_off: Vec<u32> = vec![0; maps.protos.len() as usize];
+/// Emit the class interface type_list, if the class declares one.
+fn emit_interfaces(
+    view: &DexView<'_>,
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
     if let Some(cd_rec) = &closure.class_def_record
         && cd_rec.interfaces_off != 0
     {
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.interfaces_off = out.len() as u32;
         let cd = ClassDef {
             class: cd_rec.class_type_idx,
@@ -262,9 +316,18 @@ pub(crate) fn emit(
         lo.interfaces_size = (out.len() as u32) - lo.interfaces_off;
         lo.interfaces_count = 1;
     }
+    Ok(())
+}
 
-    // ---------- proto parameter type_lists ----------
-    align_to_4(&mut out);
+/// Emit the proto parameter type_lists; return each proto's list offset.
+fn emit_proto_type_lists(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<Vec<u32>, RebuildError> {
+    let mut proto_params_off: Vec<u32> = vec![0; maps.protos.len() as usize];
+    align_to_4(out);
     lo.proto_type_lists_off = out.len() as u32;
     for new_idx in 0..maps.protos.len() {
         let proto_old = maps
@@ -279,7 +342,7 @@ pub(crate) fn emit(
         if rec.3.is_empty() {
             continue;
         }
-        align_to_4(&mut out);
+        align_to_4(out);
         let tl_off = out.len() as u32;
         out.extend_from_slice(&(rec.3.len() as u32).to_le_bytes());
         for t in &rec.3 {
@@ -294,12 +357,21 @@ pub(crate) fn emit(
     } else {
         (out.len() as u32) - lo.proto_type_lists_off
     };
+    Ok(proto_params_off)
+}
 
-    // ---------- static_values ----------
+/// Emit the rewritten static_values array.
+fn emit_static_values(
+    view: &DexView<'_>,
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
     if let Some(cd_rec) = &closure.class_def_record
         && cd_rec.static_values_off != 0
     {
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.static_values_off = out.len() as u32;
         let arr = view.encoded_array(view.physical(), cd_rec.static_values_off as usize)?;
         let rewritten = rewrite_static_values(&arr.0, maps)?;
@@ -307,14 +379,20 @@ pub(crate) fn emit(
         lo.static_values_size = (out.len() as u32) - lo.static_values_off;
         lo.static_values_count = 1;
     }
+    Ok(())
+}
 
-    // ---------- call_site arrays + method_handles rows ----------
-    // encoded_array_items are unaligned: when a static-values run precedes,
-    // the call-site run follows it byte-for-byte so one map entry covers both.
+/// Emit the call-site array payloads; return their offsets.
+fn emit_call_sites(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<Vec<u32>, RebuildError> {
     let mut call_site_data_offs: Vec<u32> = vec![0; maps.call_sites.len() as usize];
     if !maps.call_sites.is_empty() {
         if lo.static_values_off == 0 {
-            align_to_4(&mut out);
+            align_to_4(out);
         }
         lo.call_site_arrays_off = out.len() as u32;
         for (rank, &old_cs) in closure.call_sites.iter().enumerate() {
@@ -332,8 +410,17 @@ pub(crate) fn emit(
         lo.call_site_arrays_size = (out.len() as u32) - lo.call_site_arrays_off;
         lo.call_site_array_count = closure.call_sites.len() as u32;
     }
+    Ok(call_site_data_offs)
+}
 
-    // ---------- annotations region ----------
+/// Emit the annotation items, sets, set-ref-lists and directory.
+fn emit_annotations(
+    view: &DexView<'_>,
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
     let mut new_item_off_map: std::collections::HashMap<u32, u32> =
         std::collections::HashMap::new();
     let mut new_set_off_map: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
@@ -382,7 +469,7 @@ pub(crate) fn emit(
         }
         item_offs.sort_unstable();
         item_offs.dedup();
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.ann_items_off = out.len() as u32;
         for old_item_off in item_offs {
             if old_item_off == 0 {
@@ -392,7 +479,7 @@ pub(crate) fn emit(
                 continue;
             };
             let start = out.len() as u32;
-            rewrite_annotation_item(item.visibility, &item.annotation, &mut out, maps)?;
+            rewrite_annotation_item(item.visibility, &item.annotation, out, maps)?;
             new_item_off_map.insert(old_item_off, start);
         }
         lo.ann_items_size = (out.len() as u32) - lo.ann_items_off;
@@ -414,7 +501,7 @@ pub(crate) fn emit(
         }
         set_offs.sort_unstable();
         set_offs.dedup();
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.ann_sets_off = out.len() as u32;
         for old_set_off in set_offs {
             let set = view.annotation_set(old_set_off)?;
@@ -425,7 +512,7 @@ pub(crate) fn emit(
                     new_offs.push(new_o);
                 }
             }
-            rewrite_annotation_set(&new_offs, &mut out)?;
+            rewrite_annotation_set(&new_offs, out)?;
             new_set_off_map.insert(old_set_off, start);
         }
         lo.ann_sets_size = (out.len() as u32) - lo.ann_sets_off;
@@ -439,7 +526,7 @@ pub(crate) fn emit(
         }
         param_ref_offs.sort_unstable();
         param_ref_offs.dedup();
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.ann_set_ref_lists_off = out.len() as u32;
         for old_ref in param_ref_offs {
             let refs = view.annotation_set_ref_list(old_ref)?;
@@ -450,13 +537,13 @@ pub(crate) fn emit(
                     new_offs.push(new_o);
                 }
             }
-            rewrite_annotation_set_ref_list(&new_offs, &mut out)?;
+            rewrite_annotation_set_ref_list(&new_offs, out)?;
             new_ref_off_map.insert(old_ref, start);
         }
         lo.ann_set_ref_lists_size = (out.len() as u32) - lo.ann_set_ref_lists_off;
         lo.ann_ref_list_count = new_ref_off_map.len() as u32;
 
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.ann_dir_off = out.len() as u32;
         class_ann_off = if dir.class_annotations_off != 0 {
             new_set_off_map
@@ -507,17 +594,25 @@ pub(crate) fn emit(
             &field_pairs,
             &method_pairs,
             &param_pairs,
-            &mut out,
+            out,
         )?;
         lo.ann_dir_size = (out.len() as u32) - lo.ann_dir_off;
     }
+    Ok(())
+}
 
-    // ---------- debug_info region ----------
+/// Emit debug_info records; return each new method's debug_info offset.
+fn emit_debug_info(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<Vec<u32>, RebuildError> {
     let mut dbg_off_per_method: Vec<u32> = vec![0; maps.methods.len() as usize];
     if let Some(cd_rec) = &closure.class_def_record {
         let cd_has_dbg = cd_rec.debug_info_raw.iter().any(|b| !b.is_empty());
         if cd_has_dbg {
-            align_to_4(&mut out);
+            align_to_4(out);
             lo.debug_info_off = out.len() as u32;
             let mut iter = MethodIter::new(cd_rec);
             while let Some((old_method, _has_code, raw_idx)) = iter.next() {
@@ -535,13 +630,24 @@ pub(crate) fn emit(
             lo.debug_info_size = (out.len() as u32) - lo.debug_info_off;
         }
     }
+    Ok(dbg_off_per_method)
+}
 
-    // ---------- code_items region ----------
+/// Emit rewritten code_items; return each new method's code offset.
+fn emit_code_items(
+    view: &DexView<'_>,
+    closure: &Closure,
+    maps: &PoolMaps,
+    plan: &Plan,
+    dbg_off_per_method: &[u32],
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<Vec<u32>, RebuildError> {
     let mut new_code_off_per_method: Vec<u32> = vec![0; maps.methods.len() as usize];
     if let Some(cd_rec) = &closure.class_def_record {
         let any_code = cd_rec.method_has_code.iter().any(|&b| b);
         if any_code {
-            align_to_4(&mut out);
+            align_to_4(out);
             lo.code_items_off = out.len() as u32;
             let total =
                 cd_rec.selected_direct_methods.len() + cd_rec.selected_virtual_methods.len();
@@ -619,7 +725,7 @@ pub(crate) fn emit(
                 }
                 code_bytes.extend_from_slice(&reencoded.raw);
 
-                align_to_4(&mut out);
+                align_to_4(out);
                 new_code_off_per_method[new_method_idx] = out.len() as u32;
                 out.extend_from_slice(&code_bytes);
                 lo.code_item_count += 1;
@@ -627,33 +733,51 @@ pub(crate) fn emit(
             lo.code_items_size = (out.len() as u32) - lo.code_items_off;
         }
     }
+    Ok(new_code_off_per_method)
+}
 
-    // ---------- class_data item ----------
+/// Emit the rewritten class_data item.
+fn emit_class_data(
+    closure: &Closure,
+    maps: &PoolMaps,
+    new_code_off_per_method: &[u32],
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
     if let Some(cd_rec) = &closure.class_def_record
         && cd_rec.class_data_off != 0
     {
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.class_data_off = out.len() as u32;
         let new_raw = rewrite_class_data(
             &cd_rec.class_data_raw,
             closure,
             maps,
-            &new_code_off_per_method,
+            new_code_off_per_method,
         )?;
         out.extend_from_slice(&new_raw);
         lo.class_data_size = (out.len() as u32) - lo.class_data_off;
     }
+    Ok(())
+}
 
-    // ---------- pool regions ----------
-    // string_ids (each entry = offset of the corresponding string_data record).
-    align_to_4(&mut out);
+/// Emit the string_ids pool.
+fn emit_string_ids(per_string_off: &[u32], out: &mut Vec<u8>, lo: &mut LayoutOut) {
+    align_to_4(out);
     lo.string_ids_off = out.len() as u32;
-    for &off in &per_string_off {
+    for &off in per_string_off {
         out.extend_from_slice(&off.to_le_bytes());
     }
+}
 
-    // type_ids
-    align_to_4(&mut out);
+/// Emit the type_ids pool.
+fn emit_type_ids(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
+    align_to_4(out);
     lo.type_ids_off = out.len() as u32;
     for new_idx in 0..maps.types.len() {
         let old_idx = maps
@@ -671,9 +795,18 @@ pub(crate) fn emit(
         let new_desc = maps.strings.lookup(desc_str_idx.0)?;
         out.extend_from_slice(&new_desc.to_le_bytes());
     }
+    Ok(())
+}
 
-    // proto_ids
-    align_to_4(&mut out);
+/// Emit the proto_ids pool.
+fn emit_proto_ids(
+    closure: &Closure,
+    maps: &PoolMaps,
+    proto_params_off: &[u32],
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
+    align_to_4(out);
     lo.proto_ids_off = out.len() as u32;
     for new_idx in 0..maps.protos.len() {
         let proto_old = maps
@@ -692,9 +825,17 @@ pub(crate) fn emit(
         out.extend_from_slice(&new_return.to_le_bytes());
         out.extend_from_slice(&params_off.to_le_bytes());
     }
+    Ok(())
+}
 
-    // field_ids
-    align_to_4(&mut out);
+/// Emit the field_ids pool.
+fn emit_field_ids(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
+    align_to_4(out);
     lo.field_ids_off = out.len() as u32;
     for new_idx in 0..maps.fields.len() {
         let old_idx = maps
@@ -713,9 +854,17 @@ pub(crate) fn emit(
         out.extend_from_slice(&new_ty.to_le_bytes());
         out.extend_from_slice(&new_name.to_le_bytes());
     }
+    Ok(())
+}
 
-    // method_ids
-    align_to_4(&mut out);
+/// Emit the method_ids pool.
+fn emit_method_ids(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
+    align_to_4(out);
     lo.method_ids_off = out.len() as u32;
     for new_idx in 0..maps.methods.len() {
         let old_idx = maps
@@ -734,19 +883,34 @@ pub(crate) fn emit(
         out.extend_from_slice(&new_proto.to_le_bytes());
         out.extend_from_slice(&new_name.to_le_bytes());
     }
+    Ok(())
+}
 
-    // call_site_ids
+/// Emit the call_site_ids pool.
+fn emit_call_site_ids(
+    call_site_data_offs: &[u32],
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) {
     if !maps.call_sites.is_empty() {
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.call_site_ids_off = out.len() as u32;
-        for &off in &call_site_data_offs {
+        for &off in call_site_data_offs {
             out.extend_from_slice(&off.to_le_bytes());
         }
     }
+}
 
-    // method_handles
+/// Emit the method_handles pool.
+fn emit_method_handles(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<(), RebuildError> {
     if !maps.method_handles.is_empty() {
-        align_to_4(&mut out);
+        align_to_4(out);
         lo.method_handles_off = out.len() as u32;
         for &old_idx in &closure.method_handles {
             let rec = closure
@@ -764,9 +928,17 @@ pub(crate) fn emit(
             out.extend_from_slice(&0u16.to_le_bytes());
         }
     }
+    Ok(())
+}
 
-    // class_defs (single row).
-    align_to_4(&mut out);
+/// Emit the single class_def row; return the new class type index.
+fn emit_class_defs(
+    closure: &Closure,
+    maps: &PoolMaps,
+    out: &mut Vec<u8>,
+    lo: &mut LayoutOut,
+) -> Result<u32, RebuildError> {
+    align_to_4(out);
     lo.class_defs_off = out.len() as u32;
     let cd_rec = closure
         .class_def_record
@@ -789,22 +961,7 @@ pub(crate) fn emit(
     out.extend_from_slice(&lo.ann_dir_off.to_le_bytes());
     out.extend_from_slice(&lo.class_data_off.to_le_bytes());
     out.extend_from_slice(&lo.static_values_off.to_le_bytes());
-    lo.target_new_type_idx = new_class;
-
-    // ---------- map_list ----------
-    align_to_4(&mut out);
-    lo.map_off = out.len() as u32;
-    emit_map_list(&mut out, &lo)?;
-
-    // ---------- header ----------
-    let final_size = out.len();
-    write_header(&mut out, view, closure, &lo, final_size)?;
-
-    // ---------- SHA-1 signature + Adler-32 checksum ----------
-    seal(&mut out);
-
-    lo.out = out;
-    Ok(lo)
+    Ok(new_class)
 }
 
 fn emit_map_list(out: &mut Vec<u8>, lo: &LayoutOut) -> Result<(), RebuildError> {

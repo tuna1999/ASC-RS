@@ -319,6 +319,23 @@ fn findrefs_complete_scan_still_exits_0_quietly() {
     let _ = std::fs::remove_file(&apk);
 }
 
+/// A needle that exists nowhere still exits 0: the scan succeeded, the
+/// answer is empty. Only a failed *scan* is exit 2 (see the partial-scan
+/// test) — a consumer must read stdout, not the status, to count hits.
+#[test]
+fn findrefs_no_match_is_exit_0() {
+    let apk = write_apk("nomatch", &[("classes.dex", needle_dex(NEEDLE))]);
+    let (out, stderr) = run_cli(&["findrefs", apk.to_str().unwrap(), "string", "ZZ_absent_ZZ"]);
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains(NEEDLE),
+        "no hit line expected, stdout:\n{stdout}"
+    );
+
+    let _ = std::fs::remove_file(&apk);
+}
+
 /// A `classes*.dex` entry whose bytes are not a DEX is deliberately
 /// skipped, NOT failed (audit F06 / P2 contract): exit 0, `complete`
 /// stays `true`, and the skip is visible in `errors` (JSON) and on

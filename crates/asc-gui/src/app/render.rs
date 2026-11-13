@@ -37,7 +37,217 @@ impl eframe::App for AscApp {
             .get_or_insert_with(|| crate::icons::Icons::load(ui.ctx()));
 
         // 1. Menu bar.
+        self.draw_menubar(ui);
+
+        // 2. Toolbar: back/forward, artifact search, meta.
+        self.draw_toolbar(ui, tokens);
+
+        // 3. Bottom panel.
+        if self.show_bottom {
+            egui::Panel::bottom("bottom_panel")
+                .resizable(true)
+                .default_size(tokens.bottom_default)
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
+                .show(ui, |ui| {
+                    self.draw_bottom_panel(ui);
+                });
+        }
+
+        // 4. Status bar.
+        egui::Panel::bottom("statusbar")
+            .frame(egui::Frame::new().fill(tokens.panel_bg))
+            .show(ui, |ui| {
+                self.draw_status_bar(ui);
+            });
+
+        // 5. Inspector (right).
+        if self.show_inspector {
+            egui::Panel::right("inspector")
+                .resizable(true)
+                .default_size(tokens.inspector_default)
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.draw_inspector(ui);
+                    });
+                });
+        }
+
+        // 6. Activity bar (far left): Explorer / Search / Tasks.
+        self.draw_activity_bar(ui, tokens);
+
+        // 7. Explorer (left).
+        if self.show_explorer {
+            egui::Panel::left("explorer")
+                .resizable(true)
+                .default_size(tokens.explorer_default)
+                .frame(egui::Frame::new().fill(tokens.panel_bg))
+                .show(ui, |ui| {
+                    self.draw_explorer(ui);
+                });
+        }
+
+        // 8. Overlay strips (panels — before the central panel).
+        self.draw_open_tabs_strip(ui);
+        self.draw_settings_strip(ui);
+        self.draw_goto_bar(ui);
+
+        // 9. Editor (center).
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(tokens.app_bg))
+            .show(ui, |ui| {
+                self.draw_editor(ui);
+            });
+
+        // 10. Palette overlay.
+        self.draw_palette(ui.ctx());
+
+        // 11. Dispatch everything queued this frame.
+        let commands = std::mem::take(&mut self.commands);
+        for cmd in commands {
+            self.dispatch(cmd, ui.ctx());
+        }
+    }
+}
+
+impl AscApp {
+    /// Open-tabs picker (ASC-GUI-029 / JADX-GUI-004): filterable
+    /// list of open tabs, click activates. Ctrl+Shift+H.
+    fn draw_open_tabs_strip(&mut self, ui: &mut egui::Ui) {
+        if !self.show_open_tabs {
+            return;
+        }
+        #[allow(non_snake_case)]
+        let T = design::tokens();
+        let mut activate: Option<String> = None;
+        // Snapshot before the mutable closure.
+        let tabs: Vec<(String, bool)> = self
+            .tabs
+            .tabs()
+            .iter()
+            .map(|t| {
+                let active = self.tabs.active_descriptor() == Some(t.descriptor.as_str());
+                (t.descriptor.clone(), active)
+            })
+            .collect();
+        let needle = self.open_tabs_filter.trim().to_ascii_lowercase();
+        let shown: Vec<_> = tabs
+            .iter()
+            .filter(|(d, _)| d.to_ascii_lowercase().contains(&needle))
+            .collect();
+        egui::Panel::top("open_tabs_strip")
+            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.open_tabs_filter)
+                        .hint_text("filter open tabs…")
+                        .font(egui::TextStyle::Monospace),
+                );
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (d, is_active) in &shown {
+                            let star = if self.tabs.bookmark(d).is_some() {
+                                "★ "
+                            } else {
+                                ""
+                            };
+                            let label = format!("{star}{}", crate::ui::short_name(d));
+                            let resp = ui
+                                .selectable_label(*is_active, egui::RichText::new(label).small())
+                                .on_hover_text(d);
+                            if resp.clicked() {
+                                activate = Some(d.clone());
+                            }
+                        }
+                    });
+                ui.weak(
+                    egui::RichText::new(format!(
+                        "{} / {} tabs · Esc close",
+                        shown.len(),
+                        tabs.len()
+                    ))
+                    .small(),
+                );
+            });
+        if let Some(d) = activate {
+            self.show_open_tabs = false;
+            self.tabs.activate(&d);
+            if self.documents.contains(&d) {
+                self.active_doc = self.documents.get(&d);
+            }
+        }
+    }
+
+    /// Settings dialog (ASC-GUI-025 / JADX-GUI-009): theme picker.
+    fn draw_settings_strip(&mut self, ui: &mut egui::Ui) {
+        if !self.show_settings {
+            return;
+        }
+        #[allow(non_snake_case)]
+        let T = design::tokens();
+        let mut close = false;
+        egui::Panel::top("settings_strip")
+            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("settings · theme:");
+                    if ui
+                        .selectable_label(matches!(design::theme(), design::Theme::Dark), "dark")
+                        .clicked()
+                    {
+                        self.queue(Command::ToggleTheme);
+                    }
+                    if ui
+                        .selectable_label(matches!(design::theme(), design::Theme::Light), "light")
+                        .clicked()
+                    {
+                        self.queue(Command::ToggleTheme);
+                    }
+                    if ui.small_button("close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.show_settings = false;
+        }
+    }
+
+    /// Goto-line bar (JADX-GUI-020): Ctrl+G, Enter applies.
+    fn draw_goto_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(input) = self.goto_line_input.as_mut() else {
+            return;
+        };
+        #[allow(non_snake_case)]
+        let T = design::tokens();
+        let mut apply = None;
+        egui::Panel::top("goto_line_strip")
+            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("goto line:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(input)
+                            .hint_text("1-indexed")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(120.0),
+                    );
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        apply = input.trim().parse::<usize>().ok();
+                    }
+                });
+            });
+        if let Some(line) = apply {
+            self.apply_goto_line(line);
+        }
+    }
+
+    /// Menu bar: File / Navigate / Search / Analysis / View / Help.
+    fn draw_menubar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("menubar").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open artifact…  (Ctrl+O)").clicked() {
@@ -253,9 +463,12 @@ impl eframe::App for AscApp {
                     });
                 });
             });
+            });
         });
+    }
 
-        // 4. Toolbar: back/forward, artifact search, meta.
+    /// Toolbar: back/forward, artifact search field, package meta.
+    fn draw_toolbar(&mut self, ui: &mut egui::Ui, tokens: &design::Tokens) {
         egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(tokens.surface))
             .show(ui, |ui| {
@@ -334,263 +547,63 @@ impl eframe::App for AscApp {
                     });
                 });
             });
+    }
 
-        // 5. Bottom panel.
-        if self.show_bottom {
-            egui::Panel::bottom("bottom_panel")
-                .resizable(true)
-                .default_size(tokens.bottom_default)
-                .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ui, |ui| {
-                    self.draw_bottom_panel(ui);
-                });
-        }
-
-        // 6. Status bar.
-        egui::Panel::bottom("statusbar")
+    /// Activity bar (far left): Explorer / Search / Tasks toggles.
+    fn draw_activity_bar(&mut self, ui: &mut egui::Ui, tokens: &design::Tokens) {
+        egui::Panel::left("activity_bar")
+            .exact_size(36.0)
             .frame(egui::Frame::new().fill(tokens.panel_bg))
             .show(ui, |ui| {
-                self.draw_status_bar(ui);
-            });
-
-        // 7. Inspector (right).
-        if self.show_inspector {
-            egui::Panel::right("inspector")
-                .resizable(true)
-                .default_size(tokens.inspector_default)
-                .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.draw_inspector(ui);
-                    });
-                });
-        }
-
-        // 7b. Activity bar (far left): Explorer / Search / Tasks.
-        {
-            egui::Panel::left("activity_bar")
-                .exact_size(36.0)
-                .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ui, |ui| {
-                    ui.with_layout(
-                        egui::Layout::top_down_justified(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(4.0);
-                            let toggle = |ui: &mut egui::Ui,
-                                          label: &'static str,
-                                          active: bool,
-                                          hint: &'static str|
-                             -> bool {
-                                let rich = egui::RichText::new(label).monospace().size(15.0).color(
-                                    if active {
-                                        tokens.accent
-                                    } else {
-                                        tokens.text_secondary
-                                    },
-                                );
-                                let btn = egui::Button::new(rich).frame(false);
-                                let resp = ui
-                                    .add(btn)
-                                    .on_hover_text(hint)
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                resp.clicked()
-                            };
-                            if toggle(ui, "▤", self.show_explorer, "Explorer (Ctrl+1)") {
-                                self.show_explorer = !self.show_explorer;
-                            }
-                            if toggle(
-                                ui,
-                                "🔍",
-                                self.show_bottom && self.bottom_tab == BottomTab::Results,
-                                "Search (Ctrl+Shift+F)",
-                            ) {
-                                self.show_bottom = true;
-                                self.bottom_tab = BottomTab::Results;
-                                self.focus_search = true;
-                                self.pin_bottom_focus();
-                            }
-                            if toggle(
-                                ui,
-                                "☰",
-                                self.show_bottom && self.bottom_tab == BottomTab::Tasks,
-                                "Tasks (Ctrl+3)",
-                            ) {
-                                self.show_bottom = true;
-                                self.bottom_tab = BottomTab::Tasks;
-                                self.pin_bottom_focus();
-                            }
-                        },
-                    );
-                });
-        }
-
-        // 8. Explorer (left).
-        if self.show_explorer {
-            egui::Panel::left("explorer")
-                .resizable(true)
-                .default_size(tokens.explorer_default)
-                .frame(egui::Frame::new().fill(tokens.panel_bg))
-                .show(ui, |ui| {
-                    self.draw_explorer(ui);
-                });
-        }
-
-        // 9a. Overlay strips (panels — before the central panel).
-        self.draw_open_tabs_strip(ui);
-        self.draw_settings_strip(ui);
-        self.draw_goto_bar(ui);
-
-        // 9. Editor (center).
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(tokens.app_bg))
-            .show(ui, |ui| {
-                self.draw_editor(ui);
-            });
-
-        // 10. Palette overlay.
-        self.draw_palette(ui.ctx());
-
-        // 11. Dispatch everything queued this frame.
-
-        // 11. Dispatch everything queued this frame.
-        let commands = std::mem::take(&mut self.commands);
-        for cmd in commands {
-            self.dispatch(cmd, ui.ctx());
-        }
-    }
-}
-
-impl AscApp {
-    /// Open-tabs picker (ASC-GUI-029 / JADX-GUI-004): filterable
-    /// list of open tabs, click activates. Ctrl+Shift+H.
-    fn draw_open_tabs_strip(&mut self, ui: &mut egui::Ui) {
-        if !self.show_open_tabs {
-            return;
-        }
-        #[allow(non_snake_case)]
-        let T = design::tokens();
-        let mut activate: Option<String> = None;
-        // Snapshot before the mutable closure.
-        let tabs: Vec<(String, bool)> = self
-            .tabs
-            .tabs()
-            .iter()
-            .map(|t| {
-                let active = self.tabs.active_descriptor() == Some(t.descriptor.as_str());
-                (t.descriptor.clone(), active)
-            })
-            .collect();
-        let needle = self.open_tabs_filter.trim().to_ascii_lowercase();
-        let shown: Vec<_> = tabs
-            .iter()
-            .filter(|(d, _)| d.to_ascii_lowercase().contains(&needle))
-            .collect();
-        egui::Panel::top("open_tabs_strip")
-            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.open_tabs_filter)
-                        .hint_text("filter open tabs…")
-                        .font(egui::TextStyle::Monospace),
-                );
-                egui::ScrollArea::vertical()
-                    .max_height(160.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for (d, is_active) in &shown {
-                            let star = if self.tabs.bookmark(d).is_some() {
-                                "★ "
-                            } else {
-                                ""
-                            };
-                            let label = format!("{star}{}", crate::ui::short_name(d));
+                ui.with_layout(
+                    egui::Layout::top_down_justified(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(4.0);
+                        let toggle = |ui: &mut egui::Ui,
+                                      label: &'static str,
+                                      active: bool,
+                                      hint: &'static str|
+                         -> bool {
+                            let rich = egui::RichText::new(label).monospace().size(15.0).color(
+                                if active {
+                                    tokens.accent
+                                } else {
+                                    tokens.text_secondary
+                                },
+                            );
+                            let btn = egui::Button::new(rich).frame(false);
                             let resp = ui
-                                .selectable_label(*is_active, egui::RichText::new(label).small())
-                                .on_hover_text(d);
-                            if resp.clicked() {
-                                activate = Some(d.clone());
-                            }
+                                .add(btn)
+                                .on_hover_text(hint)
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            resp.clicked()
+                        };
+                        if toggle(ui, "▤", self.show_explorer, "Explorer (Ctrl+1)") {
+                            self.show_explorer = !self.show_explorer;
                         }
-                    });
-                ui.weak(
-                    egui::RichText::new(format!(
-                        "{} / {} tabs · Esc close",
-                        shown.len(),
-                        tabs.len()
-                    ))
-                    .small(),
+                        if toggle(
+                            ui,
+                            "🔍",
+                            self.show_bottom && self.bottom_tab == BottomTab::Results,
+                            "Search (Ctrl+Shift+F)",
+                        ) {
+                            self.show_bottom = true;
+                            self.bottom_tab = BottomTab::Results;
+                            self.focus_search = true;
+                            self.pin_bottom_focus();
+                        }
+                        if toggle(
+                            ui,
+                            "☰",
+                            self.show_bottom && self.bottom_tab == BottomTab::Tasks,
+                            "Tasks (Ctrl+3)",
+                        ) {
+                            self.show_bottom = true;
+                            self.bottom_tab = BottomTab::Tasks;
+                            self.pin_bottom_focus();
+                        }
+                    },
                 );
             });
-        if let Some(d) = activate {
-            self.show_open_tabs = false;
-            self.tabs.activate(&d);
-            if self.documents.contains(&d) {
-                self.active_doc = self.documents.get(&d);
-            }
-        }
-    }
-
-    /// Settings dialog (ASC-GUI-025 / JADX-GUI-009): theme picker.
-    fn draw_settings_strip(&mut self, ui: &mut egui::Ui) {
-        if !self.show_settings {
-            return;
-        }
-        #[allow(non_snake_case)]
-        let T = design::tokens();
-        let mut close = false;
-        egui::Panel::top("settings_strip")
-            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.strong("settings · theme:");
-                    if ui
-                        .selectable_label(matches!(design::theme(), design::Theme::Dark), "dark")
-                        .clicked()
-                    {
-                        self.queue(Command::ToggleTheme);
-                    }
-                    if ui
-                        .selectable_label(matches!(design::theme(), design::Theme::Light), "light")
-                        .clicked()
-                    {
-                        self.queue(Command::ToggleTheme);
-                    }
-                    if ui.small_button("close").clicked() {
-                        close = true;
-                    }
-                });
-            });
-        if close {
-            self.show_settings = false;
-        }
-    }
-
-    /// Goto-line bar (JADX-GUI-020): Ctrl+G, Enter applies.
-    fn draw_goto_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(input) = self.goto_line_input.as_mut() else {
-            return;
-        };
-        #[allow(non_snake_case)]
-        let T = design::tokens();
-        let mut apply = None;
-        egui::Panel::top("goto_line_strip")
-            .frame(egui::Frame::new().fill(T.panel_bg).inner_margin(6))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.strong("goto line:");
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(input)
-                            .hint_text("1-indexed")
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(120.0),
-                    );
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        apply = input.trim().parse::<usize>().ok();
-                    }
-                });
-            });
-        if let Some(line) = apply {
-            self.apply_goto_line(line);
-        }
     }
 }

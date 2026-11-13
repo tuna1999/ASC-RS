@@ -1244,6 +1244,66 @@ impl AscApp {
     // ----------------------------------------------------------------
 
     fn dispatch(&mut self, cmd: Command, ctx: &egui::Context) {
+        match &cmd {
+            Command::OpenArtifact
+            | Command::ReloadArtifact
+            | Command::OpenRecent { .. }
+            | Command::LoadMapping
+            | Command::OpenMapping(_) => self.dispatch_file(&cmd, ctx),
+            Command::NavigateBack
+            | Command::NavigateForward
+            | Command::OpenClass { .. }
+            | Command::GoToBookmark
+            | Command::GotoLine
+            | Command::QuickSwitch { .. }
+            | Command::QuickOpen
+            | Command::ToggleCommandPalette
+            | Command::CloseTab
+            | Command::CloseOthers { .. }
+            | Command::CloseAll
+            | Command::CloseRight { .. }
+            | Command::PinTab
+            | Command::PinAll
+            | Command::NextTab
+            | Command::PreviousTab
+            | Command::ShowOpenTabs
+            | Command::FindInDocument
+            | Command::ToggleBookmark => self.dispatch_nav(&cmd, ctx),
+            Command::GlobalSearch
+            | Command::RunSearch
+            | Command::FindRefsOfClicked { .. }
+            | Command::FindReferences
+            | Command::ShowSmali
+            | Command::ShowMemberInfo { .. }
+            | Command::ShowBytecode
+            | Command::ShowSmaliMethod
+            | Command::ShowCallees
+            | Command::ShowCallTree
+            | Command::ShowCfg
+            | Command::ShowClassStrings
+            | Command::ShowResources
+            | Command::SearchMapping
+            | Command::UsedByClass
+            | Command::FindUsagesOfClicked
+            | Command::GoToDeclaration
+            | Command::CancelTask => self.dispatch_analysis(&cmd, ctx),
+            Command::BeginRenameSymbol
+            | Command::RenameSymbol { .. }
+            | Command::BeginLineComment
+            | Command::SetLineComment { .. }
+            | Command::CopyDescriptor
+            | Command::CopyFqn
+            | Command::ToggleParanoid => self.dispatch_edit(&cmd, ctx),
+            Command::ToggleExplorer
+            | Command::ToggleInspector
+            | Command::ToggleBottomPanel
+            | Command::ToggleTheme
+            | Command::OpenSettings => self.dispatch_shell(&cmd, ctx),
+        }
+    }
+
+    /// `dispatch` arm group: routing by artifact/file.
+    fn dispatch_file(&mut self, cmd: &Command, ctx: &egui::Context) {
         match cmd {
             Command::OpenArtifact => {
                 if let Some(path) = rfd::FileDialog::new()
@@ -1261,6 +1321,52 @@ impl AscApp {
                     self.open_path(&path, ctx);
                 }
             }
+            Command::OpenRecent { path } => {
+                if path.exists() {
+                    self.open_path(path, ctx);
+                } else {
+                    self.set_status(
+                        format!("recent artifact missing: {}", path.display()),
+                        false,
+                    );
+                }
+            }
+            Command::LoadMapping => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("mapping.txt", &["txt", "map"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                self.dispatch(Command::OpenMapping(path), ctx);
+            }
+            Command::OpenMapping(path) => {
+                let text = match std::fs::read_to_string(path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.set_status(format!("mapping: {e}"), false);
+                        return;
+                    }
+                };
+                let index = asc_core::mapping::MappingIndex::parse(&text);
+                if index.is_empty() {
+                    self.set_status(format!("mapping: no entries in {}", path.display()), false);
+                    return;
+                }
+                let (classes, members) = index.counts();
+                self.set_status(
+                    format!("mapping: {classes} classes / {members} members loaded"),
+                    true,
+                );
+                self.mapping = Some((path.clone(), index));
+            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+
+    /// `dispatch` arm group: routing by navigation / tab verb.
+    fn dispatch_nav(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
             Command::NavigateBack => self.nav_back(ctx),
             Command::NavigateForward => self.nav_forward(ctx),
             Command::OpenClass {
@@ -1268,7 +1374,126 @@ impl AscApp {
                 pin,
                 line,
                 origin,
-            } => self.navigate_to(&descriptor, pin, line, origin, ctx),
+            } => self.navigate_to(descriptor, *pin, *line, *origin, ctx),
+            Command::GoToBookmark => {
+                if let Some(d) = self
+                    .tabs
+                    .active_descriptor()
+                    .and_then(|d| self.tabs.bookmark(d).map(|line| (d.to_string(), line)))
+                {
+                    let line = d.1;
+                    self.apply_goto_line(line);
+                } else {
+                    self.set_status("no bookmark on this tab", false);
+                }
+            }
+            Command::GotoLine => {
+                // Surface the input bar. The bar lives in the editor
+                // (drawn when `goto_line_input.is_some()`); pressing
+                // Enter with a numeric value calls
+                // `apply_goto_line(line)` which sets `pending_scroll`.
+                self.goto_line_input = Some(String::new());
+                self.set_status("goto line (1-indexed):", true);
+            }
+            Command::QuickSwitch { n } => {
+                // Ctrl+1..9 jumps to the n-th tab. The tab list is
+                // pinned-first / preview-last; `n` is 1-indexed and
+                // clamped.
+                let count = self.tabs.tabs().len();
+                if count == 0 {
+                    self.set_status("no tabs to switch to", false);
+                    return;
+                }
+                let idx = (*n as usize).saturating_sub(1).min(count - 1);
+                let descriptor = self.tabs.tabs()[idx].descriptor.clone();
+                self.tabs.activate(&descriptor);
+                self.nav.push(crate::state::NavigationLocation {
+                    descriptor,
+                    line: None,
+                    origin: crate::state::NavOrigin::Tab,
+                });
+            }
+            Command::QuickOpen => {
+                self.palette = Some(PaletteMode::QuickOpen);
+                self.focus_palette = true;
+            }
+            Command::ToggleCommandPalette => {
+                self.palette = Some(PaletteMode::Commands);
+                self.focus_palette = true;
+            }
+            Command::CloseTab => {
+                if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
+                    self.close_tab(&d);
+                }
+            }
+            Command::CloseOthers { descriptor } => {
+                let dropped = self.tabs.close_others(descriptor.as_deref());
+                for d in &dropped {
+                    self.documents.remove(d);
+                }
+                self.set_status(format!("closed {} other tab(s)", dropped.len()), true);
+            }
+            Command::CloseAll => {
+                let dropped = self.tabs.close_all();
+                for d in &dropped {
+                    self.documents.remove(d);
+                }
+                self.set_status(format!("closed {} tab(s)", dropped.len()), true);
+            }
+            Command::CloseRight { descriptor } => {
+                let dropped = self.tabs.close_right(descriptor);
+                for d in &dropped {
+                    self.documents.remove(d);
+                }
+                self.set_status(
+                    format!("closed {} tab(s) to the right", dropped.len()),
+                    true,
+                );
+            }
+            Command::PinTab => {
+                self.tabs.pin(None);
+            }
+            Command::PinAll => {
+                let n = self.tabs.pin_all();
+                self.set_status(format!("pinned {n} preview tab(s)"), true);
+            }
+            Command::NextTab => self.tabs.cycle(true),
+            Command::PreviousTab => self.tabs.cycle(false),
+            Command::ShowOpenTabs => {
+                self.show_open_tabs = true;
+                self.open_tabs_filter.clear();
+            }
+            Command::FindInDocument => {
+                self.show_find = true;
+                self.recompute_find_matches();
+            }
+            Command::ToggleBookmark => {
+                // Bookmark the active tab at the clicked line (or
+                // line 1 when nothing is clicked); a line clicked in
+                // another document does not count (audit F1).
+                // Second toggle on the same line clears it.
+                if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
+                    let line = self.clicked_line().map(|l| l + 1).unwrap_or(1);
+                    let on = self.tabs.toggle_bookmark(&d, Some(line));
+                    self.set_status(
+                        if on {
+                            format!("bookmark set: {d}:{line}")
+                        } else {
+                            format!("bookmark cleared: {d}")
+                        },
+                        true,
+                    );
+                } else {
+                    self.set_status("open a class first", false);
+                }
+            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+
+    /// `dispatch` arm group: routing by engine analysis request.
+    fn dispatch_analysis(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
             Command::GlobalSearch | Command::RunSearch => {
                 self.focus_search = true;
                 if matches!(cmd, Command::RunSearch)
@@ -1300,7 +1525,7 @@ impl AscApp {
             Command::FindRefsOfClicked { descriptor } => {
                 if let Some(session) = &self.session {
                     let apk = session.path().to_path_buf();
-                    self.tasks.spawn_findrefs_class(&apk, &descriptor, ctx);
+                    self.tasks.spawn_findrefs_class(&apk, descriptor, ctx);
                     self.unpin_bottom_focus();
                     self.show_bottom = true;
                     self.bottom_tab = BottomTab::References;
@@ -1342,8 +1567,7 @@ impl AscApp {
             Command::ShowMemberInfo { descriptor, method } => {
                 let Some(session) = &self.session else { return };
                 let apk = session.path().to_path_buf();
-                self.tasks
-                    .spawn_member_info(&apk, &descriptor, &method, ctx);
+                self.tasks.spawn_member_info(&apk, descriptor, method, ctx);
             }
             Command::ShowBytecode
             | Command::ShowSmaliMethod
@@ -1391,78 +1615,6 @@ impl AscApp {
                 }
                 let key = crate::task::TaskManager::smali_key(&descriptor, Some(&method));
                 self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
-            }
-            Command::LoadMapping => {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("mapping.txt", &["txt", "map"])
-                    .pick_file()
-                else {
-                    return;
-                };
-                self.dispatch(Command::OpenMapping(path), ctx);
-            }
-            Command::OpenMapping(path) => {
-                let text = match std::fs::read_to_string(&path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.set_status(format!("mapping: {e}"), false);
-                        return;
-                    }
-                };
-                let index = asc_core::mapping::MappingIndex::parse(&text);
-                if index.is_empty() {
-                    self.set_status(format!("mapping: no entries in {}", path.display()), false);
-                    return;
-                }
-                let (classes, members) = index.counts();
-                self.set_status(
-                    format!("mapping: {classes} classes / {members} members loaded"),
-                    true,
-                );
-                self.mapping = Some((path, index));
-            }
-            Command::SearchMapping => {
-                let Some((_, index)) = &self.mapping else {
-                    self.set_status("mapping: load a mapping.txt first", false);
-                    return;
-                };
-                let needle = self.search.input.trim().to_string();
-                let hits = index.lookup(&needle);
-                let rows = hits
-                    .iter()
-                    .map(|h| crate::state::SearchRow {
-                        dex_name: String::new(),
-                        caller_class: format!("L{};", h.mapped_class.replace('.', "/")),
-                        caller_member: h.mapped_member.clone(),
-                        matched: vec![if h.original_member.is_empty() {
-                            format!("{} -> {}", h.original_class, h.mapped_class)
-                        } else {
-                            format!(
-                                "{}.{} -> {}.{}",
-                                h.original_class,
-                                h.original_member,
-                                h.mapped_class,
-                                h.mapped_member
-                            )
-                        }],
-                        code_off: None,
-                    })
-                    .collect::<Vec<_>>();
-                let label = format!("mapping: {needle}");
-                let count = rows.len();
-                self.references = Some(SearchResults {
-                    label,
-                    rows,
-                    complete: true,
-                    errors: Vec::new(),
-                });
-                self.unpin_bottom_focus();
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::References;
-                self.set_status(
-                    format!("mapping: {count} entr(y/ies) for '{needle}'"),
-                    count > 0,
-                );
             }
             Command::ShowClassStrings => {
                 // Class-scoped: the class of the active tab / tree
@@ -1515,61 +1667,54 @@ impl AscApp {
                 self.bottom_tab = BottomTab::Resources;
                 self.set_status("resources: scanning…", true);
             }
-            Command::ToggleBookmark => {
-                // Bookmark the active tab at the clicked line (or
-                // line 1 when nothing is clicked); a line clicked in
-                // another document does not count (audit F1).
-                // Second toggle on the same line clears it.
-                if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
-                    let line = self.clicked_line().map(|l| l + 1).unwrap_or(1);
-                    let on = self.tabs.toggle_bookmark(&d, Some(line));
-                    self.set_status(
-                        if on {
-                            format!("bookmark set: {d}:{line}")
+            Command::SearchMapping => {
+                let Some((_, index)) = &self.mapping else {
+                    self.set_status("mapping: load a mapping.txt first", false);
+                    return;
+                };
+                let needle = self.search.input.trim().to_string();
+                let hits = index.lookup(&needle);
+                let rows = hits
+                    .iter()
+                    .map(|h| crate::state::SearchRow {
+                        dex_name: String::new(),
+                        caller_class: format!("L{};", h.mapped_class.replace('.', "/")),
+                        caller_member: h.mapped_member.clone(),
+                        matched: vec![if h.original_member.is_empty() {
+                            format!("{} -> {}", h.original_class, h.mapped_class)
                         } else {
-                            format!("bookmark cleared: {d}")
-                        },
-                        true,
-                    );
-                } else {
-                    self.set_status("open a class first", false);
-                }
-            }
-            Command::GoToBookmark => {
-                if let Some(d) = self
-                    .tabs
-                    .active_descriptor()
-                    .and_then(|d| self.tabs.bookmark(d).map(|line| (d.to_string(), line)))
-                {
-                    let line = d.1;
-                    self.apply_goto_line(line);
-                } else {
-                    self.set_status("no bookmark on this tab", false);
-                }
-            }
-            Command::OpenRecent { path } => {
-                if path.exists() {
-                    self.open_path(&path, ctx);
-                } else {
-                    self.set_status(
-                        format!("recent artifact missing: {}", path.display()),
-                        false,
-                    );
-                }
-            }
-            Command::ShowOpenTabs => {
-                self.show_open_tabs = true;
-                self.open_tabs_filter.clear();
+                            format!(
+                                "{}.{} -> {}.{}",
+                                h.original_class,
+                                h.original_member,
+                                h.mapped_class,
+                                h.mapped_member
+                            )
+                        }],
+                        code_off: None,
+                    })
+                    .collect::<Vec<_>>();
+                let label = format!("mapping: {needle}");
+                let count = rows.len();
+                self.references = Some(SearchResults {
+                    label,
+                    rows,
+                    complete: true,
+                    errors: Vec::new(),
+                });
+                self.unpin_bottom_focus();
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::References;
+                self.set_status(
+                    format!("mapping: {count} entr(y/ies) for '{needle}'"),
+                    count > 0,
+                );
             }
             Command::UsedByClass => {
                 // Same engine as FindReferences (type query on the
                 // descriptor) but the surface emphasis is the
                 // inline button in the REFERENCES / inspector.
                 self.queue(Command::FindReferences);
-            }
-            Command::FindInDocument => {
-                self.show_find = true;
-                self.recompute_find_matches();
             }
             Command::FindUsagesOfClicked => {
                 // Workflow B: prefill the search bar with the *resolved*
@@ -1647,102 +1792,17 @@ impl AscApp {
                     origin: NavOrigin::Declaration,
                 });
             }
-            Command::QuickOpen => {
-                self.palette = Some(PaletteMode::QuickOpen);
-                self.focus_palette = true;
+            Command::CancelTask => {
+                self.tasks.cancel_kind(TaskKind::FindRefs);
+                self.set_status("search cancelled", false);
             }
-            Command::ToggleCommandPalette => {
-                self.palette = Some(PaletteMode::Commands);
-                self.focus_palette = true;
-            }
-            Command::CloseTab => {
-                if let Some(d) = self.tabs.active_descriptor().map(str::to_string) {
-                    self.close_tab(&d);
-                }
-            }
-            Command::CloseOthers { descriptor } => {
-                let dropped = self.tabs.close_others(descriptor.as_deref());
-                for d in &dropped {
-                    self.documents.remove(d);
-                }
-                self.set_status(format!("closed {} other tab(s)", dropped.len()), true);
-            }
-            Command::CloseAll => {
-                let dropped = self.tabs.close_all();
-                for d in &dropped {
-                    self.documents.remove(d);
-                }
-                self.set_status(format!("closed {} tab(s)", dropped.len()), true);
-            }
-            Command::CloseRight { descriptor } => {
-                let dropped = self.tabs.close_right(&descriptor);
-                for d in &dropped {
-                    self.documents.remove(d);
-                }
-                self.set_status(
-                    format!("closed {} tab(s) to the right", dropped.len()),
-                    true,
-                );
-            }
-            Command::PinTab => {
-                self.tabs.pin(None);
-            }
-            Command::PinAll => {
-                let n = self.tabs.pin_all();
-                self.set_status(format!("pinned {n} preview tab(s)"), true);
-            }
-            Command::NextTab => self.tabs.cycle(true),
-            Command::PreviousTab => self.tabs.cycle(false),
-            Command::ToggleExplorer => self.show_explorer = !self.show_explorer,
-            Command::ToggleInspector => self.show_inspector = !self.show_inspector,
-            Command::ToggleBottomPanel => {
-                self.show_bottom = !self.show_bottom;
-                self.pin_bottom_focus();
-            }
-            Command::ToggleTheme => {
-                let next = match design::theme() {
-                    design::Theme::Dark => design::Theme::Light,
-                    design::Theme::Light => design::Theme::Dark,
-                };
-                design::set_theme(next);
-                design::apply(ctx);
-            }
-            Command::ToggleParanoid => {
-                self.paranoid = !self.paranoid;
-                // Cached/in-flight sources were built in the other mode.
-                self.tasks.cancel_kind(TaskKind::DecompileClass);
-                self.documents.clear();
-                self.active_doc = None;
-                // The click anchors pointed into the dropped sources.
-                self.symbol_sel = None;
-                self.last_click = None;
-                self.comment_target = None;
-                if self.session.is_some()
-                    && let Some(d) = self.active_class_descriptor().map(str::to_string)
-                {
-                    self.spawn_decompile(&d, ctx);
-                }
-                let state = if self.paranoid { "on" } else { "off" };
-                self.set_status(format!("Paranoid string decoding {state}"), true);
-            }
-            Command::QuickSwitch { n } => {
-                // Ctrl+1..9 jumps to the n-th tab. The tab list is
-                // pinned-first / preview-last; `n` is 1-indexed and
-                // clamped.
-                let count = self.tabs.tabs().len();
-                if count == 0 {
-                    self.set_status("no tabs to switch to", false);
-                    return;
-                }
-                let idx = (n as usize).saturating_sub(1).min(count - 1);
-                let descriptor = self.tabs.tabs()[idx].descriptor.clone();
-                self.tabs.activate(&descriptor);
-                self.nav.push(crate::state::NavigationLocation {
-                    descriptor,
-                    line: None,
-                    origin: crate::state::NavOrigin::Tab,
-                });
-            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+
+    /// `dispatch` arm group: routing by in-document edit / clipboard.
+    fn dispatch_edit(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
             Command::BeginRenameSymbol => {
                 // Only a selection that applies to the document on
                 // screen may open the rename bar (audit F1).
@@ -1756,7 +1816,7 @@ impl AscApp {
             }
             Command::RenameSymbol { new_name } => {
                 self.show_rename = false;
-                self.apply_symbol_rename(&new_name);
+                self.apply_symbol_rename(new_name);
             }
             Command::BeginLineComment => {
                 // The anchor must belong to the document on screen:
@@ -1785,12 +1845,8 @@ impl AscApp {
                 if let Some((doc, _)) = target
                     && Some(doc.as_str()) == active.as_deref()
                 {
-                    self.apply_line_comment(line, &text);
+                    self.apply_line_comment(*line, &text);
                 }
-            }
-            Command::CancelTask => {
-                self.tasks.cancel_kind(TaskKind::FindRefs);
-                self.set_status("search cancelled", false);
             }
             Command::CopyDescriptor => {
                 let descriptor = self.active_class_descriptor().map(str::to_string);
@@ -1826,13 +1882,44 @@ impl AscApp {
                 ctx.copy_text(fqn.clone());
                 self.set_status(format!("copied FQN: {fqn}"), true);
             }
-            Command::GotoLine => {
-                // Surface the input bar. The bar lives in the editor
-                // (drawn when `goto_line_input.is_some()`); pressing
-                // Enter with a numeric value calls
-                // `apply_goto_line(line)` which sets `pending_scroll`.
-                self.goto_line_input = Some(String::new());
-                self.set_status("goto line (1-indexed):", true);
+            Command::ToggleParanoid => {
+                self.paranoid = !self.paranoid;
+                // Cached/in-flight sources were built in the other mode.
+                self.tasks.cancel_kind(TaskKind::DecompileClass);
+                self.documents.clear();
+                self.active_doc = None;
+                // The click anchors pointed into the dropped sources.
+                self.symbol_sel = None;
+                self.last_click = None;
+                self.comment_target = None;
+                if self.session.is_some()
+                    && let Some(d) = self.active_class_descriptor().map(str::to_string)
+                {
+                    self.spawn_decompile(&d, ctx);
+                }
+                let state = if self.paranoid { "on" } else { "off" };
+                self.set_status(format!("Paranoid string decoding {state}"), true);
+            }
+            other => unreachable!("misrouted {other:?}"),
+        }
+    }
+
+    /// `dispatch` arm group: routing by shell / view toggle.
+    fn dispatch_shell(&mut self, cmd: &Command, ctx: &egui::Context) {
+        match cmd {
+            Command::ToggleExplorer => self.show_explorer = !self.show_explorer,
+            Command::ToggleInspector => self.show_inspector = !self.show_inspector,
+            Command::ToggleBottomPanel => {
+                self.show_bottom = !self.show_bottom;
+                self.pin_bottom_focus();
+            }
+            Command::ToggleTheme => {
+                let next = match design::theme() {
+                    design::Theme::Dark => design::Theme::Light,
+                    design::Theme::Light => design::Theme::Dark,
+                };
+                design::set_theme(next);
+                design::apply(ctx);
             }
             Command::OpenSettings => {
                 // Toggle the settings dialog window. The dialog lists
@@ -1843,6 +1930,7 @@ impl AscApp {
                     self.set_status("settings", true);
                 }
             }
+            other => unreachable!("misrouted {other:?}"),
         }
     }
 

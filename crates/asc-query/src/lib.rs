@@ -38,6 +38,7 @@
 // No `unsafe` in this crate.
 
 mod callees;
+mod class_code;
 mod error;
 mod locator;
 mod owner;
