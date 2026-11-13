@@ -89,14 +89,7 @@ impl SearchResults {
         let mut rows = Vec::new();
         for dex in &report.results {
             for m in &dex.matches {
-                let (class, member) = split_caller(&m.caller);
-                rows.push(SearchRow {
-                    dex_name: dex.dex_name.clone(),
-                    caller_class: class,
-                    caller_member: member,
-                    matched: m.matched.clone(),
-                    code_off: m.first_line,
-                });
+                rows.push(Self::row_from_match(&dex.dex_name, m));
             }
         }
         Self {
@@ -104,6 +97,19 @@ impl SearchResults {
             rows,
             complete: report.complete,
             errors: report.errors.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
+    /// One row from a streaming match: the caller still needs its DEX
+    /// name filled in by the caller of this function.
+    pub fn row_from_match(dex_name: &str, m: &asc_core::RenderedMatch) -> SearchRow {
+        let (class, member) = split_caller(&m.caller);
+        SearchRow {
+            dex_name: dex_name.to_string(),
+            caller_class: class,
+            caller_member: member,
+            matched: m.matched.clone(),
+            code_off: m.first_line,
         }
     }
 

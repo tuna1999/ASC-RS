@@ -1065,6 +1065,204 @@ fn glyph_probe() {
     eprintln!("probe: {}", out.display());
 }
 
+/// ASC-RS-GUI-109: a running search publishes rows while it scans, and
+/// the final result replaces the live table.
+#[test]
+fn search_publishes_rows_while_it_runs() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        return;
+    };
+    app.search.input = "Context".into();
+    AscApp::run_ui(&ctx, |ui| app.dispatch(Command::RunSearch, ui.ctx()));
+    assert!(app.tasks.live.is_some(), "a streaming handle exists");
+    assert!(
+        pump_until(&mut app, &ctx, |a| a
+            .search
+            .results()
+            .is_some_and(|r| r.label.contains("live"))),
+        "partial rows reach the table"
+    );
+    assert!(pump_until(&mut app, &ctx, |a| a.tasks.live.is_none()));
+    let label = app.search.results().expect("results").label.clone();
+    assert!(!label.contains("live"), "final label wins: {label}");
+}
+
+/// ASC-RS-GUI-104: the CFG view is its own document keyed by method and
+/// survives an eviction by re-issuing the scan.
+#[test]
+fn cfg_view_is_keyed_by_method_and_reloads() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        return;
+    };
+    app.navigate_to(SMALI_LIFECYCLE_CLASS, true, None, NavOrigin::Tree, &ctx);
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .active_doc
+        .as_ref()
+        .is_some_and(|d| d.descriptor == SMALI_LIFECYCLE_CLASS)));
+    app.symbol_sel = Some(manual_method_selection(
+        SMALI_LIFECYCLE_CLASS,
+        SMALI_LIFECYCLE_CLASS,
+        "<init>",
+    ));
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .resolved_method()
+        .is_some()));
+    let key = crate::task::TaskManager::cfg_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
+    AscApp::run_ui(&ctx, |ui| app.dispatch(Command::ShowCfg, ui.ctx()));
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+    let src = app.documents.peek(&key).unwrap().source.clone();
+    assert!(src.starts_with("# control flow of "));
+    assert!(src.contains("B0:"), "blocks are listed");
+    assert!(app.tabs.active_descriptor() == Some(key.as_str()));
+    assert!(
+        crate::state::tabs::class_of_tab_key(&key) == Some(SMALI_LIFECYCLE_CLASS),
+        "the cfg key still names its class"
+    );
+    // Eviction: the doc goes, the reload must re-run the scan.
+    evict_while_background(&mut app, &ctx, &key);
+    assert!(pump_until(&mut app, &ctx, |a| a.documents.contains(&key)));
+    assert!(
+        app.documents
+            .peek(&key)
+            .unwrap()
+            .source
+            .starts_with("# control flow of ")
+    );
+}
+
+/// ASC-RS-GUI-007: the inspector shows the declared signature and the
+/// access flags of the resolved method, and swaps them when the
+/// selection moves to another method.
+#[test]
+fn inspector_shows_signature_and_flags_of_the_selection() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        return;
+    };
+    app.navigate_to(SMALI_LIFECYCLE_CLASS, true, None, NavOrigin::Tree, &ctx);
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .active_doc
+        .as_ref()
+        .is_some_and(|d| d.descriptor == SMALI_LIFECYCLE_CLASS)));
+    app.symbol_sel = Some(manual_method_selection(
+        SMALI_LIFECYCLE_CLASS,
+        SMALI_LIFECYCLE_CLASS,
+        "<init>",
+    ));
+    assert!(pump_until(&mut app, &ctx, |a| {
+        a.member_info
+            .as_ref()
+            .is_some_and(|(l, i)| l.ends_with("-><init>") && i.proto.ends_with(")V"))
+    }));
+    let (_, info) = app.member_info.clone().expect("info");
+    assert!(
+        info.flag_names
+            .iter()
+            .any(|f| *f == "public" || *f == "private"),
+        "constructor carries a visibility flag: {:?}",
+        info.flag_names
+    );
+    assert!(
+        info.flag_names.contains(&"constructor"),
+        "the constructor bit is named: {:?}",
+        info.flag_names
+    );
+    assert_eq!(info.descriptor, SMALI_LIFECYCLE_CLASS);
+    AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+    let text = app.member_info.as_ref().unwrap().1.flag_names.join(" ");
+    assert!(!text.is_empty());
+}
+
+/// ASC-RS-GUI-008: a loaded mapping resolves original names to the
+/// obfuscated ones as navigable REFERENCES rows.
+#[test]
+fn mapping_search_lists_obfuscated_targets() {
+    let dir = std::env::temp_dir().join("asc_gui_mapping");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mapping.txt");
+    std::fs::write(
+        &path,
+        "com.example.Secret -> a.b:\n    int balance -> a\ncom.example.Other -> a.c:\n",
+    )
+    .unwrap();
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.dispatch(Command::OpenMapping(path), &ctx);
+    assert!(app.mapping.is_some(), "mapping loaded");
+    assert!(app.status.as_ref().unwrap().ok, "load reported ok");
+    app.search.input = "secret".into();
+    app.dispatch(Command::SearchMapping, &ctx);
+    let results = app.references.as_ref().expect("rows");
+    assert_eq!(results.rows.len(), 2, "class + member hit");
+    assert_eq!(
+        results.rows[0].caller_class, "La/b;",
+        "navigable descriptor"
+    );
+    assert!(results.rows[0].matched[0].contains("com.example.Secret"));
+}
+
+/// An unknown name yields an empty, unsuccessful report.
+#[test]
+fn mapping_search_without_a_hit_still_reports() {
+    let dir = std::env::temp_dir().join("asc_gui_mapping");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mapping2.txt");
+    std::fs::write(&path, "com.example.Secret -> a.b:\n").unwrap();
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.dispatch(Command::OpenMapping(path), &ctx);
+    app.search.input = "nothing-here".into();
+    app.dispatch(Command::SearchMapping, &ctx);
+    assert_eq!(app.references.as_ref().unwrap().rows.len(), 0);
+    assert!(!app.status.as_ref().unwrap().ok);
+}
+
+/// ASC-RS-GUI-107: the rename sweeps every open view of the name, not
+/// just the document the selection was made in, and says how many it
+/// touched.
+#[test]
+fn rename_reaches_other_open_views() {
+    let src = "public class A {\n    void run() { int total = 0; total++; }\n}\n";
+    let caller = "public class B {\n    void call(A a) { a.run(); }\n    int total;\n}\n";
+    let mut app = empty_app();
+    let a = Arc::new(Document::new(
+        "LA;".into(),
+        "classes.dex".into(),
+        src.into(),
+    ));
+    let b = Arc::new(Document::new(
+        "LB;".into(),
+        "classes.dex".into(),
+        caller.into(),
+    ));
+    app.active_doc = Some(a.clone());
+    app.documents.put(a);
+    app.documents.put(b);
+    app.tabs.open_pinned("LA;");
+    app.tabs.open_pinned("LB;");
+    let byte = src.find("int total").unwrap() + 4;
+    assert!(app.documents.peek("LB;").unwrap().source.contains("total"));
+    app.symbol_sel = Some(crate::ui::editor::symbol_selection_for("LA;", src, byte).unwrap());
+    app.dispatch(
+        Command::RenameSymbol {
+            new_name: "sum".into(),
+        },
+        &egui::Context::default(),
+    );
+    let a_src = app.documents.peek("LA;").unwrap().source.clone();
+    let b_src = app.documents.peek("LB;").unwrap().source.clone();
+    assert!(a_src.contains("int sum = 0; sum++;"), "own view renamed");
+    assert!(b_src.contains("int sum;"), "other open view renamed");
+    assert!(!b_src.contains("total"), "no stale name elsewhere");
+    assert!(
+        app.status.as_ref().unwrap().text.contains("2 view(s)"),
+        "status states the sweep size: {:?}",
+        app.status.as_ref().map(|s| s.text.clone())
+    );
+}
+
 /// F24/F25/F26: symbol selection drives a method-scoped rename
 /// and a per-line comment; both rebuild the active document.
 #[test]
@@ -1210,7 +1408,6 @@ fn code_area_consumes_the_pending_member_line() {
     );
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
-        .wgpu()
         .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), app);
     for _ in 0..3 {
         h.step();
@@ -2475,6 +2672,52 @@ fn apply_artifact_sets_window_title() {
         app.apply_artifact(artifact);
         assert!(app.window_title.contains("workload"));
     }
+}
+
+/// A second artifact drops every per-artifact answer set: the old
+/// mapping would otherwise answer with descriptors of the previous app.
+#[test]
+fn apply_artifact_drops_mapping_and_resources() {
+    let mut app = empty_app();
+    use crate::task::LoadedArtifact;
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    let Ok(s) = crate::session::WorkspaceSession::open(&path) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    app.mapping = Some((
+        std::path::PathBuf::from("old-mapping.txt"),
+        asc_core::mapping::MappingIndex::parse("com.example.Old -> a:\n    void gone() -> b\n"),
+    ));
+    app.resources = Some(asc_core::ResourcesReport {
+        input: "old.apk".into(),
+        arsc_present: true,
+        global_strings: 1,
+        packages: Vec::new(),
+        total_matches: 0,
+        truncated: false,
+        hits: Vec::new(),
+        skipped_chunks: 0,
+        diagnostics: Vec::new(),
+        complete: true,
+    });
+    app.resources_pattern = "stale".into();
+    app.resources_id = "0x7f".into();
+    let artifact = LoadedArtifact {
+        session: s,
+        classes: Vec::new(),
+        dex_counts: Vec::new(),
+        manifest: None,
+        manifest_error: None,
+        warnings: Vec::new(),
+    };
+    app.apply_artifact(artifact);
+    assert!(app.mapping.is_none(), "old mapping must go");
+    assert!(app.resources.is_none(), "old resources report must go");
+    assert!(app.resources_pattern.is_empty());
+    assert!(app.resources_id.is_empty());
+    assert!(app.tasks.live.is_none());
 }
 
 /// `apply_artifact` closes the open-tabs picker: the artifact load
@@ -4189,5 +4432,405 @@ fn visual_shots_v020_resources() {
             .as_ref()
             .is_some_and(|r| r.arsc_present && !r.hits.is_empty()),
         "the RESOURCES tab must show table entries"
+    );
+}
+
+/// v0.22.0 shot: the bytecode table, the CFG, the call tree, the
+/// inspector's signature/flags block and the R8 mapping search, each over
+/// real engine output. Same opt-in as `visual_shots`:
+/// `ASC_GUI_SHOTS=1 cargo test -p asc-gui --lib visual_shots_v022_views`.
+#[test]
+fn visual_shots_v022_views() {
+    use egui_kittest::kittest::Queryable;
+    if std::env::var("ASC_GUI_SHOTS").is_err() {
+        eprintln!("ASC_GUI_SHOTS not set; skipping");
+        return;
+    }
+    const CLASS: &str = "Lcom/google/android/material/timepicker/ClockFaceView;";
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    if !fixture.exists() {
+        eprintln!("workload fixture missing; skipping");
+        return;
+    }
+    let _guard = render_lock();
+    let shots = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&shots).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .wgpu()
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), AscApp::new(None));
+    let ctx0 = h.ctx.clone();
+    h.state_mut().open_path(&fixture, &ctx0);
+    for _ in 0..300 {
+        h.step();
+        if h.state().session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.state().session.is_some(), "artifact loaded");
+    let shots_of = |h: &mut egui_kittest::Harness<'_, AscApp>, name: &str| {
+        h.run_steps(3);
+        let path = shots.join(name);
+        let img = h.render().expect("render");
+        img.save(&path).unwrap();
+        eprintln!("shot: {}", path.display());
+    };
+    // Bytecode table of the constructor.
+    let bkey = crate::task::TaskManager::bytecode_key(CLASS, Some("<init>"));
+    h.state_mut().queue(Command::ShowBytecode);
+    {
+        let ctx = h.ctx.clone();
+        h.state_mut().symbol_sel = Some(manual_method_selection(&bkey, CLASS, "<init>"));
+        h.state_mut()
+            .navigate_to(&bkey, false, None, NavOrigin::Tree, &ctx);
+    }
+    for _ in 0..300 {
+        h.step();
+        if h.state().documents.contains(&bkey) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.state().documents.contains(&bkey), "bytecode table loaded");
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("0000: ").next().is_some(),
+        "the table must show code units"
+    );
+    shots_of(&mut h, "11_bytecode_table.png");
+    // CFG of a branchy method.
+    let ckey = crate::task::TaskManager::cfg_key(CLASS, Some("findIntersectingTextView"));
+    {
+        let ctx = h.ctx.clone();
+        h.state_mut()
+            .navigate_to(&ckey, false, None, NavOrigin::Tree, &ctx);
+    }
+    for _ in 0..300 {
+        h.step();
+        if h.state().documents.contains(&ckey) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.state().documents.contains(&ckey), "cfg loaded");
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("(branch)").next().is_some()
+            || h.query_all_by_label_contains("-> B").next().is_some(),
+        "the CFG must show at least one edge"
+    );
+    shots_of(&mut h, "12_cfg.png");
+    // Call tree of a called method.
+    {
+        let ctx = h.ctx.clone();
+        let doc = h.state().documents.peek(&ckey).unwrap().clone();
+        h.state_mut().on_symbol_click(&doc, 0, false);
+        h.state_mut().symbol_sel = Some(manual_method_selection(&ckey, CLASS, "setRadius"));
+        h.state_mut().dispatch(Command::ShowCallTree, &ctx);
+    }
+    for _ in 0..300 {
+        h.step();
+        if h.state()
+            .references
+            .as_ref()
+            .is_some_and(|r| !r.rows.is_empty())
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("hop 1").next().is_some(),
+        "the tree must show a hop"
+    );
+    shots_of(&mut h, "13_call_tree.png");
+    // Inspector signature/flags for the same selection.
+    {
+        let ctx = h.ctx.clone();
+        h.state_mut().dispatch(
+            Command::ShowMemberInfo {
+                descriptor: CLASS.into(),
+                method: "setRadius".into(),
+            },
+            &ctx,
+        );
+    }
+    for _ in 0..300 {
+        h.step();
+        if h.state().member_info.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+    assert!(h.state().member_info.is_some(), "member info loaded");
+    assert!(
+        h.query_all_by_label_contains("flags 0x").next().is_some(),
+        "the inspector must render the flag word"
+    );
+    assert!(
+        h.query_all_by_label_contains("public").next().is_some(),
+        "and the decoded flag names"
+    );
+    shots_of(&mut h, "14_member_info.png");
+    // Mapping search.
+    let map =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots/mapping.txt");
+    std::fs::write(&map, "com.example.Real -> a:\n    void realMethod() -> b\n").unwrap();
+    {
+        let ctx = h.ctx.clone();
+        h.state_mut().dispatch(Command::OpenMapping(map), &ctx);
+        // The obfuscated name you read in the code must answer.
+        h.state_mut().search.input = "a".into();
+        h.state_mut().dispatch(Command::SearchMapping, &ctx);
+    }
+    for _ in 0..300 {
+        h.step();
+        if h.state()
+            .references
+            .as_ref()
+            .is_some_and(|r| !r.rows.is_empty())
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+    assert!(
+        h.state()
+            .references
+            .as_ref()
+            .is_some_and(|r| r.rows.iter().any(|row| row.caller_class == "La;")),
+        "an obfuscated-side query must return the class"
+    );
+    assert!(
+        h.query_all_by_label_contains("Real").next().is_some(),
+        "the mapping rows must list the original name"
+    );
+    shots_of(&mut h, "15_mapping_search.png");
+}
+
+/// ASC-RS-GUI-102/005: the bytecode table opens through the same view-key
+/// lane as Smali, keeps its method scope on reload, and never emits operands.
+#[test]
+fn bytecode_view_keeps_its_method_scope_on_reload() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let key = crate::task::TaskManager::bytecode_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.navigate_to(
+            SMALI_LIFECYCLE_CLASS,
+            false,
+            None,
+            NavOrigin::Tree,
+            ui.ctx(),
+        );
+    });
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .documents
+        .contains(SMALI_LIFECYCLE_CLASS)));
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.symbol_sel = Some(manual_method_selection(
+            SMALI_LIFECYCLE_CLASS,
+            SMALI_LIFECYCLE_CLASS,
+            "<init>",
+        ));
+        app.dispatch(Command::ShowBytecode, ui.ctx());
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the bytecode table must land"
+    );
+    let table = app.documents.get(&key).unwrap().source.clone();
+    assert!(table.contains("# raw bytecode of "), "{table}");
+    assert!(
+        table.contains(": <payload,") || table.contains("invoke"),
+        "the table is instructions, not prose:\n{table}"
+    );
+
+    evict_while_background(&mut app, &ctx, &key);
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the evicted bytecode table must be re-issued"
+    );
+    let reloaded = app.documents.get(&key).unwrap().source.clone();
+    assert!(reloaded.contains("# raw bytecode of "), "{reloaded}");
+    assert_eq!(app.tabs.active_descriptor(), Some(key.as_str()));
+}
+
+/// The bytecode view key is a view identity, not a class one.
+#[test]
+fn bytecode_view_is_class_scoped_through_the_tab_key() {
+    assert_eq!(
+        crate::state::tabs::class_of_tab_key("La/b;C;#bytecode#run"),
+        Some("La/b;C;")
+    );
+    assert_eq!(
+        crate::state::tabs::bytecode_view_of("La/b;C;#bytecode#run"),
+        Some(("La/b;C;", Some("run")))
+    );
+    assert_eq!(crate::state::tabs::smali_view_of("La/b;C;#bytecode"), None);
+}
+
+/// ASC-RS-GUI-005/102: the inspector's BYTECODE action only exists for a
+/// resolved member of the class on screen, and it dispatches the jump.
+#[test]
+fn inspector_bytecode_button_renders_and_dispatches() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    app.navigate_to(SMALI_LIFECYCLE_CLASS, false, None, NavOrigin::Tree, &ctx);
+    let key = crate::task::TaskManager::bytecode_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), app);
+    for _ in 0..30 {
+        h.step();
+        if h.state().documents.contains(SMALI_LIFECYCLE_CLASS) {
+            break;
+        }
+    }
+    assert!(h.state().documents.contains(SMALI_LIFECYCLE_CLASS));
+    assert!(
+        h.query_by_label("bytecode").is_none(),
+        "no resolved member yet, so no button"
+    );
+    h.state_mut().symbol_sel = Some(manual_method_selection(
+        SMALI_LIFECYCLE_CLASS,
+        SMALI_LIFECYCLE_CLASS,
+        "<init>",
+    ));
+    h.run_steps(2);
+    assert!(
+        h.state().resolved_method().is_some(),
+        "the selection must resolve in the frame the button renders in"
+    );
+    assert_eq!(
+        h.get_all_by_label("bytecode").count(),
+        1,
+        "exactly one node carries the label"
+    );
+    h.get_by_label("bytecode").click();
+    h.run_steps(1);
+    let mut app = h.into_state();
+    assert!(
+        app.tabs.active_descriptor() == Some(key.as_str()),
+        "the click must open the bytecode view, got {:?}",
+        app.tabs.active_descriptor()
+    );
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.documents.contains(&key)),
+        "the bytecode table must land"
+    );
+}
+
+/// ASC-RS-GUI-105: the call tree walks past the first hop and says so,
+/// tagging every row with the hop it was reached on.
+#[test]
+fn call_tree_lists_hops_beyond_the_first() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        return;
+    };
+    app.navigate_to(SMALI_LIFECYCLE_CLASS, true, None, NavOrigin::Tree, &ctx);
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .active_doc
+        .as_ref()
+        .is_some_and(|d| d.descriptor == SMALI_LIFECYCLE_CLASS)));
+    app.symbol_sel = Some(manual_method_selection(
+        SMALI_LIFECYCLE_CLASS,
+        SMALI_LIFECYCLE_CLASS,
+        "<init>",
+    ));
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .resolved_method()
+        .is_some()));
+    let before = app.tasks.in_flight_count();
+    AscApp::run_ui(&ctx, |ui| app.dispatch(Command::ShowCallTree, ui.ctx()));
+    assert!(
+        app.tasks.in_flight_count() > before,
+        "a call-tree task must start"
+    );
+    assert!(pump_until(&mut app, &ctx, |a| a.references.is_some()));
+    let results = app.references.as_ref().expect("results");
+    assert!(
+        results
+            .rows
+            .iter()
+            .any(|r| r.matched[0].starts_with("hop 2")),
+        "the tree must expand a second hop, got {:?}",
+        results.rows.first().map(|r| r.matched.clone())
+    );
+    assert!(!results.complete || results.rows.len() <= 200);
+}
+
+/// The callees and call-tree lanes share the references surface, so a
+/// live task of one verb must never be reused for the other.
+#[test]
+fn call_tree_and_callees_do_not_share_a_live_task() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        return;
+    };
+    let Some(session) = &app.session else { return };
+    let apk = session.path().to_path_buf();
+    let first = app
+        .tasks
+        .spawn_callees(&apk, SMALI_LIFECYCLE_CLASS, "<init>", &ctx);
+    let second = app
+        .tasks
+        .spawn_call_tree(&apk, SMALI_LIFECYCLE_CLASS, "<init>", &ctx);
+    assert_ne!(first, second, "a tree must not reuse the callees task");
+    assert!(pump_until(&mut app, &ctx, |a| a.references.is_some()));
+    let label = app.references.as_ref().unwrap().label.clone();
+    assert!(label.starts_with("call tree "), "got {label}");
+}
+
+/// JADX-GUI-017: Java and bytecode are two views of the same code, so the
+/// bytecode view offers the way back to the Java document.
+#[test]
+fn bytecode_view_offers_the_way_back_to_the_class() {
+    let ctx = egui::Context::default();
+    let Some(mut app) = corpus_app(&ctx) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let table_key = crate::task::TaskManager::bytecode_key(SMALI_LIFECYCLE_CLASS, Some("<init>"));
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.navigate_to(&table_key, false, None, NavOrigin::Tree, ui.ctx());
+    });
+    assert!(pump_until(&mut app, &ctx, |a| a
+        .documents
+        .contains(&table_key)));
+    assert_eq!(app.active_class_descriptor(), Some(SMALI_LIFECYCLE_CLASS));
+    // A real click in the table (no injected selection): the view is
+    // method-scoped, so any offset resolves to the scope's member.
+    let doc = app.documents.peek(&table_key).unwrap().clone();
+    crate::app::AscApp::run_ui(&ctx, |ui| {
+        app.on_symbol_click(&doc, 40, false);
+        assert!(app.symbol_sel.is_some(), "a table click yields a selection");
+        assert_eq!(
+            app.resolved_method(),
+            Some((SMALI_LIFECYCLE_CLASS.to_string(), "<init>".into()))
+        );
+        app.dispatch(Command::ShowSmaliMethod, ui.ctx());
+    });
+    assert!(
+        pump_until(&mut app, &ctx, |a| {
+            a.tabs
+                .active_descriptor()
+                .is_some_and(|k| k.contains("#smali#"))
+        }),
+        "the Java/Smali view of the same member must be reachable"
     );
 }

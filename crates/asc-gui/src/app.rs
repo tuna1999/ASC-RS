@@ -166,6 +166,14 @@ pub struct AscApp {
     /// Last "references to selected class" report (Analysis menu) —
     /// shown in the REFERENCES bottom tab.
     pub(crate) references: Option<SearchResults>,
+    /// Signature/flags of the currently resolved method (ASC-RS-GUI-007)
+    /// and the `descriptor->method` it belongs to.
+    pub(crate) member_info: Option<(String, asc_core::MemberInfo)>,
+    /// `descriptor->method` the inspector last asked about (dedupes the
+    /// automatic lookup and orders late results).
+    pub(crate) member_info_wanted: Option<String>,
+    /// Loaded R8/ProGuard mapping (ASC-RS-GUI-008) and its source path.
+    pub(crate) mapping: Option<(std::path::PathBuf, asc_core::mapping::MappingIndex)>,
     /// Last `resources.arsc` report (ASC-RS-GUI-103) — RESOURCES tab.
     pub(crate) resources: Option<asc_core::ResourcesReport>,
     /// RESOURCES tab filter: key/value substring (empty = every entry).
@@ -236,6 +244,9 @@ impl AscApp {
             window_title: "asc-gui".to_string(),
             palette_sel: 0,
             references: None,
+            mapping: None,
+            member_info: None,
+            member_info_wanted: None,
             resources: None,
             resources_pattern: String::new(),
             resources_id: String::new(),
@@ -293,7 +304,14 @@ impl AscApp {
     pub(crate) fn active_symbol_sel(&self) -> Option<&SymbolSelection> {
         let sel = self.symbol_sel.as_ref()?;
         let doc = self.active_doc.as_ref()?;
-        (sel.descriptor == doc.descriptor).then_some(sel)
+        if sel.descriptor == doc.descriptor {
+            return Some(sel);
+        }
+        // Two views of one class (Java / Smali / bytecode) share the code, so
+        // a click recorded in one stays valid in the other; a selection from
+        // a different class does not.
+        let sel_class = crate::state::tabs::class_of_tab_key(&sel.descriptor)?;
+        (crate::state::tabs::class_of_tab_key(&doc.descriptor) == Some(sel_class)).then_some(sel)
     }
 
     /// The clicked line, but only while the click belongs to the
@@ -401,6 +419,16 @@ impl AscApp {
         self.active_doc = None;
         self.pending_scroll = None;
         self.symbol_sel = None;
+        self.member_info = None;
+        self.member_info_wanted = None;
+        // Per-artifact answer sets: descriptors from the old app would
+        // navigate nowhere (mapping especially) and the old rows would
+        // read as the new app's.
+        self.mapping = None;
+        self.resources = None;
+        self.resources_pattern.clear();
+        self.resources_id.clear();
+        self.tasks.live = None;
         self.last_click = None;
         self.comment_target = None;
         // Session swap: drop find results that belonged to the old
@@ -445,6 +473,14 @@ impl AscApp {
     }
 
     /// Apply a method-scoped rename of the selected symbol (F25).
+    /// Rename the selected identifier (ASC-RS-GUI-107).
+    ///
+    /// The edit starts in the view the selection belongs to — inside
+    /// its method when the selection carries one, whole document
+    /// otherwise — and then sweeps every other cached view of the same
+    /// class name. Views are the only things that exist here: a class
+    /// that is not open keeps its old name until it is decompiled
+    /// again, which the status line states instead of hiding.
     fn apply_symbol_rename(&mut self, new_name: &str) {
         let Some(sel) = self.symbol_sel.clone() else {
             return;
@@ -456,25 +492,89 @@ impl AscApp {
         let Some(doc) = self.active_doc.clone() else {
             return;
         };
-        if doc.descriptor != sel.descriptor {
+        if doc.descriptor != sel.descriptor
+            && crate::state::tabs::class_of_tab_key(&doc.descriptor)
+                != crate::state::tabs::class_of_tab_key(&sel.descriptor)
+        {
             // The selection was captured in another document (audit F1):
             // its byte range does not belong to this source.
             self.set_status("rename: the selection belongs to another document", false);
             return;
         }
-        if let Some(src) = crate::source_edit::rename_in_range(
-            &doc.source,
-            sel.method.0,
-            sel.method.1,
+        let own = self.documents.peek(&sel.descriptor).unwrap_or(doc);
+        let Some(first) = crate::source_edit::rename_in_range(
+            &own.source,
+            sel.method.0.min(own.source.len()),
+            sel.method.1.min(own.source.len()),
             &sel.token,
             new_name,
-        ) {
-            self.replace_active_document(doc.descriptor.clone(), doc.dex_name.clone(), src);
-            self.set_status(
-                format!("renamed {} → {new_name} (in method)", sel.token),
-                true,
-            );
+        ) else {
+            self.set_status(format!("rename: '{}' not found here", sel.token), false);
+            return;
+        };
+        let mut renamed = 1usize;
+        let descriptor = own.descriptor.clone();
+        let dex_name = own.dex_name.clone();
+        self.documents
+            .put(std::sync::Arc::new(crate::state::Document::new(
+                descriptor.clone(),
+                dex_name.clone(),
+                first,
+            )));
+        // Other views of the same name (Smali tab, other class).
+        for key in self.documents.descriptors().to_vec() {
+            if key == descriptor {
+                continue;
+            }
+            let Some(other) = self.documents.peek(&key) else {
+                continue;
+            };
+            let Some(src) = crate::source_edit::rename_in_range(
+                &other.source,
+                0,
+                other.source.len(),
+                &sel.token,
+                new_name,
+            ) else {
+                continue;
+            };
+            self.documents
+                .put(std::sync::Arc::new(crate::state::Document::new(
+                    key.clone(),
+                    other.dex_name.clone(),
+                    src,
+                )));
+            renamed += 1;
         }
+        if let Some(active) = self.documents.peek(&descriptor) {
+            self.active_doc = Some(active);
+        }
+        for key in self
+            .tabs
+            .tabs()
+            .iter()
+            .map(|t| t.descriptor.clone())
+            .collect::<Vec<_>>()
+        {
+            if let Some(d) = self.documents.peek(&key) {
+                self.tabs.set_ready(&key, Some(d.dex_name.clone()));
+            }
+        }
+        self.symbol_sel = None;
+        self.find_matches.clear();
+        self.find_index = None;
+        let scope = if sel.method.1 > sel.method.0 {
+            "in method"
+        } else {
+            "across open views"
+        };
+        self.set_status(
+            format!(
+                "renamed {} → {new_name} ({scope}, {renamed} view(s))",
+                sel.token
+            ),
+            true,
+        );
     }
 
     /// Append a `// note` to a source line and rebuild (F26).
@@ -581,12 +681,14 @@ impl AscApp {
 
     /// Re-issue the engine job that produces the document for `key`
     /// (audit F2): a Smali view reloads as a *disasm* job — whole class, or
-    /// the one method it was scoped to — a class tab as a getclass job, and
-    /// any other key (a text tab) has no engine job at all.
+    /// the one method it was scoped to — a bytecode view as a *bytecode*
+    /// job, a class tab as a getclass job, and any other key (a text tab)
+    /// has no engine job at all.
     ///
     /// Every spawn is deduplicated by [`TaskManager`], so calling this
     /// while the same job is already in flight is a no-op. The view key is
-    /// decoded once, through [`crate::state::tabs::smali_view_of`].
+    /// decoded once, through [`crate::state::tabs::smali_view_of`] /
+    /// [`crate::state::tabs::bytecode_view_of`].
     pub(crate) fn reload_document(&mut self, key: &str, ctx: &egui::Context) {
         let Some(session) = self.session.as_ref() else {
             return;
@@ -596,9 +698,17 @@ impl AscApp {
             Some((class, method)) => {
                 self.tasks.spawn_disasm(&apk, class, method, ctx);
             }
-            // A view key is never a class descriptor; `spawn_decompile`
-            // rejects everything that is not exactly a class descriptor.
-            None => self.spawn_decompile(key, ctx),
+            None => match crate::state::tabs::bytecode_view_of(key) {
+                Some((class, method)) => {
+                    self.tasks.spawn_bytecode(&apk, class, method, ctx);
+                }
+                None => match crate::state::tabs::cfg_view_of(key) {
+                    Some((class, Some(method))) => {
+                        self.tasks.spawn_cfg(&apk, class, method, ctx);
+                    }
+                    _ => self.spawn_decompile(key, ctx),
+                },
+            },
         }
     }
 
@@ -762,6 +872,7 @@ impl AscApp {
     // ----------------------------------------------------------------
 
     fn poll_workers(&mut self, ctx: &egui::Context) {
+        self.sync_live_search();
         let completed = self.tasks.poll();
         let any = !completed.is_empty();
         for task in completed {
@@ -772,6 +883,37 @@ impl AscApp {
         } else if self.tasks.has_in_flight() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// Copy rows a streaming search has produced so far into the RESULTS
+    /// tab (ASC-RS-GUI-109). The final `Search` outcome replaces the
+    /// table wholesale, so partial rows never outlive their task.
+    fn sync_live_search(&mut self) {
+        // `done` (not in-flight-ness) is the stop signal: a search that is
+        // still queued behind `MAX_TASK_THREADS` has no running thread yet
+        // but must keep streaming.
+        let Some((label, rows, done)) = self.tasks.live.as_ref().map(|(_, shared)| {
+            (
+                shared.label.clone(),
+                shared.rows.lock().clone(),
+                shared.done.load(std::sync::atomic::Ordering::Acquire),
+            )
+        }) else {
+            return;
+        };
+        if done {
+            // The final outcome carries these rows; drop the handle so no
+            // stale partial copy overwrites them.
+            self.tasks.live = None;
+            return;
+        }
+        self.search.set_results(SearchResults {
+            label: format!("{label} · live ({} so far)", rows.len()),
+            rows,
+            complete: false,
+            errors: Vec::new(),
+        });
+        self.focus_bottom_tab(BottomTab::Results);
     }
 
     /// Select the bottom tab for an arriving result, unless the user has
@@ -843,9 +985,14 @@ impl AscApp {
                 self.last_error = Some(format!("getclass: {e}"));
                 self.set_status(format!("getclass failed: {e}"), false);
             }
-            (TaskKind::Disasm, TaskOutcome::Disassembled { dex_name, listing }) => {
-                // Smali listing lands as a `#smali`-keyed document in
-                // the normal cache + tab flow (JADX-GUI-018).
+            (
+                TaskKind::Disasm | TaskKind::Bytecode | TaskKind::Cfg,
+                TaskOutcome::Disassembled { dex_name, listing },
+            ) => {
+                // Smali listing / raw bytecode table lands as a
+                // `#smali`/`#bytecode`-keyed document in the normal cache +
+                // tab flow (JADX-GUI-018, ASC-RS-GUI-102).
+                let kind = task.kind;
                 let key = task.label;
                 let document = Document::new(key.clone(), dex_name.clone(), listing);
                 self.documents.put(Arc::new(document));
@@ -855,7 +1002,7 @@ impl AscApp {
                 if self.tabs.active_descriptor() == Some(key.as_str()) {
                     self.active_doc = self.documents.get(&key);
                 }
-                self.set_status(format!("disasm ready: {key}"), true);
+                self.set_status(format!("{} ready: {key}", kind.label()), true);
             }
             (TaskKind::Callees, TaskOutcome::Callees(result)) => {
                 // One-hop call fan-out, rendered as rows in the
@@ -894,6 +1041,76 @@ impl AscApp {
                     },
                     ok,
                 );
+            }
+            (TaskKind::CallTree, TaskOutcome::CallTree(result)) => {
+                // Transitive fan-out, one row per edge, capped by the
+                // engine; the hop number is part of the row so a deep
+                // result stays readable in a flat table.
+                let label = task.label.clone();
+                let rows = result
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        let member = n
+                            .to_member
+                            .split_once("->")
+                            .map_or_else(|| n.to_member.clone(), |(_, b)| b.to_string());
+                        crate::state::SearchRow {
+                            dex_name: n.to_dex.clone(),
+                            caller_class: n.to_class.clone(),
+                            caller_member: member,
+                            matched: vec![format!("hop {} · ×{}", n.depth, n.sites)],
+                            code_off: None,
+                        }
+                    })
+                    .collect();
+                let mut errors: Vec<String> = result.errors.iter().map(|e| e.to_string()).collect();
+                if result.truncated {
+                    errors.push("call tree truncated at the depth or node budget".into());
+                }
+                self.references = Some(crate::state::SearchResults {
+                    label,
+                    rows,
+                    complete: !result.truncated,
+                    errors,
+                });
+                self.reveal_bottom_tab(BottomTab::References);
+                if result.nodes.is_empty() {
+                    self.set_status(format!("call tree: no callees under {}", task.label), true);
+                } else {
+                    self.set_status(format!("call tree: {} edges", result.nodes.len()), true);
+                }
+            }
+            (TaskKind::MemberInfo, TaskOutcome::MemberInfo(info)) => {
+                if self.member_info_wanted.as_deref() == Some(task.label.as_str()) {
+                    self.member_info = Some((task.label.clone(), info));
+                }
+            }
+            (TaskKind::MemberInfo, TaskOutcome::Failed(e)) => {
+                if self.member_info_wanted.as_deref() == Some(task.label.as_str()) {
+                    // Keep the owner so the inspector can render the
+                    // failure instead of a blank panel.
+                    let owner = task
+                        .label
+                        .split_once("->")
+                        .map(|(o, _)| o.to_string())
+                        .unwrap_or_default();
+                    self.member_info = Some((
+                        task.label.clone(),
+                        asc_core::MemberInfo {
+                            descriptor: owner,
+                            name: e.clone(),
+                            proto: String::new(),
+                            flags: 0,
+                            flag_names: Vec::new(),
+                        },
+                    ));
+                }
+            }
+            (TaskKind::CallTree, TaskOutcome::Failed(e)) => {
+                self.set_status(format!("call tree failed: {e}"), false);
+                self.last_error = Some(format!("call tree: {e}"));
+                self.references = Some(SearchResults::from_error(task.label.clone(), e));
             }
             (TaskKind::Callees, TaskOutcome::Failed(e)) => {
                 self.last_error = Some(format!("callees: {e}"));
@@ -961,10 +1178,11 @@ impl AscApp {
                 self.set_status(format!("resources failed: {e}"), false);
                 self.focus_bottom_tab(BottomTab::Resources);
             }
-            (TaskKind::Disasm, TaskOutcome::Failed(e)) => {
+            (TaskKind::Disasm | TaskKind::Bytecode | TaskKind::Cfg, TaskOutcome::Failed(e)) => {
+                let kind = task.kind.label();
                 self.tabs.set_failed(&task.label, e.clone());
-                self.last_error = Some(format!("disasm: {e}"));
-                self.set_status(format!("disasm failed: {e}"), false);
+                self.last_error = Some(format!("{kind}: {e}"));
+                self.set_status(format!("{kind} failed: {e}"), false);
             }
             (TaskKind::FindRefs, TaskOutcome::Search(report)) => {
                 let results = SearchResults::from_report(task.label, &report);
@@ -1121,7 +1339,17 @@ impl AscApp {
                 let key = crate::task::TaskManager::smali_key(&descriptor, None);
                 self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
             }
-            Command::ShowSmaliMethod | Command::ShowCallees => {
+            Command::ShowMemberInfo { descriptor, method } => {
+                let Some(session) = &self.session else { return };
+                let apk = session.path().to_path_buf();
+                self.tasks
+                    .spawn_member_info(&apk, &descriptor, &method, ctx);
+            }
+            Command::ShowBytecode
+            | Command::ShowSmaliMethod
+            | Command::ShowCallees
+            | Command::ShowCallTree
+            | Command::ShowCfg => {
                 // Both act on the clicked identifier, only while it
                 // applies to the document on screen AND resolves to a
                 // method with a known declaring class (audit F2: the
@@ -1135,6 +1363,24 @@ impl AscApp {
                 };
                 let Some(session) = &self.session else { return };
                 let apk = session.path().to_path_buf();
+                if matches!(cmd, Command::ShowBytecode) {
+                    let key = crate::task::TaskManager::bytecode_key(&descriptor, Some(&method));
+                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+                    return;
+                }
+                if matches!(cmd, Command::ShowCfg) {
+                    let key = crate::task::TaskManager::cfg_key(&descriptor, Some(&method));
+                    self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+                    return;
+                }
+                if matches!(cmd, Command::ShowCallTree) {
+                    self.tasks.spawn_call_tree(&apk, &descriptor, &method, ctx);
+                    self.unpin_bottom_focus();
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::References;
+                    self.set_status(format!("call tree: {descriptor}->{method}"), true);
+                    return;
+                }
                 if matches!(cmd, Command::ShowCallees) {
                     self.tasks.spawn_callees(&apk, &descriptor, &method, ctx);
                     self.unpin_bottom_focus();
@@ -1145,6 +1391,78 @@ impl AscApp {
                 }
                 let key = crate::task::TaskManager::smali_key(&descriptor, Some(&method));
                 self.navigate_to(&key, false, None, NavOrigin::Tree, ctx);
+            }
+            Command::LoadMapping => {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("mapping.txt", &["txt", "map"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                self.dispatch(Command::OpenMapping(path), ctx);
+            }
+            Command::OpenMapping(path) => {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.set_status(format!("mapping: {e}"), false);
+                        return;
+                    }
+                };
+                let index = asc_core::mapping::MappingIndex::parse(&text);
+                if index.is_empty() {
+                    self.set_status(format!("mapping: no entries in {}", path.display()), false);
+                    return;
+                }
+                let (classes, members) = index.counts();
+                self.set_status(
+                    format!("mapping: {classes} classes / {members} members loaded"),
+                    true,
+                );
+                self.mapping = Some((path, index));
+            }
+            Command::SearchMapping => {
+                let Some((_, index)) = &self.mapping else {
+                    self.set_status("mapping: load a mapping.txt first", false);
+                    return;
+                };
+                let needle = self.search.input.trim().to_string();
+                let hits = index.lookup(&needle);
+                let rows = hits
+                    .iter()
+                    .map(|h| crate::state::SearchRow {
+                        dex_name: String::new(),
+                        caller_class: format!("L{};", h.mapped_class.replace('.', "/")),
+                        caller_member: h.mapped_member.clone(),
+                        matched: vec![if h.original_member.is_empty() {
+                            format!("{} -> {}", h.original_class, h.mapped_class)
+                        } else {
+                            format!(
+                                "{}.{} -> {}.{}",
+                                h.original_class,
+                                h.original_member,
+                                h.mapped_class,
+                                h.mapped_member
+                            )
+                        }],
+                        code_off: None,
+                    })
+                    .collect::<Vec<_>>();
+                let label = format!("mapping: {needle}");
+                let count = rows.len();
+                self.references = Some(SearchResults {
+                    label,
+                    rows,
+                    complete: true,
+                    errors: Vec::new(),
+                });
+                self.unpin_bottom_focus();
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::References;
+                self.set_status(
+                    format!("mapping: {count} entr(y/ies) for '{needle}'"),
+                    count > 0,
+                );
             }
             Command::ShowClassStrings => {
                 // Class-scoped: the class of the active tab / tree
@@ -1701,6 +2019,8 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
         TaskOutcome::Loaded(_) => "loaded",
         TaskOutcome::Disassembled { .. } => "disassembled",
         TaskOutcome::Callees(_) => "callees",
+        TaskOutcome::CallTree(_) => "call tree",
+        TaskOutcome::MemberInfo(_) => "member",
         TaskOutcome::ClassStrings(_) => "class strings",
         TaskOutcome::Resources(_) => "resources",
         TaskOutcome::Search(_) => "search",

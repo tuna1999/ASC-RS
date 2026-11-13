@@ -83,8 +83,13 @@ pub enum TaskKind {
     FindRefsClass,
     /// `run_disasm` for one class descriptor (Smali listing).
     Disasm,
+    /// `run_bytecode` for one class/method (raw offset table).
+    Bytecode,
     /// `run_callees` for one method (one-hop call fan-out).
     Callees,
+    CallTree,
+    MemberInfo,
+    Cfg,
     /// `run_class_strings` for one class (its own string constants).
     ClassStrings,
     /// `run_resources` for one `resources.arsc` query (inventory /
@@ -101,7 +106,11 @@ impl TaskKind {
             TaskKind::FindRefs => "findrefs",
             TaskKind::FindRefsClass => "references",
             TaskKind::Disasm => "disasm",
+            TaskKind::Bytecode => "bytecode",
             TaskKind::Callees => "callees",
+            TaskKind::CallTree => "call tree",
+            TaskKind::MemberInfo => "member",
+            TaskKind::Cfg => "cfg",
             TaskKind::ClassStrings => "class strings",
             TaskKind::Resources => "resources",
         }
@@ -121,7 +130,10 @@ impl TaskKind {
     pub fn uses_references_surface(self) -> bool {
         matches!(
             self,
-            TaskKind::FindRefsClass | TaskKind::Callees | TaskKind::ClassStrings
+            TaskKind::FindRefsClass
+                | TaskKind::Callees
+                | TaskKind::CallTree
+                | TaskKind::ClassStrings
         )
     }
 }
@@ -153,11 +165,16 @@ pub enum TaskOutcome {
     /// Successful APK open.
     Loaded(Box<LoadedArtifact>),
     /// Successful `run_disasm`: the Smali listing + winning DEX name.
-    Disassembled { dex_name: String, listing: String },
+    Disassembled {
+        dex_name: String,
+        listing: String,
+    },
     /// Successful `run_findrefs`.
     Search(asc_core::SearchReport),
     /// Successful `run_callees`: one-hop call fan-out of a method.
     Callees(asc_core::CalleesResult),
+    CallTree(asc_core::CallTreeResult),
+    MemberInfo(asc_core::MemberInfo),
     /// Successful `run_class_strings`: string constants of one class.
     ClassStrings(asc_core::ClassStringsResult),
     /// Successful `run_resources`: `resources.arsc` inventory + hits.
@@ -247,6 +264,8 @@ pub const MAX_TASK_THREADS: usize = 32;
 /// Owns all background tasks. Poll it once per frame from the eframe
 /// `update` callback; it never blocks.
 pub struct TaskManager {
+    /// Streaming search shared with the UI (`spawn_findrefs` only).
+    pub live: Option<(TaskId, std::sync::Arc<LiveSearch>)>,
     next_id: u64,
     generation: SessionGeneration,
     in_flight: Vec<InFlight>,
@@ -269,6 +288,7 @@ impl Default for TaskManager {
 impl TaskManager {
     pub fn new() -> Self {
         Self {
+            live: None,
             next_id: 0,
             generation: SessionGeneration::INITIAL,
             in_flight: Vec::new(),
@@ -446,12 +466,21 @@ impl TaskManager {
             }
         }
         let apk: PathBuf = apk.to_path_buf();
-        self.submit(
+        let label_text = label.into();
+        let live = std::sync::Arc::new(LiveSearch {
+            label: label_text.clone(),
+            ..LiveSearch::default()
+        });
+        let shared = std::sync::Arc::clone(&live);
+        let worker_ctx = ctx.clone();
+        let id = self.submit(
             TaskKind::FindRefs,
-            label,
-            move || run_findrefs_job(&apk, &query, paranoid),
+            label_text,
+            move || run_findrefs_job(&apk, &query, paranoid, Some(shared), &worker_ctx),
             ctx,
-        )
+        );
+        self.live = Some((id, live));
+        id
     }
 
     /// Spawn a `run_findrefs` for references to one class (Analysis menu).
@@ -477,7 +506,10 @@ impl TaskManager {
         self.submit(
             TaskKind::FindRefsClass,
             label,
-            move || run_findrefs_job(&apk, &query, false),
+            {
+                let ctx = ctx.clone();
+                move || run_findrefs_job(&apk, &query, false, None, &ctx)
+            },
             ctx,
         )
     }
@@ -515,12 +547,55 @@ impl TaskManager {
         )
     }
 
+    /// Spawn a `run_bytecode` task: the raw offset table of the class, or of
+    /// one method when `method` is set (ASC-RS-GUI-102). Same dedup and key
+    /// discipline as [`Self::spawn_disasm`].
+    pub fn spawn_bytecode(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        method: Option<&str>,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let key = Self::bytecode_key(descriptor, method);
+        if let Some(existing) = self
+            .in_flight
+            .iter()
+            .find(|t| {
+                t.kind == TaskKind::Bytecode
+                    && t.label == key
+                    && !t.discarded.load(Ordering::Acquire)
+            })
+            .map(|t| t.id)
+        {
+            return existing;
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        let method = method.map(str::to_owned);
+        self.submit(
+            TaskKind::Bytecode,
+            key,
+            move || run_bytecode_job(&apk, &target, method.as_deref()),
+            ctx,
+        )
+    }
+
     /// Document key for the smali listing of `descriptor` (optionally
     /// filtered to one method).
     pub fn smali_key(descriptor: &str, method: Option<&str>) -> String {
         match method {
             Some(m) => format!("{descriptor}#smali#{m}"),
             None => format!("{descriptor}#smali"),
+        }
+    }
+
+    /// Document key for the bytecode table of `descriptor` (optionally one
+    /// method).
+    pub fn bytecode_key(descriptor: &str, method: Option<&str>) -> String {
+        match method {
+            Some(m) => format!("{descriptor}#bytecode#{m}"),
+            None => format!("{descriptor}#bytecode"),
         }
     }
 
@@ -549,6 +624,107 @@ impl TaskManager {
             TaskKind::Callees,
             label,
             move || run_callees_job(&apk, &target, &method),
+            ctx,
+        )
+    }
+
+    /// Document key of a control-flow view.
+    pub fn cfg_key(descriptor: &str, method: Option<&str>) -> String {
+        match method {
+            Some(m) => format!("{descriptor}#cfg#{m}"),
+            None => format!("{descriptor}#cfg"),
+        }
+    }
+
+    /// Spawn a control-flow view of `descriptor->method`
+    /// (ASC-RS-GUI-104), deduped on its document key.
+    pub fn spawn_cfg(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        method: &str,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let key = Self::cfg_key(descriptor, Some(method));
+        if let Some(existing) = self
+            .in_flight
+            .iter()
+            .find(|t| {
+                t.kind == TaskKind::Cfg && t.label == key && !t.discarded.load(Ordering::Acquire)
+            })
+            .map(|t| t.id)
+        {
+            return existing;
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        let method = method.to_string();
+        self.submit(
+            TaskKind::Cfg,
+            key,
+            move || run_cfg_job(&apk, &target, &method),
+            ctx,
+        )
+    }
+
+    /// Spawn a signature/flags lookup for `descriptor->method`
+    /// (ASC-RS-GUI-007). Its own lane: it feeds the inspector, not the
+    /// references table, and an identical live request is reused.
+    pub fn spawn_member_info(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        method: &str,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let label = format!("{descriptor}->{method}");
+        if let Some(existing) = self
+            .in_flight
+            .iter()
+            .find(|t| {
+                t.kind == TaskKind::MemberInfo
+                    && t.label == label
+                    && !t.discarded.load(Ordering::Acquire)
+            })
+            .map(|t| t.id)
+        {
+            return existing;
+        }
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        let method = method.to_string();
+        self.submit(
+            TaskKind::MemberInfo,
+            label,
+            move || run_member_info_job(&apk, &target, &method),
+            ctx,
+        )
+    }
+
+    /// Spawn a transitive call tree for `descriptor->method`
+    /// (ASC-RS-GUI-105). Shares the references surface; the depth and
+    /// node budget keep the scan bounded (`CallTreeOptions` defaults).
+    /// The label carries the verb because the lane's dedup matches it
+    /// alone — a live callees run must not be reused for a tree.
+    pub fn spawn_call_tree(
+        &mut self,
+        apk: &Path,
+        descriptor: &str,
+        method: &str,
+        ctx: &egui::Context,
+    ) -> TaskId {
+        let label = format!("call tree {descriptor}->{method}");
+        if let Some(existing) = self.references_surface_live(&label) {
+            return existing;
+        }
+        self.discard_references_surface();
+        let apk: PathBuf = apk.to_path_buf();
+        let target = descriptor.to_string();
+        let method = method.to_string();
+        self.submit(
+            TaskKind::CallTree,
+            label,
+            move || run_call_tree_job(&apk, &target, &method),
             ctx,
         )
     }
@@ -899,15 +1075,60 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
 }
 
 /// Run one findrefs engine job (worker-thread body).
-fn run_findrefs_job(apk: &Path, query: &Query, paranoid: bool) -> TaskOutcome {
+/// Partial rows a streaming search has produced so far, shared with the
+/// UI thread. `done` flips when the worker stops (success or error), so
+/// the panel can stop treating the table as live.
+#[derive(Default)]
+pub struct LiveSearch {
+    /// Query label the rows belong to.
+    pub label: String,
+    pub rows: parking_lot::Mutex<Vec<crate::state::SearchRow>>,
+    pub done: std::sync::atomic::AtomicBool,
+}
+
+fn run_findrefs_job(
+    apk: &Path,
+    query: &Query,
+    paranoid: bool,
+    live: Option<std::sync::Arc<LiveSearch>>,
+    ctx: &egui::Context,
+) -> TaskOutcome {
     let opts = FindRefsOptions {
         paranoid,
         ..FindRefsOptions::default()
     };
-    match asc_core::run_findrefs(&FindRefsJob::new(apk, query.clone()), &opts) {
-        Ok(report) => TaskOutcome::Search(report),
-        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    let outcome = match &live {
+        Some(shared) => {
+            let shared = std::sync::Arc::clone(shared);
+            let ctx = ctx.clone();
+            let mut sink = |dex: &asc_core::DexResults| {
+                let rows: Vec<crate::state::SearchRow> = dex
+                    .matches
+                    .iter()
+                    .map(|m| crate::state::SearchResults::row_from_match(&dex.dex_name, m))
+                    .collect();
+                shared.rows.lock().extend(rows);
+                ctx.request_repaint();
+            };
+            match asc_core::run_findrefs_stream(
+                &FindRefsJob::new(apk, query.clone()),
+                &opts,
+                &mut sink,
+            ) {
+                Ok(report) => TaskOutcome::Search(report),
+                Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+            }
+        }
+        None => match asc_core::run_findrefs(&FindRefsJob::new(apk, query.clone()), &opts) {
+            Ok(report) => TaskOutcome::Search(report),
+            Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+        },
+    };
+    if let Some(shared) = live {
+        shared.done.store(true, Ordering::Release);
+        ctx.request_repaint();
     }
+    outcome
 }
 
 /// Run one disasm engine job (worker-thread body): smali listing of
@@ -923,10 +1144,52 @@ fn run_disasm_job(apk: &Path, descriptor: &str, method: Option<&str>) -> TaskOut
     }
 }
 
+/// Run one raw bytecode table (worker-thread body).
+fn run_bytecode_job(apk: &Path, descriptor: &str, method: Option<&str>) -> TaskOutcome {
+    let job = asc_core::DisasmJob::new(apk, descriptor, method);
+    match asc_core::run_bytecode(&job, &asc_core::DisasmOptions::default()) {
+        Ok(r) => TaskOutcome::Disassembled {
+            dex_name: r.dex_name,
+            listing: r.listing,
+        },
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
 /// Run one one-hop callee scan (worker-thread body).
 fn run_callees_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
     match asc_core::run_callees(&asc_core::CalleesJob::new(apk, descriptor, method)) {
         Ok(r) => TaskOutcome::Callees(r),
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one control-flow scan (worker-thread body).
+fn run_cfg_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
+    let job = asc_core::DisasmJob::new(apk, descriptor, Some(method));
+    match asc_core::run_cfg(&job, &asc_core::DisasmOptions::default()) {
+        Ok(r) => TaskOutcome::Disassembled {
+            dex_name: r.dex_name,
+            listing: r.listing,
+        },
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one signature/flags lookup (worker-thread body).
+fn run_member_info_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
+    let job = asc_core::MemberInfoJob::new(apk, descriptor, method);
+    match asc_core::run_member_info(&job) {
+        Ok(i) => TaskOutcome::MemberInfo(i),
+        Err(e) => TaskOutcome::Failed(core_error_string(&e)),
+    }
+}
+
+/// Run one transitive call-tree scan (worker-thread body).
+fn run_call_tree_job(apk: &Path, descriptor: &str, method: &str) -> TaskOutcome {
+    let job = asc_core::CallTreeJob::new(apk, descriptor, method);
+    match asc_core::run_call_tree(&job, &asc_core::CallTreeOptions::default()) {
+        Ok(r) => TaskOutcome::CallTree(r),
         Err(e) => TaskOutcome::Failed(core_error_string(&e)),
     }
 }

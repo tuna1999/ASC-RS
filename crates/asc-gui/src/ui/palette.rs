@@ -245,11 +245,22 @@ fn palette_commands() -> Vec<(&'static str, Command)> {
         ("Find references to selected class", Command::FindReferences),
         ("Show Smali of selected class", Command::ShowSmali),
         ("Show Smali of clicked method", Command::ShowSmaliMethod),
+        ("Show raw bytecode of clicked method", Command::ShowBytecode),
         (
             "Show callees of clicked method (one-hop)",
             Command::ShowCallees,
         ),
+        (
+            "Show control-flow graph of clicked method",
+            Command::ShowCfg,
+        ),
+        (
+            "Show call tree of clicked method (transitive)",
+            Command::ShowCallTree,
+        ),
         ("Strings used by selected class", Command::ShowClassStrings),
+        ("Load R8/ProGuard mapping…", Command::LoadMapping),
+        ("Search mapping for obfuscated name", Command::SearchMapping),
         ("Browse resources (APK only)", Command::ShowResources),
         ("Toggle bookmark (Ctrl+B)", Command::ToggleBookmark),
         ("Go to bookmark (Ctrl+Shift+B)", Command::GoToBookmark),

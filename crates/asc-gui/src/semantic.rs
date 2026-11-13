@@ -55,7 +55,7 @@ pub(crate) struct ResolvedSymbol {
 }
 
 impl ResolvedSymbol {
-    fn method(owner: Option<String>, name: String, proto: Option<String>) -> Self {
+    pub(crate) fn method(owner: Option<String>, name: String, proto: Option<String>) -> Self {
         Self {
             kind: SymbolKind::Method,
             owner,

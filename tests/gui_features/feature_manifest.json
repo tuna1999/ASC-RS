@@ -756,12 +756,12 @@
       "feature": "Document view mode: Java / Source",
       "priority": "P1",
       "weight": 5,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "asc-gui::state::documents::tests::document_view_mode_*",
-      "test_kind": "cargo_test_new",
-      "blocking_engine_change": true,
-      "reference": "JADX Show original"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::bytecode_view_offers_the_way_back_to_the_class",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "Java/Smali and bytecode are sibling views of the same member"
     },
     {
       "id": "JADX-GUI-018",
@@ -856,12 +856,12 @@
       "feature": "Inspector BYTECODE view (offset table)",
       "priority": "P2",
       "weight": 3,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "asc-gui::ui::inspector::tests::bytecode_view_*",
-      "test_kind": "cargo_test_new",
-      "blocking_engine_change": true,
-      "reference": "jadx-style"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::inspector_bytecode_button_renders_and_dispatches",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "inspector action next to the resolved member"
     },
     {
       "id": "ASC-RS-GUI-006",
@@ -880,24 +880,24 @@
       "feature": "Per-method permissions / signature inspector",
       "priority": "P2",
       "weight": 3,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "asc-gui::ui::inspector::tests::signature_panel_*",
-      "test_kind": "cargo_test_new",
-      "blocking_engine_change": true,
-      "reference": "derived"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::inspector_shows_signature_and_flags_of_the_selection",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "run_member_info: declared proto + access-flag names, looked up for the live selection"
     },
     {
       "id": "ASC-RS-GUI-008",
       "feature": "Search by R8 mapping",
       "priority": "P2",
       "weight": 3,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "asc-gui::app::tests::r8_mapping_*",
-      "test_kind": "cargo_test_new",
-      "blocking_engine_change": true,
-      "reference": "jadx mapping"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::mapping_search_lists_obfuscated_targets",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "asc_core::mapping::MappingIndex + palette lane; rows are navigable descriptors"
     },
     {
       "id": "ASC-RS-GUI-009",
@@ -928,24 +928,24 @@
       "feature": "Smali viewer (full)",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "n/a"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::evicted_smali_tab_is_reissued_and_rendered_again",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "superseded: disasm renderer + Smali tab (gui-feature-matrix.md)"
     },
     {
       "id": "ASC-RS-GUI-102",
       "feature": "Bytecode viewer (offset table)",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "n/a"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::bytecode_view_keeps_its_method_scope_on_reload",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "whole-DEX offset table via run_bytecode; `#bytecode` view lane"
     },
     {
       "id": "ASC-RS-GUI-103",
@@ -965,24 +965,24 @@
       "feature": "CFG (control-flow graph)",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "n/a"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::cfg_view_is_keyed_by_method_and_reloads",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "run_cfg via droidsaw Cfg::build: blocks, edges, try regions as a #cfg document view"
     },
     {
       "id": "ASC-RS-GUI-105",
       "feature": "Call graph (transitive)",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "n/a"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::call_tree_lists_hops_beyond_the_first",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "run_call_tree: depth 2 / 200-edge budget, hop tag per row, truncation reported"
     },
     {
       "id": "ASC-RS-GUI-106",
@@ -994,19 +994,19 @@
       "acceptance": "n/a",
       "test_kind": "blocked",
       "blocking_engine_change": true,
-      "reference": "n/a"
+      "reference": "needs a JDWP peer (device/emulator or agent JVM); no VM is reachable from this headless workspace"
     },
     {
       "id": "ASC-RS-GUI-107",
       "feature": "Rename across classes",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "n/a"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::rename_reaches_other_open_views",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "sweeps every cached view of the name; unopened classes keep the old name and the status line says how many views changed"
     },
     {
       "id": "ASC-RS-GUI-108",
@@ -1025,12 +1025,12 @@
       "feature": "Live streaming findrefs results",
       "priority": "P3",
       "weight": 1,
-      "status": "BLOCKED",
-      "applicable": false,
-      "acceptance": "n/a",
-      "test_kind": "blocked",
-      "blocking_engine_change": true,
-      "reference": "AGENTS.md §18 streaming deferred"
+      "status": "COMPLETE",
+      "applicable": true,
+      "acceptance": "asc-gui::app::tests::search_publishes_rows_while_it_runs",
+      "test_kind": "unit",
+      "blocking_engine_change": false,
+      "reference": "run_findrefs_stream: per-DEX sink into the RESULTS table while the scan runs"
     },
     {
       "id": "ASC-RS-GUI-110",

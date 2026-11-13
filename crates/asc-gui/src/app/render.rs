@@ -149,6 +149,25 @@ impl eframe::App for AscApp {
                         self.queue(Command::ShowSmaliMethod);
                     }
                     if ui
+                        .add_enabled(
+                            method_ok,
+                            egui::Button::new("Show control flow of clicked method"),
+                        )
+                        .on_disabled_hover_text(method_hint)
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowCfg);
+                    }
+                    if ui
+                        .add_enabled(method_ok, egui::Button::new("Show call tree of clicked method"))
+                        .on_disabled_hover_text(method_hint)
+                        .clicked()
+                    {
+                        ui.close();
+                        self.queue(Command::ShowCallTree);
+                    }
+                    if ui
                         .add_enabled(method_ok, egui::Button::new("Show callees of clicked method"))
                         .on_disabled_hover_text(method_hint)
                         .clicked()

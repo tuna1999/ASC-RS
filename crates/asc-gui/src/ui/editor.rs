@@ -628,6 +628,29 @@ pub(crate) fn symbol_selection_for(
             resolved,
         });
     }
+    // Bytecode table / CFG: the document is method-scoped by its key, so
+    // the block is the whole document and the owner is the key's class —
+    // a click resolves through the shared `Lcls;->name` grammar.
+    if let Some((class, Some(method))) = crate::state::tabs::bytecode_view_of(descriptor)
+        .or_else(|| crate::state::tabs::cfg_view_of(descriptor))
+    {
+        let span = (0, source.len());
+        let token =
+            crate::semantic::lexical_token_at(source, byte).unwrap_or_else(|| method.to_string());
+        let occurrences = crate::source_edit::occurrences_in_range(source, span.0, span.1, &token);
+        let resolved = Some(crate::semantic::ResolvedSymbol::method(
+            Some(class.to_string()),
+            method.to_string(),
+            None,
+        ));
+        return Some(SymbolSelection {
+            descriptor: descriptor.to_string(),
+            token,
+            method: span,
+            occurrences,
+            resolved,
+        });
+    }
     // Java (decompiled) source: existing lexical method range + semantic
     // resolution that never fabricates a declaring class.
     let (s, e) = crate::source_edit::token_at(source, byte)?;

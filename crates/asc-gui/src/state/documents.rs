@@ -285,6 +285,12 @@ impl DocumentCache {
         self.docs.contains_key(descriptor)
     }
 
+    /// Every cached descriptor, oldest first (rename sweeps visit them
+    /// all; `peek` avoids touching recency while iterating).
+    pub fn descriptors(&self) -> &[String] {
+        &self.order
+    }
+
     /// Number of cached documents.
     pub fn len(&self) -> usize {
         self.docs.len()

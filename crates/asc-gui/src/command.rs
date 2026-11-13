@@ -69,11 +69,33 @@ pub enum Command {
     /// Show the Smali listing of the clicked method only
     /// (`disasm --method`, ASC-RS-GUI-004).
     ShowSmaliMethod,
+    /// Raw bytecode table of the clicked method — offsets and code units,
+    /// no resolved operands (`run_bytecode`, ASC-RS-GUI-102/005).
+    ShowBytecode,
     /// One-hop callees of the clicked method (`run_callees`,
     ShowCallees,
+    /// Signature/flags of `descriptor`'s `method` (`run_member_info`,
+    /// ASC-RS-GUI-007) for the inspector panel.
+    ShowMemberInfo {
+        descriptor: String,
+        method: String,
+    },
+    /// Control-flow blocks of the clicked method (`run_cfg`,
+    /// ASC-RS-GUI-104) — its own document view.
+    ShowCfg,
+    /// Transitive call tree of the clicked method (`run_call_tree`,
+    /// ASC-RS-GUI-105) — REFERENCES tab, depth-capped.
+    ShowCallTree,
     /// String constants loaded by the selected class's own code
     /// (`run_class_strings`, ASC-RS-GUI-006) — REFERENCES tab.
     ShowClassStrings,
+    /// Pick a `mapping.txt` with the file dialog (ASC-RS-GUI-008).
+    LoadMapping,
+    /// Load that file (also the test entry point).
+    OpenMapping(std::path::PathBuf),
+    /// Resolve the search input through the loaded mapping into
+    /// obfuscated names — REFERENCES tab.
+    SearchMapping,
     /// Browse `resources.arsc` with the current filter inputs
     /// (`run_resources`, ASC-RS-GUI-103) — RESOURCES tab.
     ShowResources,

@@ -67,6 +67,78 @@ impl AscApp {
                 {
                     self.queue(Command::UsedByClass);
                 }
+                // ASC-RS-GUI-102/005: the offset table of the clicked
+                // method needs a resolved member, not just a class.
+                let target = self.resolved_method().filter(|(owner, _)| {
+                    crate::state::tabs::class_of_tab_key(d) == Some(owner.as_str())
+                });
+                if let Some((owner, method)) = target {
+                    let clicked = ui
+                        .button(egui::RichText::new("bytecode").small())
+                        .on_hover_text("raw code units + offsets of this method")
+                        .clicked();
+                    if clicked {
+                        self.queue(Command::ShowBytecode);
+                    }
+                    if ui
+                        .button(egui::RichText::new("cfg").small())
+                        .on_hover_text("control-flow blocks and edges of this method")
+                        .clicked()
+                    {
+                        self.queue(Command::ShowCfg);
+                    }
+                    let _ = ui.monospace(
+                        egui::RichText::new(format!("{owner}->{method}"))
+                            .small()
+                            .color(T.text_disabled),
+                    );
+                    // ASC-RS-GUI-007: signature + access flags of the
+                    // declared method. Looked up automatically for the
+                    // selection on screen; the descriptor-tagged store
+                    // keeps a late answer for an older selection out of
+                    // the panel.
+                    let wanted = format!("{owner}->{method}");
+                    if self.member_info_wanted.as_deref() != Some(wanted.as_str()) {
+                        self.member_info_wanted = Some(wanted.clone());
+                        self.member_info = None;
+                        self.queue(Command::ShowMemberInfo {
+                            descriptor: owner.clone(),
+                            method: method.clone(),
+                        });
+                    }
+                    if let Some((label, info)) = &self.member_info
+                        && *label == wanted
+                        && info.descriptor == owner
+                    {
+                        let failed = info.proto.is_empty() && info.flags == 0;
+                        if failed {
+                            let _ = ui
+                                .monospace(egui::RichText::new(&info.name).small().color(T.error));
+                        }
+                        let names = if info.flag_names.is_empty() {
+                            "package-private".to_string()
+                        } else {
+                            info.flag_names.join(" ")
+                        };
+                        let _ = ui.monospace(
+                            egui::RichText::new(format!("{names} {}", info.name))
+                                .small()
+                                .color(T.text),
+                        );
+                        if !failed {
+                            let _ = ui.monospace(
+                                egui::RichText::new(&info.proto)
+                                    .small()
+                                    .color(T.text_secondary),
+                            );
+                            let _ = ui.monospace(
+                                egui::RichText::new(format!("flags {:#06x}", info.flags))
+                                    .small()
+                                    .color(T.text_disabled),
+                            );
+                        }
+                    }
+                }
                 match st {
                     TabStatus::Loading => {
                         let _ = ui.spinner();

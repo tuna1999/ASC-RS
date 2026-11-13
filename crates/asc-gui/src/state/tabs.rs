@@ -378,7 +378,21 @@ impl TabController {
 /// (`AscApp::reload_document`) both go through it, so `#smali` is parsed
 /// exactly once.
 pub(crate) fn smali_view_of(key: &str) -> Option<(&str, Option<&str>)> {
-    let (class, suffix) = key.split_once("#smali")?;
+    listing_view_of(key, "#smali")
+}
+
+/// The bytecode-table counterpart of [`smali_view_of`] (`L…;#bytecode…`).
+pub(crate) fn bytecode_view_of(key: &str) -> Option<(&str, Option<&str>)> {
+    listing_view_of(key, "#bytecode")
+}
+
+/// The control-flow counterpart of [`smali_view_of`] (`L…;#cfg…`).
+pub(crate) fn cfg_view_of(key: &str) -> Option<(&str, Option<&str>)> {
+    listing_view_of(key, "#cfg")
+}
+
+fn listing_view_of<'a>(key: &'a str, marker: &str) -> Option<(&'a str, Option<&'a str>)> {
+    let (class, suffix) = key.split_once(marker)?;
     if !class.starts_with('L') || !class.ends_with(';') {
         return None;
     }
@@ -399,7 +413,10 @@ pub(crate) fn smali_view_of(key: &str) -> Option<(&str, Option<&str>)> {
 /// (via `AscApp::active_class_descriptor`) instead of using the raw
 /// key, or they hand the engine a synthetic string (audit F2).
 pub(crate) fn class_of_tab_key(key: &str) -> Option<&str> {
-    match smali_view_of(key) {
+    match smali_view_of(key)
+        .or_else(|| bytecode_view_of(key))
+        .or_else(|| cfg_view_of(key))
+    {
         Some((class, _)) => Some(class),
         None => (key.starts_with('L') && key.ends_with(';')).then_some(key),
     }
