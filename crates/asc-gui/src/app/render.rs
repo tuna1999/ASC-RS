@@ -248,221 +248,255 @@ impl AscApp {
     fn draw_menubar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("menubar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open artifact…  (Ctrl+O)").clicked() {
-                        ui.close();
-                        self.queue(Command::OpenArtifact);
-                    }
-                    if ui.button("Reload artifact").clicked() {
-                        ui.close();
-                        self.queue(Command::ReloadArtifact);
-                    }
-                    // Recent artifacts (JADX-GUI-007): most recent
-                    // first; click re-opens (missing paths are
-                    // reported, not fatal).
-                    let recents: Vec<std::path::PathBuf> = self.tabs.recent_artifacts().to_vec();
-                    if recents.is_empty() {
-                        ui.weak(egui::RichText::new("no recent artifacts").small());
-                    } else {
-                        for p in &recents {
-                            let name = p
-                                .file_name()
-                                .map(|f| f.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            if ui
-                                .selectable_label(false, egui::RichText::new(name).small())
-                                .on_hover_text(p.display().to_string())
-                                .clicked()
-                            {
-                                ui.close();
-                                let path = p.clone();
-                                self.queue(Command::OpenRecent { path });
-                            }
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Quit").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("Navigate", |ui| {
-                    if ui
-                        .button(egui::RichText::new("Back  (Alt+←)").monospace().size(12.5))
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::NavigateBack);
-                    }
-                    if ui
-                        .button(
-                            egui::RichText::new("Forward  (Alt+→)")
-                                .monospace()
-                                .size(12.5),
-                        )
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::NavigateForward);
-                    }
-                });
-                ui.menu_button("Search", |ui| {
-                    if ui.button("Search artifact  (Ctrl+Shift+F)").clicked() {
-                        ui.close();
-                        self.queue(Command::GlobalSearch);
-                    }
-                    if ui.button("Find in document  (Ctrl+F)").clicked() {
-                        ui.close();
-                        self.queue(Command::FindInDocument);
-                    }
-                    if ui.button("Quick open class  (Ctrl+P)").clicked() {
-                        ui.close();
-                        self.queue(Command::QuickOpen);
-                    }
-                });
-                ui.menu_button("Analysis", |ui| {
-                    let target = self
-                        .active_class_descriptor()
-                        .map(crate::ui::short_name)
-                        .unwrap_or_else(|| "—".to_string());
-                    let has_target = self.active_class_descriptor().is_some();
-                    if ui
-                        .add_enabled(
-                            has_target,
-                            egui::Button::new(format!("Find references to {target}")),
-                        )
-                        .on_disabled_hover_text("open a class first")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::FindReferences);
-                    }
-                    if ui
-                        .add_enabled(
-                            has_target,
-                            egui::Button::new(format!("Show Smali of {target}")),
-                        )
-                        .on_disabled_hover_text("open a class first")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowSmali);
-                    }
-                    let method_ok = self.resolved_method().is_some();
-                    let method_hint = self.method_action_block().unwrap_or("no method selected");
-                    if ui
-                        .add_enabled(method_ok, egui::Button::new("Show Smali of clicked method"))
-                        .on_disabled_hover_text(method_hint)
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowSmaliMethod);
-                    }
-                    if ui
-                        .add_enabled(
-                            method_ok,
-                            egui::Button::new("Show control flow of clicked method"),
-                        )
-                        .on_disabled_hover_text(method_hint)
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowCfg);
-                    }
-                    if ui
-                        .add_enabled(method_ok, egui::Button::new("Show call tree of clicked method"))
-                        .on_disabled_hover_text(method_hint)
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowCallTree);
-                    }
-                    if ui
-                        .add_enabled(method_ok, egui::Button::new("Show callees of clicked method"))
-                        .on_disabled_hover_text(method_hint)
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowCallees);
-                    }
-                    let class_ok = self.active_symbol_sel().is_some()
-                        || self.active_class_descriptor().is_some();
-                    if ui
-                        .add_enabled(class_ok, egui::Button::new("Strings used by this class"))
-                        .on_disabled_hover_text("select a class first")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowClassStrings);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.session.is_some(),
-                            egui::Button::new("Browse resources (APK only)"),
-                        )
-                        .on_disabled_hover_text("open an APK first")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ShowResources);
-                    }
-                    let sel_ok = self.active_symbol_sel().is_some();
-                    if ui
-                        .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))
-                        .on_disabled_hover_text("click an identifier in the editor first")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::BeginRenameSymbol);
-                    }
-                    let line_ok = self.clicked_line().is_some();
-                    if ui
-                        .add_enabled(line_ok, egui::Button::new("Comment line  (;)"))
-                        .on_disabled_hover_text("click a code line first")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::BeginLineComment);
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    ui.toggle_value(&mut self.show_explorer, "Explorer  (Ctrl+1)");
-                    ui.toggle_value(&mut self.show_inspector, "Inspector  (Ctrl+2)");
-                    ui.toggle_value(&mut self.show_bottom, "Bottom panel  (Ctrl+3)");
-                    ui.separator();
-                    let mut paranoid = self.paranoid;
-                    if ui
-                        .toggle_value(&mut paranoid, "Decode Paranoid strings")
-                        .on_hover_text("Show Paranoid/LSParanoid-obfuscated literals in decompiled code and match them in string searches")
-                        .clicked()
-                    {
-                        ui.close();
-                        self.queue(Command::ToggleParanoid);
-                    }
-                    ui.separator();
-                    let next = if design::theme() == design::Theme::Dark {
-                        "light"
-                    } else {
-                        "dark"
-                    };
-                    if ui.button(format!("Switch to {next} theme")).clicked() {
-                        ui.close();
-                        self.queue(Command::ToggleTheme);
-                    }
-                    if ui.button("Settings…").clicked() {
-                        ui.close();
-                        self.queue(Command::OpenSettings);
-                    }
-                });
-                ui.menu_button("Help", |ui| {
-                    ui.label("ASC Instant Workbench");
-                    ui.weak(if let Some(s) = &self.session {
-                        format!("artifact: {}", s.path().display())
-                    } else {
-                        "no artifact open".to_string()
-                    });
-                });
+                self.draw_file_menu(ui);
+                self.draw_navigate_menu(ui);
+                self.draw_search_menu(ui);
+                self.draw_analysis_menu(ui);
+                self.draw_view_menu(ui);
+                self.draw_help_menu(ui);
             });
+        });
+    }
+
+    /// The `File` menu of the menu bar.
+    fn draw_file_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("File", |ui| {
+            if ui.button("Open artifact…  (Ctrl+O)").clicked() {
+                ui.close();
+                self.queue(Command::OpenArtifact);
+            }
+            if ui.button("Reload artifact").clicked() {
+                ui.close();
+                self.queue(Command::ReloadArtifact);
+            }
+            // Recent artifacts (JADX-GUI-007): most recent
+            // first; click re-opens (missing paths are
+            // reported, not fatal).
+            let recents: Vec<std::path::PathBuf> = self.tabs.recent_artifacts().to_vec();
+            if recents.is_empty() {
+                ui.weak(egui::RichText::new("no recent artifacts").small());
+            } else {
+                for p in &recents {
+                    let name = p
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if ui
+                        .selectable_label(false, egui::RichText::new(name).small())
+                        .on_hover_text(p.display().to_string())
+                        .clicked()
+                    {
+                        ui.close();
+                        let path = p.clone();
+                        self.queue(Command::OpenRecent { path });
+                    }
+                }
+            }
+            ui.separator();
+            if ui.button("Quit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+    }
+
+    /// The `Navigate` menu of the menu bar.
+    fn draw_navigate_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Navigate", |ui| {
+            if ui
+                .button(egui::RichText::new("Back  (Alt+←)").monospace().size(12.5))
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::NavigateBack);
+            }
+            if ui
+                .button(
+                    egui::RichText::new("Forward  (Alt+→)")
+                        .monospace()
+                        .size(12.5),
+                )
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::NavigateForward);
+            }
+        });
+    }
+
+    /// The `Search` menu of the menu bar.
+    fn draw_search_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Search", |ui| {
+            if ui.button("Search artifact  (Ctrl+Shift+F)").clicked() {
+                ui.close();
+                self.queue(Command::GlobalSearch);
+            }
+            if ui.button("Find in document  (Ctrl+F)").clicked() {
+                ui.close();
+                self.queue(Command::FindInDocument);
+            }
+            if ui.button("Quick open class  (Ctrl+P)").clicked() {
+                ui.close();
+                self.queue(Command::QuickOpen);
+            }
+        });
+    }
+
+    /// The `Analysis` menu of the menu bar.
+    fn draw_analysis_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Analysis", |ui| {
+            let target = self
+                .active_class_descriptor()
+                .map(crate::ui::short_name)
+                .unwrap_or_else(|| "—".to_string());
+            let has_target = self.active_class_descriptor().is_some();
+            if ui
+                .add_enabled(
+                    has_target,
+                    egui::Button::new(format!("Find references to {target}")),
+                )
+                .on_disabled_hover_text("open a class first")
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::FindReferences);
+            }
+            if ui
+                .add_enabled(
+                    has_target,
+                    egui::Button::new(format!("Show Smali of {target}")),
+                )
+                .on_disabled_hover_text("open a class first")
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowSmali);
+            }
+            let method_ok = self.resolved_method().is_some();
+            let method_hint = self.method_action_block().unwrap_or("no method selected");
+            if ui
+                .add_enabled(method_ok, egui::Button::new("Show Smali of clicked method"))
+                .on_disabled_hover_text(method_hint)
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowSmaliMethod);
+            }
+            if ui
+                .add_enabled(
+                    method_ok,
+                    egui::Button::new("Show control flow of clicked method"),
+                )
+                .on_disabled_hover_text(method_hint)
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowCfg);
+            }
+            if ui
+                .add_enabled(
+                    method_ok,
+                    egui::Button::new("Show call tree of clicked method"),
+                )
+                .on_disabled_hover_text(method_hint)
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowCallTree);
+            }
+            if ui
+                .add_enabled(
+                    method_ok,
+                    egui::Button::new("Show callees of clicked method"),
+                )
+                .on_disabled_hover_text(method_hint)
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowCallees);
+            }
+            let class_ok =
+                self.active_symbol_sel().is_some() || self.active_class_descriptor().is_some();
+            if ui
+                .add_enabled(class_ok, egui::Button::new("Strings used by this class"))
+                .on_disabled_hover_text("select a class first")
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowClassStrings);
+            }
+            if ui
+                .add_enabled(
+                    self.session.is_some(),
+                    egui::Button::new("Browse resources (APK only)"),
+                )
+                .on_disabled_hover_text("open an APK first")
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::ShowResources);
+            }
+            let sel_ok = self.active_symbol_sel().is_some();
+            if ui
+                .add_enabled(sel_ok, egui::Button::new("Rename symbol  (n)"))
+                .on_disabled_hover_text("click an identifier in the editor first")
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::BeginRenameSymbol);
+            }
+            let line_ok = self.clicked_line().is_some();
+            if ui
+                .add_enabled(line_ok, egui::Button::new("Comment line  (;)"))
+                .on_disabled_hover_text("click a code line first")
+                .clicked()
+            {
+                ui.close();
+                self.queue(Command::BeginLineComment);
+            }
+        });
+    }
+
+    /// The `View` menu of the menu bar.
+    fn draw_view_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("View", |ui| {
+                        ui.toggle_value(&mut self.show_explorer, "Explorer  (Ctrl+1)");
+                        ui.toggle_value(&mut self.show_inspector, "Inspector  (Ctrl+2)");
+                        ui.toggle_value(&mut self.show_bottom, "Bottom panel  (Ctrl+3)");
+                        ui.separator();
+                        let mut paranoid = self.paranoid;
+                        if ui
+                            .toggle_value(&mut paranoid, "Decode Paranoid strings")
+                            .on_hover_text("Show Paranoid/LSParanoid-obfuscated literals in decompiled code and match them in string searches")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.queue(Command::ToggleParanoid);
+                        }
+                        ui.separator();
+                        let next = if design::theme() == design::Theme::Dark {
+                            "light"
+                        } else {
+                            "dark"
+                        };
+                        if ui.button(format!("Switch to {next} theme")).clicked() {
+                            ui.close();
+                            self.queue(Command::ToggleTheme);
+                        }
+                        if ui.button("Settings…").clicked() {
+                            ui.close();
+                            self.queue(Command::OpenSettings);
+                        }
+                    });
+    }
+
+    /// The `Help` menu of the menu bar.
+    fn draw_help_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Help", |ui| {
+            ui.label("ASC Instant Workbench");
+            ui.weak(if let Some(s) = &self.session {
+                format!("artifact: {}", s.path().display())
+            } else {
+                "no artifact open".to_string()
             });
         });
     }
