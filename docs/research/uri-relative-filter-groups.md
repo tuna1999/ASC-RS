@@ -287,27 +287,22 @@ It reuses `UriPartMatcher` (no new stored model, no reordering) and follows
 AOSP `matchData`/`matchGroupsToUri` against the pinned API 35 source
 (`android-15.0.0_r1`): ORDER, AND, empty-group, host dependency, sibling-path
 OR, allow/block, whole-part Exact/Prefix/Suffix, flag-off, and the §4 bounds
-(64 groups / 64 data / 256 parts / 1 MiB URI — exceeded ⇒ `Unknown`, never a
-silent truncation) are decided. The 2026-10-09 correctness audit added:
+(the layer is evaluated in full — the framework caps no group/data/matcher
+count — and only a URI over 1 MiB is `Unknown`) are decided. The 2026-10-09 correctness audit added:
 `authMatch` when there is no path matcher (and no group, flag on) instead of a
 wrong `cannot match` (T19/T25); three-valued ordered-group resolution so an
 earlier `Unknown` group that could flip a later decision yields `Unknown` and
 a deterministically-false matcher makes its group `Cannot` (F3); QUERY now
 applies the matcher's kind per split parameter (`&`, fallback `;`) and `+` is
-a literal (`Uri.getQuery()` decodes with convertPlus=false) — `Pattern` /
-`AdvancedPattern` matchers alone still return `Unknown` because their glob
-semantics are the §6.3 oracle open question (F4); host compare is
+a literal (`Uri.getQuery()` decodes with convertPlus=false); host compare is
 case-insensitive with `*`-prefix suffix wildcards, ports compare numerically,
 userinfo is stripped, and opaque/no-`://` or malformed URIs return `Unknown`
 instead of a guessed `cannot match` (F5); the `--match-uri` JSON report now
 covers activity-alias filters and tags each entry with its component kind,
 matching the text scope (F6). `assumed_flag_on` is reported on every verdict.
 5.5's CLI surface is `asc-rs manifest --match-uri <uri>` (text verdict lines
-+ additive `uri_match` JSON); the GUI inspector surface was not added. Not
-yet done: the 5.4 AOSP-oracle differential and real-APK fixtures (aapt2) — no
-Android SDK/emulator on this machine, so `pathPattern`/`pathAdvancedPattern`
-glob semantics remain `unknown` and T1–T30 are source-confirmed (not yet
-oracle-run).
++ additive `uri_match` JSON); the GUI inspector surface was not added. The 5.4 AOSP-oracle differential and the aapt2 real-AXML fixtures have since
+landed (see the v0.24.0 entry).
 
 **v0.19.2 follow-up audit (2026-10-09).** Two more source-confirmed fixes:
 **empty path ≠ null** — a hierarchical URI with no path separator (`https://
@@ -483,3 +478,39 @@ suite and the oracle differential registered in
 Nothing in this document asserts that any URI is reachable for any APK.
 The current ASC-RS behaviour remains: groups are reported as declared and
 the URI surface of a filter that declares them is **incomplete**.
+
+**v0.24.0 (F4 closed).** `pathPattern` / `pathAdvancedPattern` (and their
+QUERY/fragment kinds) are now evaluated instead of `Unknown`:
+`crates/asc-manifest/src/glob.rs` ports `android.os.PatternMatcher`
+(`matchGlobPattern`, `parseAndVerifyAdvancedPattern`, `matchChars`/`matchChar`)
+verbatim — `\` escapes, `.` = one character, `X*` repeats X, `.*` is a free
+tail, a LEADING `*` repeats nothing so it only matches the empty remainder,
+`[..]`/`[^..]`/`{n,m}` in advanced patterns, greedy matching with no
+backtracking, and a malformed advanced pattern is an `Err` at parse (`a{}` also
+errors: AOSP reads past its token array). AOSP confirms both are deterministic,
+so every layer that carried an `Unknown` only because of a glob is now decided.
+
+Three framework facts the same audit corrected, each proven by the oracle run:
+
+- **No count caps.** `IntentFilter.addUriRelativeFilterGroup` appends to an
+  `ArrayList` and `UriRelativeFilterGroup.matchGroupsToUri` walks all of them,
+  so the invented 64 groups / 64 `<data>` / 256 matchers limits were removed and
+  the layer is always evaluated in full (T28: 65 groups, the deciding one last,
+  still `matches`).
+- **Host-less and scheme-less filters leave the layer inert.** `matchData` runs
+  the whole authority block only when `mDataAuthorities != null`, and
+  paths/groups hang off that block, so a scheme-only filter matches at the
+  scheme level whatever its groups say (T8: `matches`). Previously `NoHost` /
+  `NoScheme` returned `Unknown`.
+- **Percent decoding never fails.** `Uri.Part.getDecoded()` calls
+  `UriCodec.decode(.., throwOnFailure = false)`: a truncated escape appends
+  `U+FFFD` and ends the part, a non-hex digit appends `U+FFFD` plus the byte
+  accumulated so far, the offending character is consumed, and undecodable
+  bytes become `U+FFFD`. `percent_decode` is now total (no `Option`), so the P1
+  rows are `matches` rather than `Unknown` and a matcher sees the exact
+  replacement characters.
+
+`tests/fixtures/uri_apk/cases.txt` + `tests/fixtures/uri_match_cases.json`
+carry the corrected expectations. Oracle run: 51 cases, 0 source-mismatches,
+0 oracle-mismatches, 48 `ORACLE-CONFIRMED`, 0 `ORACLE-OPEN` (the 3 remaining
+rows are flag-off and not exercisable in the frozen Robolectric build).

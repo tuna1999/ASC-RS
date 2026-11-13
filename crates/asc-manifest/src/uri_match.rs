@@ -28,16 +28,17 @@
 //! that the AOSP API 35 oracle (§6.3 / §6.4) must decide before they can
 //! be asserted. Nothing fabricates a match.
 //!
-//! Bounds (§4): a filter is capped at 64 groups, a group at 64 `<data>`
-//! elements, a `<data>` at 256 matchers, and a URI at 1 MiB decoded;
-//! exceeding a bound yields `Unknown`, never a silent truncation.
+//! Bounds (§4): a URI over 1 MiB is `Unknown`. The group/data/matcher counts
+//! are not capped anywhere in the framework, so the layer is always evaluated
+//! in full rather than truncated.
 
 use crate::{IntentFilter, PathMatchKind, UriDependency, UriPart, UriRelativeFilterGroup};
 
-const MAX_GROUPS: usize = 64;
-const MAX_DATA_PER_GROUP: usize = 64;
-const MAX_PARTS_PER_DATA: usize = 256;
 const MAX_URI_LEN: usize = 1 << 20;
+
+/// `UriCodec.INVALID_INPUT_CHARACTER`, which AOSP substitutes for a malformed
+/// percent escape instead of failing the decode.
+const REPLACEMENT: &str = "\u{fffd}";
 
 /// Three-valued URI-match verdict (§4). `Unknown` must not be read as
 /// "maybe"; it means the evaluator refuses to claim a result.
@@ -79,36 +80,47 @@ struct UriParts {
     fragment: Option<String>,
 }
 
-/// Percent-decode `s`; `None` when invalid (bad escape or not UTF-8). A
-/// literal `+` in the query is **kept** as `+` (the `+`→space rule is an
-/// oracle open question, §6.4).
-fn percent_decode(s: &str) -> Option<String> {
+/// Percent-decode `s` as `UriCodec.appendDecoded(.., throwOnFailure = false)`
+/// does, which is what `Uri.Part.getDecoded()` uses — decoding never fails:
+/// a truncated escape appends `U+FFFD` and ends the part, a non-hex digit
+/// appends `U+FFFD` followed by the byte accumulated so far and skips the
+/// offending character, and undecodable bytes become `U+FFFD`.
+fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if b == b'%' {
-            // An escape must be followed by exactly two hex digits. A '%'
-            // with no/partial room, or a non-hex pair, is malformed: fail the
-            // whole decode conservatively (AOSP `Uri.decode` throws on an
-            // incomplete/non-hex escape) rather than slicing out of bounds or
-            // silently keeping a raw '%' (which would fabricate a byte the
-            // URI did not intend). The caller maps a failed decode to
-            // `Unknown`.
-            if i + 3 > bytes.len() {
-                return None;
-            }
-            let hi = hex_val(bytes[i + 1])?;
-            let lo = hex_val(bytes[i + 2])?;
-            out.push((hi << 4) | lo);
-            i += 3;
-        } else {
+        if b != b'%' {
             out.push(b);
             i += 1;
+            continue;
         }
+        // Unexpected end of input: replacement char, then stop.
+        if i + 3 > bytes.len() {
+            out.extend_from_slice(REPLACEMENT.as_bytes());
+            break;
+        }
+        let mut acc = 0u8;
+        let mut ok = true;
+        for k in 1..=2 {
+            match hex_val(bytes[i + k]) {
+                Some(v) => acc = acc.wrapping_mul(16).wrapping_add(v),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            out.push(acc);
+        } else {
+            out.extend_from_slice(REPLACEMENT.as_bytes());
+            out.push(acc);
+        }
+        i += 3;
     }
-    String::from_utf8(out).ok()
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -120,17 +132,13 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// Decode an optional part; `None` (outer) when the part is present but
-/// cannot be decoded (bad escape / non-UTF-8), which fails the parse.
-fn dec(part: Option<&str>) -> Option<Option<String>> {
-    match part {
-        None => Some(None),
-        Some(p) => percent_decode(p).map(Some),
-    }
+/// Decode an optional part.
+fn dec(part: Option<&str>) -> Option<String> {
+    part.map(percent_decode)
 }
 
-/// Split a URI into its decoded parts. Returns `None` for a malformed or
-/// overflowing URI. Scheme/authority are not percent-decoded (hosts in
+/// Split a URI into its decoded parts. Returns `None` for an opaque/relative
+/// URI or one over the length bound. Scheme/authority are not percent-decoded (hosts in
 /// practice are ASCII; an internationalised host idna-encodes upstream).
 fn parse_uri(uri: &str) -> Option<UriParts> {
     if uri.len() > MAX_URI_LEN {
@@ -141,13 +149,13 @@ fn parse_uri(uri: &str) -> Option<UriParts> {
         Some((r, f)) => (r, Some(f)),
         None => (uri, None),
     };
-    let fragment = dec(fragment)?;
+    let fragment = dec(fragment);
     // query
     let (rest, query) = match rest.split_once('?') {
         Some((r, q)) => (r, Some(q)),
         None => (rest, None),
     };
-    let query = dec(query)?;
+    let query = dec(query);
     // A hierarchical URI with an authority must carry "://". A relative or
     // opaque URI (no "://") has no authority/path we can host-match against,
     // and this module refuses to guess → the parse fails (→ Unknown).
@@ -162,7 +170,7 @@ fn parse_uri(uri: &str) -> Option<UriParts> {
         // "https://example.com" (no path separator) → empty path "" (F1).
         None => (rest2, Some("")),
     };
-    let path = dec(path)?;
+    let path = dec(path);
     let (host, port) = split_authority(authority)?;
     Some(UriParts {
         scheme: scheme.map(str::to_string).filter(|s| !s.is_empty()),
@@ -179,7 +187,7 @@ fn parse_uri(uri: &str) -> Option<UriParts> {
 /// the last `@`, then treat only a trailing `:digits` as the port (interior
 /// colons — an IPv6 literal `[::1]` — are never a port separator). The host is
 /// percent-decoded (`getHost()`); a non-numeric/empty port is absent
-/// (`getPort()` would be `-1`). Returns `None` when the host cannot be decoded.
+/// (`getPort()` would be `-1`).
 fn split_authority(authority: &str) -> Option<(Option<String>, Option<String>)> {
     if authority.is_empty() {
         return Some((None, None));
@@ -200,7 +208,7 @@ fn split_authority(authority: &str) -> Option<(Option<String>, Option<String>)> 
     } else {
         (auth, None)
     };
-    let host = percent_decode(host_raw)?;
+    let host = percent_decode(host_raw);
     let port = port.and_then(|p| p.parse::<i32>().ok().map(|_| p.to_string()));
     Some((if host.is_empty() { None } else { Some(host) }, port))
 }
@@ -209,8 +217,9 @@ fn split_authority(authority: &str) -> Option<(Option<String>, Option<String>)> 
 /// the part is absent, so it never matches — R7/R8). For a hierarchical URL a
 /// path is never absent: no path separator ⇒ `""` (F1).
 ///
-/// Returns `Ok(true/false)` for deterministic kinds and `Err` when the kind is
-/// not oracle-confirmed yet (`Pattern`, `AdvancedPattern`).
+/// Every kind is evaluable: the plain kinds compare directly and the two glob
+/// kinds run the `PatternMatcher` ports (`crate::glob`). `Err` is reserved for
+/// an advanced pattern the platform would refuse to construct.
 fn match_part(kind: PathMatchKind, value: &str, part: Option<&str>) -> Result<bool, String> {
     let Some(p) = part else {
         // An absent part never satisfies a matcher.
@@ -220,17 +229,16 @@ fn match_part(kind: PathMatchKind, value: &str, part: Option<&str>) -> Result<bo
         PathMatchKind::Exact => Ok(p == value),
         PathMatchKind::Prefix => Ok(p.starts_with(value)),
         PathMatchKind::Suffix => Ok(p.ends_with(value)),
-        PathMatchKind::Pattern | PathMatchKind::AdvancedPattern => {
-            Err("pattern (glob/advanced) matcher not oracle-confirmed yet".to_string())
-        }
+        PathMatchKind::Pattern => Ok(crate::glob::glob_match(value, p)),
+        PathMatchKind::AdvancedPattern => crate::glob::advanced_match(value, p),
     }
 }
 
 /// R8: a QUERY matcher matches any single parameter, split on `&` (falling
 /// back to `;` only when the query has no `&` — AOSP `matchQuery`), each
 /// parameter tested with the matcher's *kind* (F4). A literal `+` is kept as
-/// `+` (AOSP `Uri.getQuery()` decodes with convertPlus=false). Returns `Err`
-/// for an unevaluable kind (Pattern / AdvancedPattern), never a guessed match.
+/// `+` (AOSP `Uri.getQuery()` decodes with convertPlus=false). An advanced
+/// pattern the platform would refuse is `Err`, never a guessed match.
 fn query_has_param(kind: PathMatchKind, value: &str, query: Option<&str>) -> Result<bool, String> {
     let Some(q) = query else {
         return Ok(false);
@@ -290,7 +298,7 @@ fn port_matches(filter_port: Option<&str>, uri_port: Option<&str>) -> bool {
 
 /// R3/R7/R8: match one `(kind, value)` matcher from a group against its URI
 /// part, as `Tri`. An absent part never matches (R7/R8); a non-oracle-confirmed
-/// kind (Pattern / AdvancedPattern) is `Unknown`.
+/// kind the platform would refuse to construct is `Unknown`.
 fn match_tri(kind: PathMatchKind, value: &str, part: Option<&str>) -> Tri {
     match match_part(kind, value, part) {
         Ok(true) => Tri::Match,
@@ -388,38 +396,6 @@ fn group_layer(groups: &[UriRelativeFilterGroup], p: &UriParts) -> (Tri, Vec<Str
     }
 }
 
-/// F2: before truncating a group layer we refuse to evaluate beyond a bound,
-/// return `Some(reason)` → the caller returns `Unknown`. The bounds are only
-/// relevant when the groups are actually consulted (flag on).
-fn group_layer_overflow(groups: &[UriRelativeFilterGroup]) -> Option<String> {
-    if groups.len() > MAX_GROUPS {
-        return Some(format!(
-            "uri-relative-filter-group count {0} exceeds the {1} limit",
-            groups.len(),
-            MAX_GROUPS
-        ));
-    }
-    for g in groups {
-        if g.data.len() > MAX_DATA_PER_GROUP {
-            return Some(format!(
-                "<data> count {0} in a group exceeds the {1} limit",
-                g.data.len(),
-                MAX_DATA_PER_GROUP
-            ));
-        }
-        for d in &g.data {
-            if d.parts.len() > MAX_PARTS_PER_DATA {
-                return Some(format!(
-                    "matcher count {0} in a <data> exceeds the {1} limit",
-                    d.parts.len(),
-                    MAX_PARTS_PER_DATA
-                ));
-            }
-        }
-    }
-    None
-}
-
 /// Evaluate the path/group layer of `filter` against `uri`.
 ///
 /// `assume_flag_on` is the assumed value of
@@ -455,18 +431,27 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
         }
     }
 
-    // R4: the authority branch must run for any path/group layer. A
-    // declared-but-unmatched host is a definite rejection; a filter with no
-    // scheme/host leaves the layer inert (other URI dimensions are out of
-    // scope → unknown).
+    // R4: AOSP `matchData` runs the whole authority block only when the
+    // filter declared an authority (`data.authorities != null`), and a
+    // declared-but-unmatched host is a definite rejection. Paths AND groups
+    // hang off that block, so a filter without a scheme or without a host
+    // leaves them inert: the match stays at the scheme level.
     match eff.dependency {
-        UriDependency::NoScheme | UriDependency::NoHost => {
+        UriDependency::NoScheme => {
             return verdict(
-                UriMatchVerdict::Unknown,
+                UriMatchVerdict::Matches,
                 on,
                 vec![
-                    "scheme/host not fully declared; host/path/group layer inert (R4)".to_string(),
+                    "no scheme declared: host/port/path/group layer is not even consulted (R4)"
+                        .to_string(),
                 ],
+            );
+        }
+        UriDependency::NoHost => {
+            return verdict(
+                UriMatchVerdict::Matches,
+                on,
+                vec!["no host declared: path/group layer is not even consulted (R4)".to_string()],
             );
         }
         UriDependency::Complete => {
@@ -511,11 +496,6 @@ pub fn evaluate_filter_uri(f: &IntentFilter, uri: &str, assume_flag_on: bool) ->
                     .to_string(),
             ],
         );
-    }
-
-    // F2: refuse to give a definite verdict on a truncated group layer.
-    if on && let Some(reason) = group_layer_overflow(&f.uri_relative_groups) {
-        return verdict(UriMatchVerdict::Unknown, on, vec![reason]);
     }
 
     // R5: sibling path matchers are ORed with the group layer.
@@ -740,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn no_host_means_group_layer_inert_unknown() {
+    fn no_host_means_group_layer_is_inert() {
         // T8: scheme but no host → Unknown (not a fabricated cannot-match).
         let mut f = base_filter(vec![], vec![]);
         f.data = vec![DataSpec {
@@ -760,7 +740,7 @@ mod tests {
         )];
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/a/b", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::Matches
         );
     }
 
@@ -809,8 +789,9 @@ mod tests {
     }
 
     #[test]
-    fn pattern_kind_is_unknown_not_claim() {
-        // T16/T17: simple-glob matchers are not oracle-confirmed → Unknown.
+    fn pattern_kind_evaluates_the_simple_glob() {
+        // T16/T17 (oracle): a simple glob is deterministic — `.*` matches,
+        // `/a/.` does not cover two characters.
         let f = base_filter(
             vec![group(
                 true,
@@ -820,7 +801,18 @@ mod tests {
         );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/a/123", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::Matches
+        );
+        let g = base_filter(
+            vec![group(
+                true,
+                vec![part(UriPart::Path, PathMatchKind::Pattern, "/a/.")],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&g, "https://example.com/ab", true).outcome,
+            UriMatchVerdict::CannotMatch
         );
     }
 
@@ -897,23 +889,19 @@ mod tests {
             evaluate_filter_uri(&f_wild, "https://notexample.com/x", true).outcome,
             UriMatchVerdict::CannotMatch
         );
-        // A decoded host with a malformed escape fails the parse → Unknown.
+        // A malformed escape decodes to U+FFFD + the partial byte (lenient,
+        // like `Uri.decode`), so the host is definitely not `example.com`.
         assert_eq!(
             evaluate_filter_uri(&f, "https://exa%mple.com/x", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::CannotMatch
         );
     }
 
     #[test]
     fn explicit_unknown_rows_always_carry_reasons() {
-        let f = base_filter(
-            vec![group(
-                true,
-                vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
-            )],
-            vec![],
-        );
-        let v = evaluate_filter_uri(&f, "https://example.com/x", true);
+        // An opaque URI (no `://`) has no authority/path to match against.
+        let f = base_filter(vec![], vec![]);
+        let v = evaluate_filter_uri(&f, "mailto:someone@example.com", true);
         assert_eq!(v.outcome, UriMatchVerdict::Unknown);
         assert!(!v.reasons.is_empty(), "unknown always explains itself");
     }
@@ -957,7 +945,7 @@ mod tests {
         );
     }
 
-    // ---- F2: bounds never silently truncate a decision ----
+    // ---- F2: no count caps anywhere in the layer ----
 
     fn groups_matching_last(how_many: usize, target_at: usize) -> Vec<UriRelativeFilterGroup> {
         (0..how_many)
@@ -976,24 +964,14 @@ mod tests {
     }
 
     #[test]
-    fn group_count_boundary_exact_cap_ok() {
-        // Exactly MAX_GROUPS groups; the last one decides → deterministic.
-        let f = base_filter(groups_matching_last(MAX_GROUPS, MAX_GROUPS - 1), vec![]);
+    fn group_count_is_not_capped() {
+        // T28 (oracle): 65 groups, the deciding one last → still evaluated.
+        let f = base_filter(groups_matching_last(65, 64), vec![]);
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/target", true).outcome,
             UriMatchVerdict::Matches
         );
-    }
-
-    #[test]
-    fn group_count_boundary_over_cap_unknown() {
-        // MAX_GROUPS + 1 groups where the deciding matcher sits past the cap →
-        // would be truncated → Must be Unknown, never a definite verdict.
-        let f = base_filter(groups_matching_last(MAX_GROUPS + 1, MAX_GROUPS), vec![]);
-        let v = evaluate_filter_uri(&f, "https://example.com/target", true);
-        assert_eq!(v.outcome, UriMatchVerdict::Unknown);
-        assert!(!v.reasons.is_empty(), "bounds-reason must explain itself");
-        // …and the overflow does not fire when the groups are ignored (flag off).
+        // Groups are ignored with the flag off → authMatch.
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/target", false).outcome,
             UriMatchVerdict::Matches
@@ -1001,55 +979,52 @@ mod tests {
     }
 
     #[test]
-    fn data_and_parts_bounds_unknown() {
-        // A group with > MAX_DATA_PER_GROUP <data> children. The in-cap 64 all
-        // match "/same"; the 65th (overflow) would veto → Unknown, not a
-        // truncated definite verdict.
-        let mut datas: Vec<_> = (0..MAX_DATA_PER_GROUP)
+    fn data_and_part_counts_are_not_capped() {
+        // A group ANDs all of its `<data>` and a `<data>` ANDs all of its
+        // matchers, at any count: 65 satisfiable datas match, one extra
+        // unsatisfiable one rejects.
+        let mut datas: Vec<_> = (0..65)
             .map(|_| RelativeDataSpec {
                 parts: vec![part(UriPart::Path, PathMatchKind::Exact, "/same")],
             })
             .collect();
+        let f = base_filter(
+            vec![UriRelativeFilterGroup {
+                allow: true,
+                data: datas.clone(),
+            }],
+            vec![],
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
+            UriMatchVerdict::Matches
+        );
         datas.push(RelativeDataSpec {
             parts: vec![part(UriPart::Path, PathMatchKind::Exact, "/different")],
         });
-        let g = UriRelativeFilterGroup {
-            allow: true,
-            data: datas,
-        };
-        let f = base_filter(vec![g], vec![]);
+        let f = base_filter(
+            vec![UriRelativeFilterGroup {
+                allow: true,
+                data: datas,
+            }],
+            vec![],
+        );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::CannotMatch
         );
 
-        // A group whose sole <data> has > MAX_PARTS_PER_DATA matchers, the
-        // decision sitting past the limit.
-        let mut parts: Vec<_> = (0..MAX_PARTS_PER_DATA)
+        // 257 matchers in one `<data>`, all satisfiable → still a match.
+        let parts: Vec<_> = (0..257)
             .map(|_| part(UriPart::Path, PathMatchKind::Exact, "/same"))
             .collect();
-        // 257th matcher would veto the in-cap match → truncating it would flip
-        // Matches→CannotMatch, so the verdict must be Unknown.
-        parts.push(part(UriPart::Path, PathMatchKind::Exact, "/different"));
-        let g = UriRelativeFilterGroup {
-            allow: true,
-            data: vec![RelativeDataSpec { parts }],
-        };
-        let f = base_filter(vec![g], vec![]);
-        assert_eq!(
-            evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
-            UriMatchVerdict::Unknown
+        let f = base_filter(
+            vec![UriRelativeFilterGroup {
+                allow: true,
+                data: vec![RelativeDataSpec { parts }],
+            }],
+            vec![],
         );
-        // Boundary N is within the cap and stays deterministic: MAX_PARTS_PER_DATA
-        // matchers that are all satisfiable together (all equal) → Matches.
-        let parts: Vec<_> = (0..MAX_PARTS_PER_DATA)
-            .map(|_| part(UriPart::Path, PathMatchKind::Exact, "/same"))
-            .collect();
-        let g = UriRelativeFilterGroup {
-            allow: true,
-            data: vec![RelativeDataSpec { parts }],
-        };
-        let f = base_filter(vec![g], vec![]);
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/same", true).outcome,
             UriMatchVerdict::Matches
@@ -1059,10 +1034,9 @@ mod tests {
     // ---- F3: three-valued logic & ordered groups ----
 
     #[test]
-    fn unknown_block_then_definite_allow_is_unknown() {
-        // Group1 matches ⇔ unknown, and is a BLOCK; Group2 definitively allows.
-        // If group1 matches it blocks (later groups not consulted); if not,
-        // group2 allows → verdict depends on the unknown → Unknown.
+    fn pattern_block_group_then_allow_is_cannot() {
+        // T26/T27 (oracle): the glob evaluates, so the first group decides.
+        // Group1 is a BLOCK that matches → later groups are not consulted.
         let f = base_filter(
             vec![
                 group(
@@ -1075,12 +1049,12 @@ mod tests {
         );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::CannotMatch
         );
     }
 
     #[test]
-    fn unknown_allow_then_definite_block_is_unknown() {
+    fn pattern_allow_group_then_block_matches() {
         let f = base_filter(
             vec![
                 group(
@@ -1093,23 +1067,22 @@ mod tests {
         );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::Matches
         );
     }
 
     #[test]
-    fn unknown_allow_group_alone_is_unknown() {
-        // Only source of a possible match is unknown-allow → Unknown.
+    fn pattern_allow_group_alone_matches() {
         let f = base_filter(
             vec![group(
                 true,
-                vec![part(UriPart::Path, PathMatchKind::Pattern, "/x")],
+                vec![part(UriPart::Path, PathMatchKind::Pattern, "/x*")],
             )],
             vec![],
         );
         assert_eq!(
-            evaluate_filter_uri(&f, "https://example.com/x", true).outcome,
-            UriMatchVerdict::Unknown
+            evaluate_filter_uri(&f, "https://example.com/xxx", true).outcome,
+            UriMatchVerdict::Matches
         );
     }
 
@@ -1131,9 +1104,9 @@ mod tests {
     }
 
     #[test]
-    fn sibling_unknown_plus_definite_block_group_is_unknown() {
-        // An unevaluable sibling path is ORed with the group layer (R5): a
-        // definitive block group cannot override it → Unknown, not CannotMatch.
+    fn sibling_pattern_plus_block_group_is_cannot() {
+        // F3 (oracle): the sibling glob `/a.*` does not cover `/blocked` and
+        // the block group does → the OR of the two layers rejects.
         let mut f = base_filter(
             vec![group(
                 false,
@@ -1147,7 +1120,7 @@ mod tests {
         });
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/blocked", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::CannotMatch
         );
     }
 
@@ -1258,7 +1231,8 @@ mod tests {
     }
 
     #[test]
-    fn query_pattern_and_advanced_pattern_are_unknown() {
+    fn query_pattern_and_advanced_pattern_evaluate() {
+        // A QUERY matcher applies its kind per parameter (F4), glob included.
         let f = base_filter(
             vec![group(
                 true,
@@ -1268,7 +1242,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_filter_uri(&f, "https://example.com/a?token=x", true).outcome,
-            UriMatchVerdict::Unknown
+            UriMatchVerdict::Matches
         );
         let f2 = base_filter(
             vec![group(
@@ -1282,8 +1256,12 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            evaluate_filter_uri(&f2, "https://example.com/a?token=1", true).outcome,
-            UriMatchVerdict::Unknown
+            evaluate_filter_uri(&f2, "https://example.com/a?token=12", true).outcome,
+            UriMatchVerdict::Matches
+        );
+        assert_eq!(
+            evaluate_filter_uri(&f2, "https://example.com/a?token=x", true).outcome,
+            UriMatchVerdict::CannotMatch
         );
     }
 
@@ -1590,8 +1568,8 @@ mod tests {
     fn truncated_escape_never_panics() {
         // P1 regression: a URI whose part ends in an incomplete escape must
         // not slice out of bounds (previous `i + 2 < len + 1 && i + 2 <= len`
-        // allowed `bytes[i+1..i+3]` to run past the end). Malformed → the
-        // parse fails → Unknown, never a panic and never a guessed match.
+        // allowed `bytes[i+1..i+3]` to run past the end). It decodes to
+        // `U+FFFD` instead, so the parse still succeeds.
         let f = base_filter(vec![], vec![]);
         for uri in [
             "https://example.com/%A",
@@ -1603,7 +1581,7 @@ mod tests {
         ] {
             assert_eq!(
                 evaluate_filter_uri(&f, uri, true).outcome,
-                UriMatchVerdict::Unknown
+                UriMatchVerdict::Matches
             );
         }
     }
@@ -1662,28 +1640,42 @@ mod tests {
     }
 
     #[test]
-    fn malformed_escapes_and_bad_utf8_are_unknown() {
-        // Non-hex escape (%GG), an escape producing invalid UTF-8 (%FF alone)
-        // and an incomplete UTF-8 sequence (%C3) all fail the decode → Unknown.
-        // They are not silently replaced or guessed into a verdict.
-        let f = base_filter(vec![], vec![]);
-        for uri in [
-            "https://example.com/%GG",
-            "https://example.com/a%GGb",
-            "https://example.com/%FF",
-            "https://example.com/%C3",
-            "https://example.com/a?token=%GG",
-            "https://example.com/a#%C3",
-        ] {
+    fn malformed_escapes_decode_to_replacement_characters() {
+        // `Uri.decode` is lenient: a non-hex digit yields `U+FFFD` followed by
+        // the byte accumulated so far, an escape that decodes to invalid UTF-8
+        // yields `U+FFFD`, and the offending character is consumed. A matcher
+        // sees exactly those characters.
+        let path = |expected: &str, uri: &str| {
+            let f = base_filter(
+                vec![group(
+                    true,
+                    vec![part(UriPart::Path, PathMatchKind::Exact, expected)],
+                )],
+                vec![],
+            );
             assert_eq!(
                 evaluate_filter_uri(&f, uri, true).outcome,
-                UriMatchVerdict::Unknown
+                UriMatchVerdict::Matches,
+                "{uri} should decode to {expected:?}"
             );
-        }
-        // A malformed escape in the authority (host) is also a failed parse.
+        };
+        // The first bad digit leaves the accumulator at 0, so a NUL byte
+        // follows the replacement character.
+        path("/\u{fffd}\u{0}", "https://example.com/%GG");
+        path("/a\u{fffd}\u{0}b", "https://example.com/a%GGb");
+        path("/\u{fffd}", "https://example.com/%A");
+        // `%3G`: the `3` is the partial byte, so `U+FFFD`+ETX.
+        path("/\u{fffd}\u{3}", "https://example.com/%3G");
+        path("/\u{fffd}", "https://example.com/%FF");
+        path("/\u{fffd}", "https://example.com/%C3");
+        // The authority decodes the same way: `%m` replaces, and the escape
+        // still consumes a second character (`p`).
+        let f = base_filter(vec![], vec![]);
+        let mut f_bad = f;
+        f_bad.data[0].host = Some("exa\u{fffd}\u{0}le.com".to_string());
         assert_eq!(
-            evaluate_filter_uri(&f, "https://exa%mple.com/a", true).outcome,
-            UriMatchVerdict::Unknown
+            evaluate_filter_uri(&f_bad, "https://exa%mple.com/a", true).outcome,
+            UriMatchVerdict::Matches
         );
     }
 
