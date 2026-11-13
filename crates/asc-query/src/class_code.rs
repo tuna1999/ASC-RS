@@ -6,12 +6,16 @@
 //! reports that as a locator failure and returns `complete = false`.
 //! `Some(vec![])` is different: the class exists but carries no code
 //! (abstract / native, or no code-bearing overload of `method`).
+//!
+//! `class` accepts a descriptor or a dotted name; it is normalized once
+//! by [`normalize_descriptor`] and compared against the raw descriptor.
 
 use std::borrow::Cow;
 
 use asc_dex::view::DexView;
 
 use crate::error::SearchError;
+use crate::locator::normalize_descriptor;
 
 /// Collect the `code_off`s of `class`'s code-bearing method overloads,
 /// or of all its code-bearing methods when `method` is `None`.
@@ -25,6 +29,7 @@ pub(crate) fn code_offs_of(
     errors: &mut Vec<SearchError>,
     complete: &mut bool,
 ) -> Option<Vec<u32>> {
+    let normalized = normalize_descriptor(class);
     for i in 0..view.class_def_count() {
         let def = match view.class_def(i) {
             Ok(def) => def,
@@ -40,7 +45,7 @@ pub(crate) fn code_offs_of(
         let Some(desc) = descriptor_of(view, def.class, errors, complete) else {
             continue;
         };
-        if desc.as_ref() != class {
+        if normalized.as_deref() != Some(desc.as_ref()) {
             continue;
         }
         // The descriptor is unique in class_defs; stop early.

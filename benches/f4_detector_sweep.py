@@ -71,14 +71,6 @@ def method_start(src: str, at: int) -> int:
     return last
 
 
-def first_read(src: str, name: str, occurrence: int, floor: int = 0) -> int | None:
-    pos = floor - 1
-    for _ in range(occurrence + 1):
-        pos = src.find(name, pos + 1)
-        if pos < 0:
-            return None
-    return pos
-
 
 def classify(src: str, name: str) -> tuple[str, int]:
     """`declaration` / `assignment` (false positive) or `read` (true positive).

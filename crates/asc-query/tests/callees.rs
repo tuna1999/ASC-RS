@@ -78,3 +78,25 @@ fn callees_of_degrades_cleanly() {
         missing.errors
     );
 }
+
+/// A source-form class name normalizes exactly like the descriptor:
+/// both `callees_of` and `strings_of_class` accept `com.foo.Bar` and
+/// `Lcom/foo/Bar;` as the same class.
+#[test]
+fn dotted_class_name_matches_descriptor() {
+    let mut bytes = Vec::new();
+    let Some(view) = common::parse_corpus_dex("workload_classes.dex", &mut bytes) else {
+        eprintln!("corpus fixture missing; skipping");
+        return;
+    };
+    let dotted = "com.google.android.material.timepicker.ClockFaceView";
+    let desc = "Lcom/google/android/material/timepicker/ClockFaceView;";
+    let by_dotted = callees_of(&view, dotted, "<init>");
+    let by_desc = callees_of(&view, desc, "<init>");
+    assert!(by_desc.complete && by_dotted.complete);
+    assert_eq!(by_dotted.callees.len(), by_desc.callees.len());
+    let strings_dotted = asc_query::strings_of_class(&view, dotted);
+    let strings_desc = asc_query::strings_of_class(&view, desc);
+    assert_eq!(strings_dotted.strings.len(), strings_desc.strings.len());
+    assert!(strings_desc.complete && strings_dotted.complete);
+}

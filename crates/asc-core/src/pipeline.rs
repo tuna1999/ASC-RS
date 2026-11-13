@@ -1388,7 +1388,7 @@ fn map_disasm_error(e: DecompileError) -> CoreError {
 pub struct CalleesJob {
     /// Path to the APK or raw `.dex`.
     pub apk: std::path::PathBuf,
-    /// Class descriptor (`Lcom/foo/Bar;`).
+    /// Class descriptor or dotted name (`Lcom/foo/Bar;` / `com.foo.Bar`).
     pub target: String,
     /// Method name (every overload is scanned).
     pub method: String,
@@ -1463,7 +1463,7 @@ pub fn run_callees(job: &CalleesJob) -> Result<CalleesResult, CoreError> {
 pub struct CallTreeJob {
     /// Path to the APK or raw `.dex`.
     pub apk: std::path::PathBuf,
-    /// Class descriptor (`Lcom/foo/Bar;`).
+    /// Class descriptor or dotted name (`Lcom/foo/Bar;` / `com.foo.Bar`).
     pub target: String,
     /// Method name (every overload is scanned).
     pub method: String,
@@ -1649,7 +1649,7 @@ fn callees_one(
 pub struct ClassStringsJob {
     /// Path to the APK or raw `.dex`.
     pub apk: std::path::PathBuf,
-    /// Class descriptor (`Lcom/foo/Bar;`).
+    /// Class descriptor or dotted name (`Lcom/foo/Bar;` / `com.foo.Bar`).
     pub target: String,
 }
 
@@ -2697,7 +2697,7 @@ pub fn run_cfg(job: &DisasmJob, opts: &DisasmOptions) -> Result<DisasmResult, Co
 pub struct MemberInfoJob {
     /// Path to the APK or raw `.dex`.
     pub apk: std::path::PathBuf,
-    /// Class descriptor (`Lcom/foo/Bar;`).
+    /// Class descriptor or dotted name (`Lcom/foo/Bar;` / `com.foo.Bar`).
     pub target: String,
     /// Method name (overloads share a name; the first declaration wins).
     pub method: String,
