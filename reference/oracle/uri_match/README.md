@@ -15,13 +15,13 @@ verified against that source, but **source-verified ≠ framework-run**. Roadmap
 / `UriRelativeFilterGroup.matchGroupsToUri` before a verdict family can be
 called `success` / closed.
 
-## Status (2026-11-13, v0.24.4 — EXECUTION VERIFIED, both flag states)
+## Status (2026-11-13, v0.25.0 — EXECUTION VERIFIED, both flag states)
 
 | | |
 |---|---|
 | Source revision | `android-15.0.0_r1` (Android 15 / API 35), flags-frozen |
 | ASC-RS side | `tests/differential/run_uri_oracle.py` + `asc-manifest/examples/eval_uri.rs` — **runnable, green vs `source_expected`** |
-| Oracle side | Gradle + Robolectric project below — **COMPILES and RUNS** against the real framework on this machine (JDK 17.0.20.1 + Gradle 8.10.2, both portable/local; the build classpath was corrected, see build.gradle) |
+| Oracle side | Gradle + Robolectric project below — **COMPILES and RUNS** against the real framework on this machine (JDK 21.0.13 + Gradle 8.10.2, both portable/local; the build classpath was corrected, see build.gradle) |
 | Framework artifact | `org.robolectric:android-all-instrumented:15-robolectric-12650502-i7` (verified present in the jar; records in `provenance.framework_artifact`) |
 | Observed flag state | read at runtime from the relocated `android.content.pm.Flags`, recorded in `provenance.flag_state_actual`; `-Duri.force.flag=off` installs a proxy override so one build delivers both states |
 | Result | 53 cases over two runs (flag on / forced off): **53 ORACLE-CONFIRMED, 0 UNVERIFIED(FLAG)**, 0 mismatches. Exit 0 each. |
@@ -32,8 +32,8 @@ python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdi
 python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_off.json
 ```
 ```
-50 ORACLE-CONFIRMED; 0 ORACLE-OPEN (asc-rs `unknown` surfaced); 3 UNVERIFIED (flag-state not exercisable in this build).
-3 ORACLE-CONFIRMED; 0 ORACLE-OPEN (asc-rs `unknown` surfaced); 50 UNVERIFIED (flag-state not exercisable in this build).
+53 cases; 0 source-mismatches; 0 oracle-mismatches; 50 ORACLE-CONFIRMED; 3 UNVERIFIED (flag-state not exercisable in this build).
+53 cases; 0 source-mismatches; 0 oracle-mismatches; 3 ORACLE-CONFIRMED; 50 flag_skipped.
 ```
 
 The android-all build freezes the aconfig flag at the AOSP default (`ON`), so
@@ -66,7 +66,8 @@ The fixture is read **straight from the repo** via `-Duri.fixtures` (set in
 
 ## Prerequisites (verified on this machine, 2026-10-12)
 
-- JDK 17+ (Temurin 17.0.20.1, installed portable and local — not a global install)
+- JDK 21 (Temurin 21.0.13, installed portable and local — not a global install;
+  the committed provenance records `java_version: 21.0.13`)
 - Gradle 8.x (Gradle 8.10.2, local)
 - Network to Maven Central / Google Maven (Robolectric resolves
   `android-all-instrumented` and the androidx.test AAR at build/test time;
@@ -91,11 +92,13 @@ classpath, relocated hidden `Flags` API — see the header comment in
    cd reference/oracle/uri_match
    URI_FLAG_MECHANISM="android-all:15-robolectric-12650502 frozen aconfig default" \
      gradle test --tests '*.UriOracle'         # writes build/oracle_verdicts.json (flag ON)
-   cp build/oracle_verdicts.json ../../tests/fixtures/oracle_verdicts_api35_flag_on.json
-   # flag OFF from the same build (same output path — copy between runs):
+   cp build/oracle_verdicts.json ../../../tests/fixtures/oracle_verdicts_api35_flag_on.json
+   # flag OFF from the same build (same output path — copy between runs).
+   # URI_FORCE_FLAG reaches the test worker through build.gradle, so a warm
+   # daemon cannot carry a stale state; --no-daemon makes it explicit.
    URI_FLAG_MECHANISM="… frozen aconfig default, forced off via Flags.FEATURE_FLAGS proxy" \
-     JAVA_TOOL_OPTIONS=-Duri.force.flag=off gradle test --tests '*.UriOracle'
-   cp build/oracle_verdicts.json ../../tests/fixtures/oracle_verdicts_api35_flag_off.json
+     URI_FORCE_FLAG=off gradle test --no-daemon --tests '*.UriOracle'
+   cp build/oracle_verdicts.json ../../../tests/fixtures/oracle_verdicts_api35_flag_off.json
    # or, if a wrapper was generated: ./gradlew test --tests '*.UriOracle'
    # Without URI_FLAG_MECHANISM the file is marked UNVERIFIED_SKIPPED and the
    # runner rejects it (a real flag mechanism must be asserted).
@@ -103,6 +106,7 @@ classpath, relocated hidden `Flags` API — see the header comment in
 3. **Diff** (ASC-RS vs source_expected AND vs the framework oracle), once per
    file — each confirms only the rows its own flag state exercised:
    ```
+   cd ../../..                                # back at the repo root
    python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_on.json
    python tests/differential/run_uri_oracle.py --oracle tests/fixtures/oracle_verdicts_api35_flag_off.json
    ```
@@ -128,7 +132,7 @@ exercised:
   `flag_on: false` (T19–T21).
 
 **The flag has no runtime API.** It is frozen at framework build time.
-`-Duri.force.flag=off` sidesteps that: the generated `Flags` class caches its
+`URI_FORCE_FLAG=off` sidesteps that: the generated `Flags` class caches its
 implementation in the private static `FEATURE_FLAGS` field (the aconfig
 custom-flags hook), so the harness swaps that field for a
 `java.lang.reflect.Proxy` over the `FeatureFlags` interface which answers
@@ -167,9 +171,9 @@ whose `status` is `UNVERIFIED_SKIPPED`, which omits `flag_state_actual`, or
 which lacks a real `framework_artifact` / `api_level_observed` is **rejected by
 the runner** — it can never produce `ORACLE-CONFIRMED`.
 
-**Both states come from one build**: pass `-Duri.force.flag=off` (e.g. through
-`JAVA_TOOL_OPTIONS`) and the harness installs the `FEATURE_FLAGS` proxy before
-reading the state, so the same fixtures produce a flag-off `oracle_verdicts.json`
+**Both states come from one build**: set `URI_FORCE_FLAG=off` (build.gradle
+turns it into the `uri.force.flag` system property) and the harness installs
+the `FEATURE_FLAGS` proxy before reading the state, so the same fixtures produce a flag-off `oracle_verdicts.json`
 with the flag-on rows in `flag_skipped`. Two android-all artifacts are only
 needed if a future flag cannot be proxied.
 

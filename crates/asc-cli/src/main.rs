@@ -2053,7 +2053,9 @@ mod tests {
         };
         let text = format_manifest_text(&m, None);
         assert!(text.contains("      group image-group"), "{text}");
-        assert!(to_json(&m).contains("\"mime_groups\": ["));
+        let json = to_json(&m);
+        assert!(json.contains("\"mime_groups\": ["), "{json}");
+        assert!(json.contains("\"image-group\""), "{json}");
     }
 
     /// Audit F3: an API 35 `<uri-relative-filter-group>` is reported raw

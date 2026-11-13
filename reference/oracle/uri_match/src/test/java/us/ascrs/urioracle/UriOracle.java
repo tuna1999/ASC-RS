@@ -174,9 +174,10 @@ public class UriOracle {
      * The build's ACTUAL frozen aconfig flag state that gates the group-aware
      * branch of `IntentFilter.matchData`. Returns null only if the generated
      * flags class cannot be read (build mismatch) — the caller must fail
-     * closed then, never assume a value. `-Duri.force.flag=off` installs the
-     * override first, so the reported value is the one the process really
-     * matches with.
+     * closed then, never assume a value. `uri.force.flag=off` (set by
+     * build.gradle from the `URI_FORCE_FLAG` env var, so it survives daemon
+     * reuse) installs the override first, so the reported value is the one the
+     * process really matches with.
      */
     static Boolean actualFlagOn() {
         if ("off".equals(System.getProperty("uri.force.flag", ""))) {

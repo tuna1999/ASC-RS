@@ -1,6 +1,6 @@
 # API 35 `<uri-relative-filter-group>` — AOSP semantics, evidence, roadmap
 
-Date: 2026-10-08 · updated 2026-10-29 · branch `master` · status:
+Date: 2026-10-08 · updated 2026-11-13 · branch `master` · status:
 **5.1–5.5 shipped in `asc-rs manifest --match-uri <uri>` (text + additive
 JSON), evaluator in `asc-manifest::uri_match`; the 5.4 AOSP-oracle
 differential is GATED in CI against the committed Robolectric run
@@ -369,19 +369,20 @@ made the oracle reproducible.
   as a hard error (exit 1) and never emits `ORACLE-CONFIRMED` from it; a
   resolved asc-rs `unknown` is `ORACLE-OPEN`, not confirmed. Output is
   `build/oracle_verdicts.json` `{verdicts, provenance}`. **Compiled and run
-  on 2026-10-12** (JDK 17.0.20.1, Gradle 8.10.2, Robolectric 4.14.1,
-  `android-all-instrumented:15-robolectric-12650502-i7`): 48 flag-on cases
+  on 2026-10-12** (JDK 21.0.13, Gradle 8.10.2, Robolectric 4.14.1,
+  `android-all-instrumented:15-robolectric-12650502-i7`): 50 flag-on cases
   exercised by the default run and 3 flag-off ones by the forced run, 0
   mismatches. The results are committed as
   `tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json` and **asserted in
   CI** (Linux leg) via `run_uri_oracle.py --oracle …`, once per file; the live
-  Gradle project (`reference/oracle/uri_match/`, gitignored) is only needed to
+  Gradle project (`reference/oracle/uri_match/`, tracked — only its `build/`
+  output is ignored) is only needed to
   regenerate them.
-- **Fixture coverage grew to 51 cases** — added the missing acceptance rows
+- **Fixture coverage grew to 53 cases** — added the missing acceptance rows
   T9, T15b, T17, T21, T22, T26, T27, T28 plus D1–D4 (scheme mismatch, host
   mismatch, wildcard apex/not-sibling boundaries, ASCII case-insensitive host)
   and P1 malformed-escape rows. All regression-green
-  (`run_uri_oracle.py`: 51 cases, 0 source-mismatches). The harness now fails
+  (`run_uri_oracle.py`: 0 source-mismatches). The harness now fails
   on duplicate/missing/unexpected case ids and labels rows
   `REGRESSION-OK(UNVERIFIED)` / `REGRESSION-OK(UNSUPPORTED)` /
   `NOT_RUN` — skipped oracle rows are never counted as verified passes. The
@@ -392,7 +393,7 @@ made the oracle reproducible.
   `tests/fixtures/uri_apk/build.py` (built with aapt2 2.20-16666295 against the
   API 35 `android.jar`), and `asc-manifest`'s
   `aapt2_uri_group_fixtures_match_expected` drives the evaluator off the real
-  AXML decode instead of the JSON model — 51 rows, all equal to
+  AXML decode instead of the JSON model — every row equal to
   `source_expected`. No build host is needed in CI because the APK is committed;
   only regenerating it needs `AAPT2` + `ANDROID_JAR`. Two generator facts:
   aapt2 collapses `\\` to a single backslash in attribute values (so the
@@ -527,16 +528,19 @@ Three framework facts the same audit corrected, each proven by the oracle run:
   type, so this is a non-claim against manifests consumed with a type.
 
 - **`<group android:name>` (mime group) is reported, never applied.**
-  `IntentFilter.parseIntentFilter` reads the element (`GROUP_STR`, `IF.java:177`,
-  parse at `:2695`) and stores it, but `mMimeGroups` is consulted only through
+  `IntentFilter.readFromXml` reads the element (`GROUP_STR`, `IntentFilter.java:177`,
+  group arm at `:2692-2695`) and stores it, but `mMimeGroups` is consulted only through
   `wildcardWithMimegroups` (`IF.java:1743`), i.e. only for the wildcard
   `matchData` variant, which asc-rs does not model; for the plain
   `matchData(type, scheme, uri)` call the oracle makes the names change
   nothing. asc-rs keeps the names in `IntentFilter::mime_groups` and prints
   a `group <name>` line, so a filter using them is not reported as if the
-  element were absent. No aapt2 build accepts the element yet — a fixture
-  case that declares `mime_groups` makes `tests/fixtures/uri_apk/build.py`
-  fail loudly rather than drop it. A `<data android:mimeGroup="...">` is a
+  element were absent. No aapt2 build accepts the element (sibling, inside
+  `<data>`, wrapping its `<data>` children, `<mimeGroup>`, unqualified and
+  `android:`-qualified names all fail with `unexpected element <group>`), so
+  a fixture case that declares `mime_groups` makes
+  `tests/fixtures/uri_apk/build.py` fail loudly rather than drop it. A
+  `<data android:mimeGroup="...">` is a
   different, unused thing (there is no `MIME_GROUP_STR` attribute in
   `IntentFilter`): it behaves exactly like a `<data>` without one, so it
   contributes no scheme, host or path, and — with no `mimeType` of its own —
@@ -544,8 +548,8 @@ Three framework facts the same audit corrected, each proven by the oracle run:
 
 `tests/fixtures/uri_apk/cases.txt` + `tests/fixtures/uri_match_cases.json`
 carry the corrected expectations. Oracle run: 53 cases, 0 source-mismatches,
-0 oracle-mismatches, 50 `ORACLE-CONFIRMED`, 0 `ORACLE-OPEN` (the 3 remaining
-rows are flag-off and not exercisable in the frozen Robolectric build). The two
+0 oracle-mismatches, 50 `ORACLE-CONFIRMED`, 0 `ORACLE-OPEN` — the 3
+flag-off rows are exercised by the forced run, not skipped. The two
 `mimeType` rows (T29/T30) were the last source-only claims; they are oracle
 verdicts now, and the harness had to learn `mime_type` first
 (`UriOracle.buildFilter` calls `addDataType`).

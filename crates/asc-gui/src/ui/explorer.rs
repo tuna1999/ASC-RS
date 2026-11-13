@@ -68,15 +68,19 @@ impl AscApp {
                 // Cached in the tree; copied out so the click loop can
                 // mutate `self`.
                 let hits: Vec<usize> = self.tree.filter(&filter).to_vec();
+                // ponytail: the flat list renders at most 500 rows; the
+                // count says so instead of lying about a 10⁴-row filter.
+                const MAX_FLAT: usize = 500;
                 if hits.is_empty() {
                     ui.weak(format!("no classes matching “{filter}”"));
                 } else {
-                    ui.label(
-                        egui::RichText::new(format!("{} match(es)", hits.len()))
-                            .small()
-                            .color(T.text_disabled),
-                    );
-                    for leaf in hits.into_iter().take(500) {
+                    let count = if hits.len() > MAX_FLAT {
+                        format!("first {MAX_FLAT} of {} match(es)", hits.len())
+                    } else {
+                        format!("{} match(es)", hits.len())
+                    };
+                    ui.label(egui::RichText::new(count).small().color(T.text_disabled));
+                    for leaf in hits.into_iter().take(MAX_FLAT) {
                         let desc = self.tree.entry(leaf).descriptor.clone();
                         let kind = self.tree.entry(leaf).kind;
                         let label = super::short_name(&desc);

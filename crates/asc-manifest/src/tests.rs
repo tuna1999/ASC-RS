@@ -2283,6 +2283,23 @@ fn group_children_are_preserved_as_mime_group_names() {
     assert_eq!(f.effective_data.schemes, ["https"]);
 }
 
+/// A group-only filter fabricates no type/dependency state: the names never
+/// enter `mime_types`, so neither the R11 gate nor the implicit
+/// `content:`/`file:` schemes may start claiming them.
+#[test]
+fn group_only_filter_declares_no_mime_type() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let f = single_filter_elems(vec![elem(
+        "group",
+        vec![attr(Some(ANDROID_NS), "name", Val::Str("image-group"))],
+        vec![],
+    )]);
+    assert_eq!(f.mime_groups, ["image-group"]);
+    assert!(f.effective_data.mime_types.is_empty());
+    assert!(f.effective_data.implicit_schemes().is_empty());
+    assert!(!f.effective_data.has_uri());
+}
+
 /// Audit F2: a `<data>` child of a `<uri-relative-filter-group>` must only
 /// honour **Android** (or unqualified) matcher attributes. A foreign
 /// namespace — `tools:path`, a custom namespace whose local name collides

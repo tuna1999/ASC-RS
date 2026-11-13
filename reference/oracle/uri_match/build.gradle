@@ -108,6 +108,10 @@ test {
     // See README "Flag handling" — a value of UNKNOWN makes UriOracle fail
     // closed (status UNVERIFIED_SKIPPED) and the runner rejects the file.
     systemProperty 'uri.flag.mechanism', System.getenv('URI_FLAG_MECHANISM') ?: 'UNKNOWN'
+    // Force the frozen aconfig flag off for this run (proxy override in
+    // UriOracle). Client env travels through the build model, so it also
+    // bites on a warm daemon — a bare -D on the gradle CLI would not.
+    systemProperty 'uri.force.flag', System.getenv('URI_FORCE_FLAG') ?: ''
     testLogging { events 'passed', 'failed' }
     // Robolectric loads a ~200 MB android-all-instrumented jar into the
     // in-process sandbox; give the test worker enough heap.

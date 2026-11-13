@@ -40,7 +40,7 @@ verified passes, and ORACLE-CONFIRMED is never emitted without a proven run.
 Flag handling / why this is strict: the group-aware branch of AOSP
 `IntentFilter.matchData` is gated by the aconfig flag
 `Flags.relativeReferenceIntentFilters()`, frozen per build; a run with
-`-Duri.force.flag=off` proxies it so one build delivers both states, one
+`URI_FORCE_FLAG=off` proxies it so one build delivers both states, one
 oracle file each (`tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json`).
 `UriOracle` reads the build's ACTUAL flag state after installing any override and only
 emits a verdict for a case whose required `flag_on` equals that state; every

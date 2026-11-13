@@ -1,5 +1,5 @@
-//! Bottom panel: Search Results | References | Problems | Tasks. The
-//! result set stays visible while browsing code (redesign §9).
+//! Bottom panel: Search Results | References | Resources | Problems | Tasks.
+//! The result set stays visible while browsing code (redesign §9).
 
 use eframe::egui;
 

@@ -158,27 +158,27 @@ Current state after the oracle run (2026-10-12):
 - the deterministic rows (order, AND, empty-group, host dependency, sibling
   OR, allow/block, authMatch, whole-part Exact/Prefix/Suffix, QUERY `&`/`;`,
   `+`-literal, case-insensitive/`*`-wildcard host, numeric port, userinfo,
-  malformed percent-escape → `unknown`, bounds → Unknown) are
-  verified-by-source **and** oracle-confirmed (36 ORACLE-CONFIRMED, 0
-  mismatches);
-- `Pattern` / `AdvancedPattern` glob rows are answered by the oracle but
-  ASC-RS still returns `unknown` for them — surfaced as ORACLE-OPEN (§6.3),
-  never counted as confirmed;
-- the 3 flag-off rows are UNVERIFIED(FLAG): the aconfig flag is frozen at
-  framework build time, so a second android-all build is needed;
+  malformed percent-escape, bounds) are verified-by-source **and**
+  oracle-confirmed (53 ORACLE-CONFIRMED over both flag states, 0 mismatches);
+- `Pattern` / `AdvancedPattern` glob rows are evaluated (port of
+  `android.os.PatternMatcher`) and oracle-confirmed — no ORACLE-OPEN row is
+  left;
+- the 3 flag-off rows are confirmed by a forced run that swaps the frozen
+  aconfig impl for a proxy (`URI_FORCE_FLAG=off`), so one android-all build
+  covers both flag states;
 - aapt2-built real-APK fixtures: **done 2026-11-12** —
-  `tests/fixtures/uri_apk/uri_groups.apk` (51 activities, one per row,
+  `tests/fixtures/uri_apk/uri_groups.apk` (one activity per row,
   aapt2 2.20-16666295 against the API 35 `android.jar`, table in
   `cases.txt`, generator `build.py`) with the unit test
   `asc-manifest aapt2_uri_group_fixtures_match_expected` feeding
-  `evaluate_filter_uri` from the real AXML decode; all 51 rows equal
+  `evaluate_filter_uri` from the real AXML decode; every row equals
   `source_expected`. It proves parser+evaluator on aapt2 bytes, not Android
   equivalence — that stays the Robolectric rows above.
 
 The source-derived regression runs here and is green:
 `python tests/differential/run_uri_oracle.py` drives
 `asc-manifest/examples/eval_uri.rs` over `tests/fixtures/uri_match_cases.json`
-(51 fixtures: T1–T28 rows present as expressible + C1/C2 + F1–F5 + D1–D4
+(T1–T30 rows present as expressible + C1/C2 + F1–F5 + D1–D4
 scheme/host/wildcard/ASCII-case + P1 malformed-escape rows) and returns 0 iff
 every verdict equals `source_expected` and no case id is missing/duplicated.
 The Android side is a standalone Gradle + Robolectric project in
@@ -195,9 +195,10 @@ diffs it; ASC-RS `unknown` rows surfaced against the oracle are `ORACLE-OPEN`
 real findings, never "the oracle also says unknown". The Gradle project
 **compiled and ran** on 2026-10-12 (JDK 17.0.20.1, Gradle 8.10.2, Robolectric
 4.14.1, `android-all-instrumented:15-robolectric-12650502-i7`) and produced
-51 rows: 36 ORACLE-CONFIRMED, 12 ORACLE-OPEN, 3 UNVERIFIED(FLAG). That output
-is committed as `tests/fixtures/oracle_verdicts_api35_flag_on.json` and
-**asserted in CI** (Linux leg, `--oracle <fixture>`) — a verdict regression
+53 rows: 50 ORACLE-CONFIRMED in the flag-on pass, 3 in the forced flag-off
+pass, 0 ORACLE-OPEN, 0 UNVERIFIED(FLAG). Both outputs are committed
+(`tests/fixtures/oracle_verdicts_api35_flag_{on,off}.json`) and **asserted in
+CI** (Linux leg, `--oracle <fixture>` per flag state) — a verdict regression
 fails the build without an Android SDK on the runner, and regenerating the
 file is the only part that needs JDK + Gradle. The runner **rejects** (exit 1)
 any oracle file whose provenance is missing/invalid or reports
@@ -205,8 +206,7 @@ any oracle file whose provenance is missing/invalid or reports
 prove it exercised in the right flag state. Record the Android API level,
 source revision (`android-15.0.0_r1`), flag state and mechanism, and a
 pass/fail table here
-before closing roadmap 5.6. Known gap: the aconfig flag
-`FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` is frozen at framework build time and
-is not runtime-toggleable from Robolectric — both flag states need two
-framework builds (or an emulator where the flag can be switched) to be
-exercised.
+before closing roadmap 5.6. Known limit: the aconfig flag `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS` has no
+public runtime API, so the flag-off pass replaces its frozen implementation
+(`Flags.FEATURE_FLAGS`) with a `java.lang.reflect.Proxy`; a flag that cannot be
+proxied that way would need a second framework build.
