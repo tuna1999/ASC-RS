@@ -519,7 +519,18 @@ Three framework facts the same audit corrected, each proven by the oracle run:
   even when scheme, host and path all match. The evaluator takes no intent
   type, so this is a non-claim against manifests consumed with a type.
 
+- **`<mime-group>` / `android:mimeGroup` are not read.** `mMimeGroups` is
+  consulted only through `wildcardWithMimegroups` (`IntentFilter.java:1743`),
+  i.e. only for the wildcard `matchData` variant, which asc-rs does not model;
+  for the plain `matchData(type, scheme, uri)` call the oracle makes, the group
+  names change nothing. A `<data android:mimeGroup="...">` therefore behaves
+  exactly like a `<data>` without one: it contributes no scheme, host or path,
+  and — with no `mimeType` of its own — no type either.
+
 `tests/fixtures/uri_apk/cases.txt` + `tests/fixtures/uri_match_cases.json`
-carry the corrected expectations. Oracle run: 51 cases, 0 source-mismatches,
-0 oracle-mismatches, 48 `ORACLE-CONFIRMED`, 0 `ORACLE-OPEN` (the 3 remaining
-rows are flag-off and not exercisable in the frozen Robolectric build).
+carry the corrected expectations. Oracle run: 53 cases, 0 source-mismatches,
+0 oracle-mismatches, 50 `ORACLE-CONFIRMED`, 0 `ORACLE-OPEN` (the 3 remaining
+rows are flag-off and not exercisable in the frozen Robolectric build). The two
+`mimeType` rows (T29/T30) were the last source-only claims; they are oracle
+verdicts now, and the harness had to learn `mime_type` first
+(`UriOracle.buildFilter` calls `addDataType`).

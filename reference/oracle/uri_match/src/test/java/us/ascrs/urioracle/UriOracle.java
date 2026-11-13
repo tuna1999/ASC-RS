@@ -113,6 +113,7 @@ public class UriOracle {
             if (d.has("path_pattern")) addPath(flt, d.getString("path_pattern"), PatternMatcher.PATTERN_SIMPLE_GLOB);
             if (d.has("path_advanced_pattern")) addPath(flt, d.getString("path_advanced_pattern"), PatternMatcher.PATTERN_ADVANCED_GLOB);
             if (d.has("path_suffix")) addPath(flt, d.getString("path_suffix"), PatternMatcher.PATTERN_SUFFIX);
+            if (d.has("mime_type")) flt.addDataType(d.getString("mime_type"));
         }
         JSONArray groups = f.optJSONArray("groups");
         if (groups != null) {

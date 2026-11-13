@@ -12,7 +12,7 @@ Needs aapt2 + an API 35 android.jar (neither ships with the repo):
   python tests/fixtures/uri_apk/build.py
 
 Regenerate and commit the APK only when uri_match_cases.json changes. Rebuilds
-are byte-identical with the pinned aapt2 (md5 11d3cb909cb096d72ad3a6beb9bed78b).
+are byte-identical with the pinned aapt2 (build 16666295, md5 701c72b77837cd8acecc87aa4433cdfc).
 """
 
 import json
@@ -33,7 +33,7 @@ OUT_TABLE = HERE / "cases.txt"
 BUILD_DIR = HERE.parents[2] / "target" / "uri_apk_build"
 
 DATA_ATTR = {"scheme": "scheme", "host": "host", "port": "port", "path": "path",
-             "path_prefix": "pathPrefix", "path_pattern": "pathPattern",
+             "mime_type": "mimeType", "path_prefix": "pathPrefix", "path_pattern": "pathPattern",
              "path_advanced_pattern": "pathAdvancedPattern"}
 PART_ATTR = {"path": "path", "fragment": "fragment", "query": "query"}
 KIND_SUFFIX = {"exact": "", "prefix": "Prefix", "suffix": "Suffix",

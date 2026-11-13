@@ -95,7 +95,7 @@ fn build_filter(f: &serde_json::Value) -> IntentFilter {
                 path_pattern: s(d.get("path_pattern")),
                 path_advanced_pattern: s(d.get("path_advanced_pattern")),
                 path_suffix: s(d.get("path_suffix")),
-                mime_type: None,
+                mime_type: s(d.get("mime_type")),
             });
         }
     }

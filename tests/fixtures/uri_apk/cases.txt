@@ -49,3 +49,5 @@ D3_wildcard_host_not_sibling	https://notexample.com/x	1	cannot_match
 D4_host_ascii_case	https://example.com/x	1	matches
 P1_truncated_escape_path	https://example.com/%A	1	matches
 P1_bad_hex_query	https://example.com/a?token=%GG	1	matches
+T29_mime_type_with_uri_match	https://example.com/share	1	cannot_match
+T30_mime_type_only_content	content://example.com/x	1	cannot_match

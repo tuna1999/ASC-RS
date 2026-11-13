@@ -47,7 +47,9 @@
     "D3_wildcard_host_not_sibling": "cannot_match",
     "D4_host_ascii_case": "matches",
     "P1_truncated_escape_path": "matches",
-    "P1_bad_hex_query": "matches"
+    "P1_bad_hex_query": "matches",
+    "T29_mime_type_with_uri_match": "cannot_match",
+    "T30_mime_type_only_content": "cannot_match"
   },
   "provenance": {
     "framework": "android-15.0.0_r1",
@@ -60,17 +62,17 @@
       "T21_flag_off_block_inert"
     ],
     "flag_mechanism": "android-all:15-robolectric-12650502 frozen aconfig default",
-    "exercised_flag_on": 48,
+    "exercised_flag_on": 50,
     "exercised_flag_off": 0,
     "flag_skipped_count": 3,
     "framework_artifact": "org.robolectric:android-all-instrumented:15-robolectric-12650502-i7",
     "api_level_observed": 35,
     "robolectric": "4.14.1",
-    "java_version": "17.0.20.1",
-    "java_home": "E:\\oracle-tools\\jdk17",
+    "java_version": "21.0.13",
+    "java_home": "E:\\Dev\\ASC-RS\\target\\jdkd\\jdk-21.0.13+9",
     "os_name": "Windows 11",
     "os_arch": "amd64",
-    "fixtures": "E:\\Dev\\ASC-RS\\tests\\fixtures\\uri_match_cases.json",
-    "output": "E:\\Dev\\ASC-RS\\reference\\oracle\\uri_match\\build\\oracle_verdicts.json"
+    "fixtures": "E:\\Dev\\ASC-RS\\target\\ab\\tests\\fixtures\\uri_match_cases.json",
+    "output": "E:\\Dev\\ASC-RS\\target\\ab\\reference\\oracle\\uri_match\\build\\oracle_verdicts.json"
   }
 }
