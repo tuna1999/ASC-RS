@@ -2241,6 +2241,48 @@ fn uri_relative_filter_group_is_preserved_not_evaluated() {
     assert_eq!(f.effective_data.paths[0].value, "/direct");
 }
 
+/// `<group android:name>` children (mime groups) are preserved as names
+/// instead of being dropped, and never leak into the filter's `<data>` set —
+/// `matchData` reads them only through the `wildcardSupported` overload.
+#[test]
+fn group_children_are_preserved_as_mime_group_names() {
+    use axml::{ANDROID_NS, Val, attr, elem};
+    let f = single_filter_elems(vec![
+        elem(
+            "data",
+            vec![
+                attr(Some(ANDROID_NS), "scheme", Val::Str("https")),
+                attr(Some(ANDROID_NS), "host", Val::Str("example.com")),
+            ],
+            vec![],
+        ),
+        elem(
+            "group",
+            vec![attr(Some(ANDROID_NS), "name", Val::Str("image-group"))],
+            vec![],
+        ),
+        elem(
+            "group",
+            vec![
+                attr(Some(ANDROID_NS), "name", Val::Str("image-group")),
+                attr(
+                    Some("http://example.com/custom"),
+                    "name",
+                    Val::Str("ignored"),
+                ),
+            ],
+            vec![],
+        ),
+    ]);
+    assert_eq!(
+        f.mime_groups,
+        ["image-group"],
+        "deduped, foreign ns ignored"
+    );
+    assert_eq!(f.data.len(), 1, "groups are not <data>");
+    assert_eq!(f.effective_data.schemes, ["https"]);
+}
+
 /// Audit F2: a `<data>` child of a `<uri-relative-filter-group>` must only
 /// honour **Android** (or unqualified) matcher attributes. A foreign
 /// namespace — `tools:path`, a custom namespace whose local name collides

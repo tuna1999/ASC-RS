@@ -15,7 +15,7 @@ verified against that source, but **source-verified ≠ framework-run**. Roadmap
 / `UriRelativeFilterGroup.matchGroupsToUri` before a verdict family can be
 called `success` / closed.
 
-## Status (2026-10-12, v0.19.2 follow-up — EXECUTION VERIFIED)
+## Status (2026-11-13, v0.24.4 — EXECUTION VERIFIED, both flag states)
 
 | | |
 |---|---|
@@ -74,8 +74,8 @@ The fixture is read **straight from the repo** via `-Duri.fixtures` (set in
 - A verified way to control `FLAG_RELATIVE_REFERENCE_INTENT_FILTERS`: no
   second artifact needed — `-Duri.force.flag=off` proxies it (below)
 
-These were installed and the full pipeline run for real on 2026-10-12: see
-"Status". The `build.gradle` was corrected from the earlier un-proven draft —
+These were installed and the full pipeline run for real on 2026-10-12, and
+rerun with the forced flag off on 2026-11-13: see "Status". The `build.gradle` was corrected from the earlier un-proven draft —
 it now compiles and runs (plain-`java` AAR handling, android-all compile
 classpath, relocated hidden `Flags` API — see the header comment in
 `build.gradle`).

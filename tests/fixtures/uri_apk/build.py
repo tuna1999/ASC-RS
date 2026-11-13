@@ -79,6 +79,10 @@ def main() -> int:
                  "      <intent-filter>",
                  '        <action android:name="android.intent.action.VIEW"/>']
         lines += [data_element(d, "        ") for d in f["data"]]
+        # <group android:name> mime groups: the framework parses the element
+        # (IntentFilter.parseIntentFilter) but no aapt2 build still accepts it,
+        # so a case that declares mime_groups makes this build fail loudly.
+        lines += [f'        <group android:name="{esc(n)}"/>' for n in f.get("mime_groups", [])]
         lines += [group_element(g, "        ") for g in f.get("groups", [])]
         lines += ["      </intent-filter>", "    </activity>"]
         acts.append("\n".join(lines))

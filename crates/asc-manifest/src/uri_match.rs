@@ -663,6 +663,7 @@ mod tests {
             data,
             effective_data: Default::default(),
             uri_relative_groups: groups,
+            mime_groups: vec![],
             auto_verify: None,
             priority: None,
         }

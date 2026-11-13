@@ -1289,6 +1289,9 @@ fn format_manifest_text(m: &asc_manifest::ManifestInfo, match_uri: Option<&str>)
             for c in &f.categories {
                 let _ = write!(s, " category {c}");
             }
+            for g in &f.mime_groups {
+                let _ = write!(s, " group {g}");
+            }
             if f.effective_data.has_uri() || !f.effective_data.mime_types.is_empty() {
                 let _ = write!(
                     s,
@@ -1528,6 +1531,11 @@ fn write_filter(s: &mut String, f: &asc_manifest::IntentFilter, match_uri: Optio
     }
     for c in &f.categories {
         let _ = writeln!(s, "      category {c}");
+    }
+    // `<group>` mime-group names: fidelity only, they do not change a plain
+    // URI match (`matchData` reads them only with wildcard matching on).
+    for g in &f.mime_groups {
+        let _ = writeln!(s, "      group {g}");
     }
     if f.effective_data.has_uri() || !f.effective_data.mime_types.is_empty() {
         let _ = writeln!(
@@ -2024,6 +2032,28 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    /// `<group android:name>` mime-group names are echoed, so a filter that
+    /// declares them is not reported as if the element did not exist.
+    #[test]
+    fn manifest_text_reports_mime_group_names() {
+        let mut f = filter(vec![data(Some("https"), Some("example.com"), None, None)]);
+        f.mime_groups.push("image-group".into());
+        let m = ManifestInfo {
+            package: Some("com.example.app".into()),
+            target_sdk: Some(30),
+            activities: vec![activity(
+                "com.example.Main",
+                ExportedState::LegacyInferred,
+                true,
+                vec![f],
+            )],
+            ..ManifestInfo::default()
+        };
+        let text = format_manifest_text(&m, None);
+        assert!(text.contains("      group image-group"), "{text}");
+        assert!(to_json(&m).contains("\"mime_groups\": ["));
     }
 
     /// Audit F3: an API 35 `<uri-relative-filter-group>` is reported raw

@@ -420,6 +420,10 @@ pub struct IntentFilter {
     /// Reported raw and **not** evaluated; see
     /// [`UriRelativeFilterGroup`].
     pub uri_relative_groups: Vec<UriRelativeFilterGroup>,
+    /// `<group android:name>` children (mime groups), in declaration order.
+    /// Fidelity only: they feed `IntentFilter.matchData` solely through the
+    /// `wildcardSupported` overload, which plain URI matching does not use.
+    pub mime_groups: Vec<String>,
     /// `android:autoVerify` (App Links, API 23+); `None` when undeclared.
     pub auto_verify: Option<bool>,
     /// `android:priority` (integer, may be negative); `None` when undeclared.
@@ -1339,6 +1343,11 @@ impl<'a> Parser<'a> {
                                 f.categories.push(n.to_string());
                             }
                         }
+                        "group" => {
+                            if let Some(n) = attr(attrs, "name") {
+                                push_unique(&mut f.mime_groups, Some(n));
+                            }
+                        }
                         "data" => {
                             f.data.push(data_spec_from_attrs(attrs));
                         }
@@ -1421,6 +1430,11 @@ impl<'a> Parser<'a> {
                         "category" => {
                             if let Some(n) = attr(attrs, "name") {
                                 f.categories.push(n.to_string());
+                            }
+                        }
+                        "group" => {
+                            if let Some(n) = attr(attrs, "name") {
+                                push_unique(&mut f.mime_groups, Some(n));
                             }
                         }
                         "data" => {

@@ -526,13 +526,21 @@ Three framework facts the same audit corrected, each proven by the oracle run:
   even when scheme, host and path all match. The evaluator takes no intent
   type, so this is a non-claim against manifests consumed with a type.
 
-- **`<mime-group>` / `android:mimeGroup` are not read.** `mMimeGroups` is
-  consulted only through `wildcardWithMimegroups` (`IntentFilter.java:1743`),
-  i.e. only for the wildcard `matchData` variant, which asc-rs does not model;
-  for the plain `matchData(type, scheme, uri)` call the oracle makes, the group
-  names change nothing. A `<data android:mimeGroup="...">` therefore behaves
-  exactly like a `<data>` without one: it contributes no scheme, host or path,
-  and — with no `mimeType` of its own — no type either.
+- **`<group android:name>` (mime group) is reported, never applied.**
+  `IntentFilter.parseIntentFilter` reads the element (`GROUP_STR`, `IF.java:177`,
+  parse at `:2695`) and stores it, but `mMimeGroups` is consulted only through
+  `wildcardWithMimegroups` (`IF.java:1743`), i.e. only for the wildcard
+  `matchData` variant, which asc-rs does not model; for the plain
+  `matchData(type, scheme, uri)` call the oracle makes the names change
+  nothing. asc-rs keeps the names in `IntentFilter::mime_groups` and prints
+  a `group <name>` line, so a filter using them is not reported as if the
+  element were absent. No aapt2 build accepts the element yet — a fixture
+  case that declares `mime_groups` makes `tests/fixtures/uri_apk/build.py`
+  fail loudly rather than drop it. A `<data android:mimeGroup="...">` is a
+  different, unused thing (there is no `MIME_GROUP_STR` attribute in
+  `IntentFilter`): it behaves exactly like a `<data>` without one, so it
+  contributes no scheme, host or path, and — with no `mimeType` of its own —
+  no type either.
 
 `tests/fixtures/uri_apk/cases.txt` + `tests/fixtures/uri_match_cases.json`
 carry the corrected expectations. Oracle run: 53 cases, 0 source-mismatches,
