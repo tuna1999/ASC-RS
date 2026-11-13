@@ -949,7 +949,24 @@ impl AscApp {
         if task.stale {
             return;
         }
-        match (task.kind, task.outcome) {
+        let kind = task.kind;
+        match kind {
+            TaskKind::LoadArtifact => self.apply_load_task(kind, task),
+            TaskKind::DecompileClass => self.apply_decompile_task(kind, task),
+            TaskKind::Disasm | TaskKind::Bytecode | TaskKind::Cfg => {
+                self.apply_listing_task(kind, task)
+            }
+            TaskKind::FindRefs | TaskKind::FindRefsClass => self.apply_search_task(kind, task),
+            TaskKind::Callees | TaskKind::CallTree | TaskKind::MemberInfo => {
+                self.apply_fanout_task(kind, task)
+            }
+            TaskKind::ClassStrings | TaskKind::Resources => self.apply_inventory_task(kind, task),
+        }
+    }
+
+    /// Applies the `load` lane of the queued-task results.
+    fn apply_load_task(&mut self, kind: TaskKind, task: CompletedTask) {
+        match (kind, task.outcome) {
             (TaskKind::LoadArtifact, TaskOutcome::Loaded(artifact)) => {
                 if self.pending_open == Some(task.id) {
                     self.pending_open = None;
@@ -966,6 +983,14 @@ impl AscApp {
                     self.set_status(format!("open failed: {e}"), false);
                 }
             }
+            (kind, outcome) => {
+                self.task_mismatch(kind, task_label_of(&outcome));
+            }
+        }
+    }
+    /// Applies the `decompile` lane of the queued-task results.
+    fn apply_decompile_task(&mut self, kind: TaskKind, task: CompletedTask) {
+        match (kind, task.outcome) {
             (TaskKind::DecompileClass, TaskOutcome::Decompiled(document)) => {
                 let descriptor = document.descriptor.clone();
                 let dex_name = document.dex_name.clone();
@@ -985,6 +1010,14 @@ impl AscApp {
                 self.last_error = Some(format!("getclass: {e}"));
                 self.set_status(format!("getclass failed: {e}"), false);
             }
+            (kind, outcome) => {
+                self.task_mismatch(kind, task_label_of(&outcome));
+            }
+        }
+    }
+    /// Applies the `listing` lane of the queued-task results.
+    fn apply_listing_task(&mut self, kind: TaskKind, task: CompletedTask) {
+        match (kind, task.outcome) {
             (
                 TaskKind::Disasm | TaskKind::Bytecode | TaskKind::Cfg,
                 TaskOutcome::Disassembled { dex_name, listing },
@@ -1004,6 +1037,71 @@ impl AscApp {
                 }
                 self.set_status(format!("{} ready: {key}", kind.label()), true);
             }
+            (TaskKind::Disasm | TaskKind::Bytecode | TaskKind::Cfg, TaskOutcome::Failed(e)) => {
+                let kind = task.kind.label();
+                self.tabs.set_failed(&task.label, e.clone());
+                self.last_error = Some(format!("{kind}: {e}"));
+                self.set_status(format!("{kind} failed: {e}"), false);
+            }
+            (kind, outcome) => {
+                self.task_mismatch(kind, task_label_of(&outcome));
+            }
+        }
+    }
+    /// Applies the `search` lane of the queued-task results.
+    fn apply_search_task(&mut self, kind: TaskKind, task: CompletedTask) {
+        match (kind, task.outcome) {
+            (TaskKind::FindRefs, TaskOutcome::Search(report)) => {
+                let results = SearchResults::from_report(task.label, &report);
+                let summary_ok = results.complete && results.errors.is_empty();
+                let hits = results.rows.len();
+                self.search.set_results(results);
+                self.focus_bottom_tab(BottomTab::Results);
+                self.set_status(
+                    if summary_ok {
+                        format!("findrefs: {hits} hits")
+                    } else {
+                        format!("findrefs incomplete: {hits} hits")
+                    },
+                    summary_ok,
+                );
+            }
+            (TaskKind::FindRefs, TaskOutcome::Failed(e)) => {
+                self.last_error = Some(format!("findrefs: {e}"));
+                self.set_status(format!("findrefs failed: {e}"), false);
+                self.search
+                    .set_results(SearchResults::from_error(task.label, e));
+                self.focus_bottom_tab(BottomTab::Results);
+            }
+            (TaskKind::FindRefsClass, TaskOutcome::Search(report)) => {
+                let results = SearchResults::from_report(task.label, &report);
+                let hits = results.rows.len();
+                let ok = results.complete && results.errors.is_empty();
+                self.references = Some(results);
+                self.focus_bottom_tab(BottomTab::References);
+                self.set_status(
+                    if ok {
+                        format!("references: {hits} callers")
+                    } else {
+                        format!("references incomplete: {hits} callers")
+                    },
+                    ok,
+                );
+            }
+            (TaskKind::FindRefsClass, TaskOutcome::Failed(e)) => {
+                self.last_error = Some(format!("references: {e}"));
+                self.set_status(format!("references failed: {e}"), false);
+                self.references = Some(SearchResults::from_error(task.label, e));
+                self.focus_bottom_tab(BottomTab::References);
+            }
+            (kind, outcome) => {
+                self.task_mismatch(kind, task_label_of(&outcome));
+            }
+        }
+    }
+    /// Applies the `fanout` lane of the queued-task results.
+    fn apply_fanout_task(&mut self, kind: TaskKind, task: CompletedTask) {
+        match (kind, task.outcome) {
             (TaskKind::Callees, TaskOutcome::Callees(result)) => {
                 // One-hop call fan-out, rendered as rows in the
                 // REFERENCES tab (callee class · member · site count).
@@ -1118,6 +1216,14 @@ impl AscApp {
                 self.references = Some(SearchResults::from_error(task.label, e));
                 self.focus_bottom_tab(BottomTab::References);
             }
+            (kind, outcome) => {
+                self.task_mismatch(kind, task_label_of(&outcome));
+            }
+        }
+    }
+    /// Applies the `inventory` lane of the queued-task results.
+    fn apply_inventory_task(&mut self, kind: TaskKind, task: CompletedTask) {
+        match (kind, task.outcome) {
             (TaskKind::ClassStrings, TaskOutcome::ClassStrings(result)) => {
                 // Class-scoped string constants, rendered as rows in
                 // the REFERENCES tab (class · string · site count).
@@ -1178,65 +1284,18 @@ impl AscApp {
                 self.set_status(format!("resources failed: {e}"), false);
                 self.focus_bottom_tab(BottomTab::Resources);
             }
-            (TaskKind::Disasm | TaskKind::Bytecode | TaskKind::Cfg, TaskOutcome::Failed(e)) => {
-                let kind = task.kind.label();
-                self.tabs.set_failed(&task.label, e.clone());
-                self.last_error = Some(format!("{kind}: {e}"));
-                self.set_status(format!("{kind} failed: {e}"), false);
-            }
-            (TaskKind::FindRefs, TaskOutcome::Search(report)) => {
-                let results = SearchResults::from_report(task.label, &report);
-                let summary_ok = results.complete && results.errors.is_empty();
-                let hits = results.rows.len();
-                self.search.set_results(results);
-                self.focus_bottom_tab(BottomTab::Results);
-                self.set_status(
-                    if summary_ok {
-                        format!("findrefs: {hits} hits")
-                    } else {
-                        format!("findrefs incomplete: {hits} hits")
-                    },
-                    summary_ok,
-                );
-            }
-            (TaskKind::FindRefs, TaskOutcome::Failed(e)) => {
-                self.last_error = Some(format!("findrefs: {e}"));
-                self.set_status(format!("findrefs failed: {e}"), false);
-                self.search
-                    .set_results(SearchResults::from_error(task.label, e));
-                self.focus_bottom_tab(BottomTab::Results);
-            }
-            (TaskKind::FindRefsClass, TaskOutcome::Search(report)) => {
-                let results = SearchResults::from_report(task.label, &report);
-                let hits = results.rows.len();
-                let ok = results.complete && results.errors.is_empty();
-                self.references = Some(results);
-                self.focus_bottom_tab(BottomTab::References);
-                self.set_status(
-                    if ok {
-                        format!("references: {hits} callers")
-                    } else {
-                        format!("references incomplete: {hits} callers")
-                    },
-                    ok,
-                );
-            }
-            (TaskKind::FindRefsClass, TaskOutcome::Failed(e)) => {
-                self.last_error = Some(format!("references: {e}"));
-                self.set_status(format!("references failed: {e}"), false);
-                self.references = Some(SearchResults::from_error(task.label, e));
-                self.focus_bottom_tab(BottomTab::References);
-            }
-            // Payload/kind mismatches cannot occur (engine contract);
-            // surfaced instead of silently dropped.
             (kind, outcome) => {
-                self.last_error = Some(format!(
-                    "internal: task payload mismatch for {} ({})",
-                    kind.label(),
-                    task_label_of(&outcome)
-                ));
+                self.task_mismatch(kind, task_label_of(&outcome));
             }
         }
+    }
+    /// A payload/kind pair outside the table cannot occur (engine
+    /// contract); surfaced instead of silently dropped.
+    fn task_mismatch(&mut self, kind: TaskKind, payload: &str) {
+        self.last_error = Some(format!(
+            "internal: task payload mismatch for {} ({payload})",
+            kind.label()
+        ));
     }
 
     // ----------------------------------------------------------------
