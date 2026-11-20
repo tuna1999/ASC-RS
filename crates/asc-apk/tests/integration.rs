@@ -756,11 +756,13 @@ fn read_entry_verified_detects_corrupted_payload() {
     let apk = Apk::open(tmp.path()).expect("open");
     let entry = apk.entry("ok.bin").expect("entry");
     let err = apk.read_entry_verified(&entry).unwrap_err();
-    assert!(
-        matches!(err, ApkError::SizeMismatch { .. }),
-        "CRC mismatch should be reported as SizeMismatch, got {:?}",
-        err
-    );
+    match err {
+        ApkError::CrcMismatch { expected, actual } => {
+            assert_eq!(expected, crc32fast::hash(&payload));
+            assert_ne!(expected, actual);
+        }
+        other => panic!("expected CrcMismatch, got {other:?}"),
+    }
 }
 
 // =========================================================================

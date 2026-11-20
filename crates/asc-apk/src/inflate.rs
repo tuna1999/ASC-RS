@@ -153,11 +153,3 @@ pub(crate) fn inflate_prefix(
     let complete = out.len() < max || decoder.read(&mut probe).map_err(err)? == 0;
     Ok((out, complete))
 }
-
-/// Verify the CRC-32 of `data` against `expected`. Used by the optional
-/// `read_entry_verified` path; cheap (crc32fast is ~30 GB/s on modern CPUs).
-pub(crate) fn verify_crc32(data: &[u8], expected: u32) -> bool {
-    let mut h = crc32fast::Hasher::new();
-    h.update(data);
-    h.finalize() == expected
-}

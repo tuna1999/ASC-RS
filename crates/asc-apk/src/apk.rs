@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::entry::{Compression, DexEntry, EntryBytes};
 use crate::error::ApkError;
-use crate::inflate::{InflateLimits, inflate_into_vec, verify_crc32};
+use crate::inflate::{InflateLimits, inflate_into_vec};
 use memmap2::Mmap;
 
 /// Read-only mmap APK/ZIP engine.
@@ -144,17 +144,17 @@ impl Apk {
 
     /// Like [`Self::read_entry`], but additionally verifies CRC-32 of the
     /// inflated bytes against the central-directory field. Returns
-    /// [`ApkError::SizeMismatch`] if the CRC does not match, to give
-    /// callers a distinct signal.
+    /// [`ApkError::CrcMismatch`] if the CRC does not match.
     pub fn read_entry_verified(&self, entry: &DexEntry) -> Result<EntryBytes<'_>, ApkError> {
         if self.raw_dex {
             return Err(ApkError::Unsupported("raw DEX has no ZIP CRC to verify"));
         }
         let bytes = self.read_entry(entry)?;
-        if !verify_crc32(bytes.as_slice(), entry.crc32) {
-            return Err(ApkError::SizeMismatch {
-                declared: entry.uncompressed_size,
-                produced: entry.crc32 as u64, // sentinel: CRC of the entry
+        let actual = crc32fast::hash(bytes.as_slice());
+        if actual != entry.crc32 {
+            return Err(ApkError::CrcMismatch {
+                expected: entry.crc32,
+                actual,
             });
         }
         Ok(bytes)
@@ -214,10 +214,13 @@ impl Apk {
     }
 }
 
-// SAFETY: `Mmap` is `Send + Sync` when read-only; `Vec<DexEntry>` is too.
-// Both are `Sync`/`Send` for the same reasons.
-unsafe impl Send for Apk {}
-unsafe impl Sync for Apk {}
+// `Apk`/`ZipView` are `Send + Sync` automatically (all fields are); this
+// fails to compile if a future field silently breaks that.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Apk>();
+    assert_send_sync::<ZipView<'static>>();
+};
 
 enum Sniff {
     Dex,
@@ -304,10 +307,6 @@ impl<'a> ZipView<'a> {
         read_entry_inner(self.bytes, entry, limits)
     }
 }
-
-// SAFETY: `&'a [u8]` is `Send + Sync` for any `'a`; `Vec<DexEntry>` is too.
-unsafe impl<'a> Send for ZipView<'a> {}
-unsafe impl<'a> Sync for ZipView<'a> {}
 
 /// Shared read logic for both `Apk` and `ZipView`.
 fn read_entry_inner<'a>(

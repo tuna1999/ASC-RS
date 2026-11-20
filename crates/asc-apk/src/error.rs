@@ -44,6 +44,15 @@ pub enum ApkError {
         produced: u64,
     },
 
+    /// The entry's bytes do not hash to the central directory's CRC-32.
+    #[error("CRC-32 mismatch: expected {expected:#010x}, actual {actual:#010x}")]
+    CrcMismatch {
+        /// CRC-32 recorded in the central directory.
+        expected: u32,
+        /// CRC-32 of the bytes actually read.
+        actual: u32,
+    },
+
     /// Inflation output exceeded the configured `InflateLimits::max_output`.
     #[error("inflated output exceeds cap: produced {produced} bytes (cap {cap})")]
     TooLarge {
