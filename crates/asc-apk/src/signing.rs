@@ -1,4 +1,5 @@
-//! APK Signing Block scanner (v2 / v3 / v3.1), display only.
+//! APK Signing Block scanner (v2 / v3 / v3.1). Keeps each signer's raw
+//! signed data, signatures, key and digests; `asc-core` verifies them.
 //!
 //! The block sits between the last local entry and the central directory:
 //! `u64 size | pairs… | u64 size | "APK Sig Block 42"`. Each pair is
@@ -48,6 +49,16 @@ pub struct SignerBlock {
     /// v3 only.
     pub min_sdk: Option<u32>,
     pub max_sdk: Option<u32>,
+    /// v3 only: the unsigned copies that must equal `min_sdk`/`max_sdk`.
+    pub unsigned_sdk: Option<(u32, u32)>,
+    /// Raw signed-data bytes (what each signature covers).
+    pub signed_data: Vec<u8>,
+    /// `(algorithm id, signature bytes)`.
+    pub signatures: Vec<(u32, Vec<u8>)>,
+    /// `(algorithm id, content digest)` from signed data.
+    pub digests: Vec<(u32, Vec<u8>)>,
+    /// `SubjectPublicKeyInfo` DER.
+    pub public_key: Vec<u8>,
 }
 
 /// A parsed scheme pair. `error` set = partially parsed (signers so far).
@@ -64,6 +75,9 @@ pub struct SigningScan {
     pub block: BlockStatus,
     pub pairs: Vec<PairInfo>,
     pub schemes: Vec<SchemeBlock>,
+    /// `(block_start, central_directory, eocd)` offsets when a block was
+    /// located; the content-digest sections are cut at these.
+    pub layout: Option<(u64, u64, u64)>,
 }
 
 struct Rd<'a> {
@@ -105,8 +119,9 @@ pub fn scan(buf: &[u8]) -> SigningScan {
         block: BlockStatus::Absent,
         pairs: Vec::new(),
         schemes: Vec::new(),
+        layout: None,
     };
-    let (start, end) = match locate(buf) {
+    let (start, end, eocd) = match locate(buf) {
         Ok(Some(r)) => r,
         Ok(None) => return out,
         Err(s) => {
@@ -118,6 +133,7 @@ pub fn scan(buf: &[u8]) -> SigningScan {
         offset: start as u64,
         size: (end - start) as u64,
     };
+    out.layout = Some((start as u64, end as u64, eocd as u64));
     // pairs live in [start+8, end-24)
     let mut pos = start + 8;
     let pairs_end = end - 24;
@@ -172,8 +188,8 @@ pub fn scan(buf: &[u8]) -> SigningScan {
     out
 }
 
-/// `Ok(Some((block_start, cd_offset)))`, `Ok(None)` = no block.
-fn locate(buf: &[u8]) -> Result<Option<(usize, usize)>, BlockStatus> {
+/// `Ok(Some((block_start, cd_offset, eocd)))`, `Ok(None)` = no block.
+fn locate(buf: &[u8]) -> Result<Option<(usize, usize, usize)>, BlockStatus> {
     let eocd = crate::zip::locate_eocd(buf, buf.len())
         .map_err(|e: ApkError| BlockStatus::Malformed(format!("EOCD: {e}")))?;
     let cd_off = u32::from_le_bytes([
@@ -208,7 +224,7 @@ fn locate(buf: &[u8]) -> Result<Option<(usize, usize)>, BlockStatus> {
             "leading and trailing block size fields disagree".into(),
         ));
     }
-    Ok(Some((start, cd)))
+    Ok(Some((start, cd, eocd)))
 }
 
 fn parse_signers(value: &[u8], v3: bool) -> (Vec<SignerBlock>, Option<&'static str>) {
@@ -230,7 +246,7 @@ fn parse_signers(value: &[u8], v3: bool) -> (Vec<SignerBlock>, Option<&'static s
         match parse_signer(body, v3) {
             Ok(s) => signers.push(s),
             Err((s, e)) => {
-                signers.push(s);
+                signers.push(*s);
                 return (signers, Some(e));
             }
         }
@@ -238,26 +254,26 @@ fn parse_signers(value: &[u8], v3: bool) -> (Vec<SignerBlock>, Option<&'static s
     (signers, None)
 }
 
-fn parse_signer(body: &[u8], v3: bool) -> Result<SignerBlock, (SignerBlock, &'static str)> {
+fn parse_signer(body: &[u8], v3: bool) -> Result<SignerBlock, (Box<SignerBlock>, &'static str)> {
     let mut s = SignerBlock::default();
     let mut r = Rd { b: body, pos: 0 };
     macro_rules! tri {
         ($e:expr) => {
             match $e {
                 Ok(v) => v,
-                Err(e) => return Err((s, e)),
+                Err(e) => return Err((Box::new(s), e)),
             }
         };
     }
     let signed = tri!(r.lp());
+    s.signed_data = signed.to_vec();
     if v3 {
         // Unsigned copies of minSdk/maxSdk sit between signed data and
-        // signatures; the signed copies inside signed data are kept.
-        tri!(r.u32());
-        tri!(r.u32());
+        // signatures; verification checks them against the signed ones.
+        s.unsigned_sdk = Some((tri!(r.u32()), tri!(r.u32())));
     }
     let sigs = tri!(r.lp());
-    let _public_key = tri!(r.lp());
+    s.public_key = tri!(r.lp()).to_vec();
     let mut sd = Rd { b: signed, pos: 0 };
     let digests = tri!(sd.lp());
     let certs = tri!(sd.lp());
@@ -265,36 +281,38 @@ fn parse_signer(body: &[u8], v3: bool) -> Result<SignerBlock, (SignerBlock, &'st
         s.min_sdk = Some(tri!(sd.u32()));
         s.max_sdk = Some(tri!(sd.u32()));
     }
-    s.digest_algs = tri!(alg_ids(digests));
-    s.signature_algs = tri!(alg_ids(sigs));
+    s.digests = tri!(alg_records(digests));
+    s.signatures = tri!(alg_records(sigs));
+    s.digest_algs = s.digests.iter().map(|d| d.0).collect();
+    s.signature_algs = s.signatures.iter().map(|d| d.0).collect();
     let mut c = Rd { b: certs, pos: 0 };
     while !c.done() {
         if s.certs.len() >= MAX_CERTS {
-            return Err((s, "more than 16 certificates; rest ignored"));
+            return Err((Box::new(s), "more than 16 certificates; rest ignored"));
         }
         let der = tri!(c.lp());
         if der.len() > MAX_CERT_LEN {
-            return Err((s, "certificate exceeds 64 KiB cap"));
+            return Err((Box::new(s), "certificate exceeds 64 KiB cap"));
         }
         s.certs.push(der.to_vec());
     }
     Ok(s)
 }
 
-/// Sequence of `u32 len | u32 algorithm_id | u32 len | data` records → IDs.
-fn alg_ids(seq: &[u8]) -> Result<Vec<u32>, &'static str> {
+/// Sequence of `u32 len | u32 algorithm_id | u32 len | data` records.
+fn alg_records(seq: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, &'static str> {
     let mut r = Rd { b: seq, pos: 0 };
-    let mut ids = Vec::new();
+    let mut out = Vec::new();
     while !r.done() {
-        if ids.len() >= MAX_ALGS {
+        if out.len() >= MAX_ALGS {
             return Err("more than 64 algorithm records");
         }
         let rec = r.lp()?;
         let mut rr = Rd { b: rec, pos: 0 };
-        ids.push(rr.u32()?);
-        rr.lp()?;
+        let id = rr.u32()?;
+        out.push((id, rr.lp()?.to_vec()));
     }
-    Ok(ids)
+    Ok(out)
 }
 
 #[cfg(test)]

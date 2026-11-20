@@ -325,8 +325,9 @@ enum Cmd {
         /// Path to the APK or raw DEX.
         apk: PathBuf,
     },
-    /// Display signing certificates (JAR v1, APK Signature Scheme v2/v3).
-    /// Nothing is verified.
+    /// Display signing certificates (JAR v1, APK Signature Scheme v2/v3)
+    /// and verify v2/v3 signers (signatures + content digests; v1 and
+    /// trust are not checked).
     Cert {
         /// Path to the APK.
         apk: PathBuf,
@@ -811,7 +812,7 @@ fn run_native_cmd(
     Ok(())
 }
 
-/// `asc-rs cert <apk>`: display-only signing inventory. `-o` is exclusive.
+/// `asc-rs cert <apk>`: signing inventory + v2/v3 verification. `-o` is exclusive.
 /// Raw DEX / unreadable input exits 2, like `manifest`; an incomplete report
 /// (malformed signing data) is still printed in full and exits 2.
 fn run_cert_cmd(

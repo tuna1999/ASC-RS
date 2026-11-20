@@ -52,7 +52,17 @@ fn fdroid_v1_v2_v3_agree_with_openssl_fingerprint() {
     };
     let r = run_cert(&p).expect("run_cert");
     assert!(r.complete, "{:?}", r.errors);
-    assert_eq!(r.verification, "not_performed");
+    assert_eq!(r.verification, "v2_v3");
+    for sc in r.schemes.iter().filter(|s| s.name != "v1") {
+        for sg in &sc.signers {
+            let v = sg.verification.as_ref().expect("v2/v3 signer is verified");
+            assert_eq!(
+                v.status, "verified",
+                "{} {}: {:?}",
+                sc.name, sg.source, v.checks
+            );
+        }
+    }
     let golden =
         "43238d512c1e5eb2d6569f4a3afbf552 3418b82e0a3ed1552770abb9a9c9ccab".replace(' ', "");
     for scheme in ["v1", "v2", "v3"] {
@@ -67,6 +77,39 @@ fn fdroid_v1_v2_v3_agree_with_openssl_fingerprint() {
     let v3 = r.schemes.iter().find(|s| s.name == "v3").unwrap();
     assert_eq!(v3.signers[0].min_sdk, Some(24));
     assert_eq!(v3.signers[0].signature_algorithms[0], 0x103);
+}
+
+/// One flipped byte inside the first ZIP entry: every chunked content
+/// digest must fail while the signatures over the signed data still hold.
+#[test]
+fn fdroid_tampered_entry_fails_content_digest() {
+    let Some(p) = fixture("org.fdroid.fdroid_1016000.apk") else {
+        return;
+    };
+    let mut bytes = std::fs::read(&p).unwrap();
+    bytes[100] ^= 0xff;
+    let tmp = std::env::temp_dir().join(format!("asc_cert_tamper_{}.apk", std::process::id()));
+    std::fs::write(&tmp, &bytes).unwrap();
+    let r = run_cert(&tmp);
+    std::fs::remove_file(&tmp).ok();
+    let r = r.expect("run_cert");
+    let signers: Vec<_> = r
+        .schemes
+        .iter()
+        .filter(|s| s.name != "v1")
+        .flat_map(|s| &s.signers)
+        .collect();
+    assert_eq!(signers.len(), 2, "v2 + v3");
+    for sg in signers {
+        let v = sg.verification.as_ref().unwrap();
+        assert_eq!(v.status, "failed", "{:?}", v.checks);
+        assert!(
+            v.checks
+                .iter()
+                .any(|c| c.starts_with("FAIL: content digest"))
+        );
+        assert!(v.checks.iter().any(|c| c.starts_with("ok: signature")));
+    }
 }
 
 #[test]

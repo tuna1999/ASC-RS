@@ -1,19 +1,21 @@
-//! `asc-rs cert`: display-only signing inventory (JAR v1 + APK Signature
-//! Scheme v2/v3/v3.1). Fingerprints identify certificates; NOTHING is
-//! verified (no signature, digest, chain, validity-at-install or trust
-//! check), which every rendering states. Equality between schemes is
-//! reported only when the fingerprints actually match, mismatches are
-//! shown, and "no signing material found" never means unsigned or valid.
+//! `asc-rs cert`: signing inventory (JAR v1 + APK Signature Scheme
+//! v2/v3/v3.1). Each v2/v3 signer is verified the way `apksig` does it:
+//! every supported signature over the signed data, the signed key against
+//! the first certificate, the algorithm lists, the v3 SDK copies and the
+//! chunked content digests. v1 JAR signatures, chains, revocation and
+//! trust are NOT checked, which every rendering states. Equality between
+//! schemes is reported only when the fingerprints actually match, and "no
+//! signing material found" never means unsigned or valid.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use asc_apk::der::{CertFields, parse_cert, parse_pkcs7};
-use asc_apk::signing::{BlockStatus, SigningScan};
+use asc_apk::signing::{BlockStatus, SignerBlock, SigningScan};
 use asc_apk::{Apk, InflateLimits};
 use serde::Serialize;
 use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 use crate::pipeline::CoreError;
 
@@ -23,6 +25,9 @@ const MAX_V1_FILES: usize = 16;
 const MAX_ERRORS: usize = 100;
 const DISCLAIMER: &str = "verification: not_performed (no signature, digest, chain or trust check; \
      fingerprints only identify certificates)";
+const V2V3_NOTE: &str = "verification: v2_v3 (v2/v3/v3.1 signatures and content digests checked per \
+     signer; v1 JAR, chain, revocation and trust NOT checked)";
+const CHUNK: usize = 1 << 20;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CertInfo {
@@ -51,6 +56,210 @@ pub struct SignerReport {
     pub min_sdk: Option<u32>,
     pub max_sdk: Option<u32>,
     pub certs: Vec<CertInfo>,
+    /// v2/v3 only; `None` for v1 (JAR signatures are not verified).
+    pub verification: Option<SignerVerification>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SignerVerification {
+    /// `verified` (>=1 signature and >=1 content digest checked, nothing
+    /// failed), `failed`, or `unsupported` (nothing failed, but no
+    /// signature or no content digest could be checked).
+    pub status: &'static str,
+    /// One line per check: `ok: ...`, `FAIL: ...` or `skip: ...`.
+    pub checks: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Hash {
+    S256,
+    S512,
+}
+
+/// Signature algorithm -> (key kind, signature hash, content digest).
+/// `None` content = verity (Merkle) digest, not computed. DSA (0x0301,
+/// 0x0425) is unsupported. IDs from AOSP `apksig` `SignatureAlgorithm`.
+fn alg_spec(id: u32) -> Option<(&'static str, Hash, Option<Hash>)> {
+    Some(match id {
+        0x0101 => ("rsa-pss", Hash::S256, Some(Hash::S256)),
+        0x0102 => ("rsa-pss", Hash::S512, Some(Hash::S512)),
+        0x0103 => ("rsa-pkcs1", Hash::S256, Some(Hash::S256)),
+        0x0104 => ("rsa-pkcs1", Hash::S512, Some(Hash::S512)),
+        0x0201 => ("ecdsa", Hash::S256, Some(Hash::S256)),
+        0x0202 => ("ecdsa", Hash::S512, Some(Hash::S512)),
+        0x0421 => ("rsa-pkcs1", Hash::S256, None),
+        0x0423 => ("ecdsa", Hash::S256, None),
+        _ => return None,
+    })
+}
+
+/// Outer `Err` = key could not be loaded (a skip, not a failure: e.g. an
+/// RSA key above the crate's 4096-bit cap); inner `Err` = signature
+/// rejected.
+fn verify_sig(
+    kind: &str,
+    hash: Hash,
+    spki: &[u8],
+    data: &[u8],
+    sig: &[u8],
+) -> Result<Result<(), String>, String> {
+    use p256::ecdsa::signature::hazmat::PrehashVerifier;
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::{Pkcs1v15Sign, Pss, RsaPublicKey};
+    let digest = match hash {
+        Hash::S256 => Sha256::digest(data).to_vec(),
+        Hash::S512 => Sha512::digest(data).to_vec(),
+    };
+    if kind == "ecdsa" {
+        use p256::pkcs8::DecodePublicKey as _;
+        if let Ok(k) = p256::ecdsa::VerifyingKey::from_public_key_der(spki) {
+            let s = p256::ecdsa::Signature::from_der(sig).map_err(|e| format!("signature: {e}"));
+            return Ok(s.and_then(|s| k.verify_prehash(&digest, &s).map_err(|e| e.to_string())));
+        }
+        if let Ok(k) = p384::ecdsa::VerifyingKey::from_public_key_der(spki) {
+            let s = p384::ecdsa::Signature::from_der(sig).map_err(|e| format!("signature: {e}"));
+            return Ok(s.and_then(|s| k.verify_prehash(&digest, &s).map_err(|e| e.to_string())));
+        }
+        return Err("EC key is not P-256/P-384 or is malformed".into());
+    }
+    let k = RsaPublicKey::from_public_key_der(spki).map_err(|e| format!("RSA key: {e}"))?;
+    let r = match (kind, hash) {
+        ("rsa-pss", Hash::S256) => k.verify(Pss::new::<Sha256>(), &digest, sig),
+        ("rsa-pss", Hash::S512) => k.verify(Pss::new::<Sha512>(), &digest, sig),
+        (_, Hash::S256) => k.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, sig),
+        (_, Hash::S512) => k.verify(Pkcs1v15Sign::new::<Sha512>(), &digest, sig),
+    };
+    Ok(r.map_err(|e| e.to_string()))
+}
+
+/// APK Signature Scheme v2 chunked content digest: sections
+/// `[0, block)`, `[cd, eocd)` and the EOCD with its CD offset rewritten
+/// to `block`; 1 MiB chunks hashed as `0xa5|len|data`, then
+/// `0x5a|count|chunk digests`.
+fn content_digest<D: Digest>(buf: &[u8], (block, cd, eocd): (usize, usize, usize)) -> Vec<u8> {
+    let mut tail = buf[eocd..].to_vec();
+    tail[16..20].copy_from_slice(&(block as u32).to_le_bytes());
+    let mut acc = Vec::new();
+    let mut n = 0u32;
+    for sec in [&buf[..block], &buf[cd..eocd], &tail[..]] {
+        for c in sec.chunks(CHUNK) {
+            let mut h = D::new();
+            h.update([0xa5]);
+            h.update((c.len() as u32).to_le_bytes());
+            h.update(c);
+            acc.extend_from_slice(&h.finalize());
+            n += 1;
+        }
+    }
+    let mut h = D::new();
+    h.update([0x5a]);
+    h.update(n.to_le_bytes());
+    h.update(&acc);
+    h.finalize().to_vec()
+}
+
+/// Lazily computed content digests, shared by every v2/v3 signer.
+struct Digests<'a> {
+    buf: &'a [u8],
+    layout: Option<(usize, usize, usize)>,
+    s256: Option<Vec<u8>>,
+    s512: Option<Vec<u8>>,
+}
+
+impl Digests<'_> {
+    fn get(&mut self, h: Hash) -> Option<&[u8]> {
+        let (buf, l) = (self.buf, self.layout?);
+        let slot = match h {
+            Hash::S256 => &mut self.s256,
+            Hash::S512 => &mut self.s512,
+        };
+        Some(slot.get_or_insert_with(|| match h {
+            Hash::S256 => content_digest::<Sha256>(buf, l),
+            Hash::S512 => content_digest::<Sha512>(buf, l),
+        }))
+    }
+}
+
+fn verify_signer(s: &SignerBlock, digests: &mut Digests) -> SignerVerification {
+    let mut checks = Vec::new();
+    let (mut fail, mut sigs_ok, mut digests_ok) = (false, 0, 0);
+    let mut check = |ok: bool, msg: String, checks: &mut Vec<String>| {
+        fail |= !ok;
+        checks.push(format!("{}: {msg}", if ok { "ok" } else { "FAIL" }));
+    };
+    if s.signatures.is_empty() {
+        check(false, "no signatures".into(), &mut checks);
+    }
+    for (alg, sig) in &s.signatures {
+        let Some((kind, hash, _)) = alg_spec(*alg) else {
+            checks.push(format!(
+                "skip: signature 0x{alg:04x}: unsupported algorithm"
+            ));
+            continue;
+        };
+        match verify_sig(kind, hash, &s.public_key, &s.signed_data, sig) {
+            Err(e) => checks.push(format!("skip: signature 0x{alg:04x}: {e}")),
+            Ok(Ok(())) => {
+                sigs_ok += 1;
+                check(true, format!("signature 0x{alg:04x} ({kind})"), &mut checks);
+            }
+            Ok(Err(e)) => check(
+                false,
+                format!("signature 0x{alg:04x} ({kind}): {e}"),
+                &mut checks,
+            ),
+        }
+    }
+    check(
+        s.digest_algs == s.signature_algs,
+        "digest and signature algorithm lists match".into(),
+        &mut checks,
+    );
+    let key_match = s
+        .certs
+        .first()
+        .and_then(|c| parse_cert(c).ok())
+        .is_some_and(|f| f.spki_raw == s.public_key);
+    check(
+        key_match,
+        "signed public key matches the first certificate".into(),
+        &mut checks,
+    );
+    if let Some(u) = s.unsigned_sdk {
+        check(
+            Some(u) == s.min_sdk.zip(s.max_sdk),
+            "unsigned and signed SDK range match".into(),
+            &mut checks,
+        );
+    }
+    for (alg, want) in &s.digests {
+        match alg_spec(*alg) {
+            None => checks.push(format!(
+                "skip: content digest 0x{alg:04x}: unsupported algorithm"
+            )),
+            Some((_, _, None)) => checks.push(format!(
+                "skip: content digest 0x{alg:04x}: verity digest not computed"
+            )),
+            Some((_, _, Some(h))) => match digests.get(h) {
+                None => checks.push(format!(
+                    "skip: content digest 0x{alg:04x}: signing block layout unknown"
+                )),
+                Some(got) => {
+                    let ok = got == want.as_slice();
+                    digests_ok += usize::from(ok);
+                    check(ok, format!("content digest 0x{alg:04x}"), &mut checks);
+                }
+            },
+        }
+    }
+    let status = if fail {
+        "failed"
+    } else if sigs_ok > 0 && digests_ok > 0 {
+        "verified"
+    } else {
+        "unsupported"
+    };
+    SignerVerification { status, checks }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +365,7 @@ fn scheme_from_scan(
     id: u32,
     name: &'static str,
     errors: &mut Vec<String>,
+    digests: &mut Digests,
 ) -> SchemeReport {
     let mut rep = SchemeReport {
         name,
@@ -187,6 +397,7 @@ fn scheme_from_scan(
                         cert_info(d, if k == 0 { "signer" } else { "chain" }, errors, &ctx)
                     })
                     .collect(),
+                verification: Some(verify_signer(s, digests)),
             });
         }
         if let Some(e) = &sb.error {
@@ -250,6 +461,7 @@ fn v1_scheme(apk: &Apk, errors: &mut Vec<String>) -> SchemeReport {
                     min_sdk: None,
                     max_sdk: None,
                     certs,
+                    verification: None,
                 });
             }
         }
@@ -311,13 +523,21 @@ pub fn run_cert(path: &Path) -> Result<CertReport, CoreError> {
         }
     };
 
+    let mut digests = Digests {
+        buf: apk.bytes(),
+        layout: scan
+            .layout
+            .map(|(b, c, e)| (b as usize, c as usize, e as usize)),
+        s256: None,
+        s512: None,
+    };
     let mut schemes = vec![v1_scheme(&apk, &mut errors)];
     for (id, name) in [
         (0x7109_871a, "v2"),
         (0xf053_68c0, "v3"),
         (0x1b93_ad61, "v3.1"),
     ] {
-        schemes.push(scheme_from_scan(&scan, id, name, &mut errors));
+        schemes.push(scheme_from_scan(&scan, id, name, &mut errors, &mut digests));
     }
     for s in &schemes {
         for e in &s.errors {
@@ -355,13 +575,21 @@ pub fn run_cert(path: &Path) -> Result<CertReport, CoreError> {
         }
     }
     let any_present = schemes.iter().any(|s| s.status == "present");
+    let verified_any = schemes
+        .iter()
+        .flat_map(|s| &s.signers)
+        .any(|s| s.verification.is_some());
     let note = (!any_present && errors.is_empty()).then(|| {
         "no signing material found; this does not establish that the APK is unsigned, valid or trusted"
             .to_string()
     });
     Ok(CertReport {
         input: path.display().to_string(),
-        verification: "not_performed",
+        verification: if verified_any {
+            "v2_v3"
+        } else {
+            "not_performed"
+        },
         block_status,
         block_offset: off,
         block_size: size,
@@ -396,7 +624,12 @@ fn algs(v: &[u32]) -> String {
 
 pub fn format_cert_text(r: &CertReport) -> String {
     let mut s = String::new();
-    let _ = writeln!(s, "input: {}\n{DISCLAIMER}", r.input);
+    let header = if r.verification == "v2_v3" {
+        V2V3_NOTE
+    } else {
+        DISCLAIMER
+    };
+    let _ = writeln!(s, "input: {}\n{header}", r.input);
     match (r.block_offset, r.block_size) {
         (Some(o), Some(z)) => {
             let _ = writeln!(s, "signing block: present at offset {o}, {z} bytes");
@@ -438,6 +671,12 @@ pub fn format_cert_text(r: &CertReport) -> String {
                 algs(&sg.digest_algorithms),
                 algs(&sg.signature_algorithms)
             );
+            if let Some(v) = &sg.verification {
+                let _ = writeln!(s, "    verification: {}", v.status);
+                for c in &v.checks {
+                    let _ = writeln!(s, "      {c}");
+                }
+            }
             for c in &sg.certs {
                 let _ = writeln!(
                     s,

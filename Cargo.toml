@@ -17,7 +17,7 @@ members = [
 exclude = ["fuzz", "reference/asc"]
 
 [workspace.package]
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 # Lowest compiler that can build EVERY workspace member. 1.95 is set by
 # the egui 0.36 stack (eframe/egui/epaint/egui_kittest/… each declare
@@ -52,6 +52,10 @@ crc32fast = "1"
 smallvec = "1"
 sha1 = "0.10"
 sha2 = "0.10"
+# `cert` v2/v3 signature verification (public-key operations only).
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 adler2 = "2"
 criterion = "0.8"
 clap = { version = "4", features = ["derive"] }

@@ -5,8 +5,9 @@
 //! from the v2/v3 spec (`u64 size | pairs | u64 size | "APK Sig Block 42"`).
 //! Nothing is read from `corpus/`, so the suite is self-contained.
 //!
-//! Signatures are never built or checked: `run_cert` is display-only, and
-//! the tests only assert what it reports about the bytes it was given.
+//! No real signature is built: v2/v3 signers here carry junk keys and
+//! signatures, so their verification must come out `failed` (the positive
+//! and tamper cases run against the real F-Droid APK in `cert_inventory`).
 
 use std::path::{Path, PathBuf};
 
@@ -746,4 +747,23 @@ fn v2_block_layout_matches_the_spec() {
     assert_eq!(sb.signers[0].certs, std::slice::from_ref(&c.der));
     assert_eq!(sb.signers[0].digest_algs, [0x0103]);
     assert_eq!(sb.signers[0].signature_algs, [0x0103]);
+}
+
+/// A v2 signer whose signature, key and digest are junk must never come
+/// out `verified`: the signed key differs from the certificate and the
+/// content digest is wrong, so the signer fails rather than skipping.
+#[test]
+fn forged_v2_signer_fails_verification() {
+    let c = cert(b"v2 forger", &[0x01]);
+    let r = run("forged_v2", &v1_v2_apk(&[&c], &[signer_info(&c)], &[&c]));
+    assert_eq!(r.verification, "v2_v3");
+    let v = scheme(&r, "v2").signers[0].verification.as_ref().unwrap();
+    assert_eq!(v.status, "failed", "{:?}", v.checks);
+    assert!(
+        v.checks
+            .iter()
+            .any(|c| c == "FAIL: signed public key matches the first certificate")
+    );
+    assert!(v.checks.iter().any(|c| c == "FAIL: content digest 0x0103"));
+    assert!(scheme(&r, "v1").signers[0].verification.is_none());
 }

@@ -101,8 +101,13 @@ impl Apk {
         self.raw_dex
     }
 
-    /// Scan the APK Signing Block (v2/v3/v3.1). Display only: nothing is
-    /// verified. Meaningless for raw DEX input.
+    /// The whole archive as mapped (v2/v3 content digests hash it).
+    pub fn bytes(&self) -> &[u8] {
+        &self.mmap
+    }
+
+    /// Scan the APK Signing Block (v2/v3/v3.1) and keep the raw signer
+    /// material; verification lives in `asc-core`. Meaningless for raw DEX.
     pub fn signing_scan(&self) -> crate::signing::SigningScan {
         crate::signing::scan(&self.mmap)
     }

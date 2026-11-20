@@ -18,7 +18,16 @@ unsound = "all"
 # Findings that cannot be fixed by a dependency bump go here, one entry
 # per crate with a reason, e.g.:
 #   { id = "RUSTSEC-0000-0000", reason = "…" }
-ignore = []
+ignore = [
+    # Marvin timing side channel in RSA *decryption/signing* (private-key
+    # operations). asc-rs only verifies signatures with public keys
+    # (`cert`), so the leak has no secret to reach. No fixed rsa release.
+    { id = "RUSTSEC-2023-0071", reason = "rsa used for public-key signature verification only" },
+    # crypto-bigint 0.5 (via p256/p384 0.13) is not constant-time in places.
+    # Same argument: `cert` verifies with public keys over public data;
+    # the fix (>=0.7.6) needs the p256 0.14 / digest 0.11 stack.
+    { id = "RUSTSEC-2026-0387", reason = "ECDSA used for public-key signature verification only" },
+]
 
 [bans]
 # Duplicate versions are a report, not a failure (the tree has several

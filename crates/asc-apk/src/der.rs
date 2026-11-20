@@ -260,6 +260,8 @@ pub struct CertFields {
     /// against PKCS#7 `IssuerAndSerialNumber`).
     pub issuer_raw: Vec<u8>,
     pub serial_raw: Vec<u8>,
+    /// Raw DER of `subjectPublicKeyInfo` (v2/v3 key-match check).
+    pub spki_raw: Vec<u8>,
 }
 
 /// Parse `der` as an X.509 `Certificate`.
@@ -317,6 +319,7 @@ pub fn parse_cert(der: &[u8]) -> Result<CertFields, String> {
         key_algorithm,
         issuer_raw: issuer.raw.to_vec(),
         serial_raw: s.to_vec(),
+        spki_raw: spki.raw.to_vec(),
     })
 }
 
