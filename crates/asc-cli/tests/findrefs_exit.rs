@@ -377,3 +377,85 @@ fn findrefs_non_dex_entry_skips_without_failing() {
 
     let _ = std::fs::remove_file(&apk);
 }
+
+/// `Lp/Main;`: `m()` loads the needle and calls `n()`; `n()` returns.
+fn call_dex() -> Vec<u8> {
+    let dex = Dex::new(
+        vec![(MAIN, "m", (STRING, vec![])), (MAIN, "n", ("V", vec![]))],
+        &[u(NEEDLE)],
+    );
+    let idx = dex.string(&u(NEEDLE)) as u16;
+    let n = dex.method(MAIN, "n");
+    // const-string v0, needle ; invoke-static {}, n ; return-object v0.
+    let m_insns = vec![0x001A, idx, 0x0071, n, 0x0000, 0x0011];
+    let mut out = dex.finish(&[(
+        MAIN,
+        vec![
+            ("m", ACC_PUBLIC_STATIC, 1, 0, m_insns),
+            ("n", ACC_PUBLIC_STATIC, 0, 0, vec![0x000E]), // return-void
+        ],
+    )]);
+    // The smali backend (droidsaw) verifies the Adler-32 header checksum.
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in &out[12..] {
+        a = (a + u32::from(x)) % 65521;
+        b = (b + a) % 65521;
+    }
+    out[8..12].copy_from_slice(&((b << 16) | a).to_le_bytes());
+    out
+}
+
+fn stdout_of(args: &[&str]) -> (Option<i32>, String, String) {
+    let (out, stderr) = run_cli(args);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (out.status.code(), stdout, stderr)
+}
+
+#[test]
+fn disasm_views_bytecode_and_cfg() {
+    let apk = write_apk("views", &[("classes.dex", call_dex())]);
+    let a = apk.to_str().unwrap();
+    let (code, smali, e) = stdout_of(&["disasm", a, MAIN]);
+    assert_eq!(code, Some(0), "{e}");
+    for view in ["bytecode", "cfg"] {
+        let (code, text, e) = stdout_of(&["disasm", a, MAIN, "--view", view]);
+        assert_eq!(code, Some(0), "{view}: {e}");
+        assert!(!text.trim().is_empty() && text != smali, "{view}:\n{text}");
+    }
+    let (code, _, _) = stdout_of(&["disasm", a, "Lp/Absent;", "--view", "cfg"]);
+    assert_eq!(code, Some(1));
+    let _ = std::fs::remove_file(&apk);
+}
+
+#[test]
+fn calls_lists_callees_and_rejects_missing_class() {
+    let apk = write_apk("calls", &[("classes.dex", call_dex())]);
+    let a = apk.to_str().unwrap();
+    let (code, text, e) = stdout_of(&["calls", a, MAIN, "--method", "m"]);
+    assert_eq!(code, Some(0), "{e}");
+    assert!(text.contains("Lp/Main;->m -> Lp/Main;->n"), "{text}");
+    let (code, json, _) = stdout_of(&["--format", "json", "calls", a, MAIN, "--method", "m"]);
+    assert_eq!(code, Some(0));
+    assert!(json.contains("\"to_class\": \"Lp/Main;\""), "{json}");
+    assert!(json.contains("\"complete\": true"), "{json}");
+    let (code, _, e) = stdout_of(&["calls", a, "Lp/Absent;", "--method", "m"]);
+    assert_eq!(code, Some(1), "{e}");
+    let _ = std::fs::remove_file(&apk);
+}
+
+#[test]
+fn strings_class_scopes_to_one_class() {
+    let apk = write_apk("clsstr", &[("classes.dex", call_dex())]);
+    let a = apk.to_str().unwrap();
+    let (code, text, e) = stdout_of(&["strings", a, "--class", "p.Main"]);
+    assert_eq!(code, Some(0), "{e}");
+    assert!(text.contains(&format!("x1 {NEEDLE}")), "{text}");
+    // Pool-only strings (type/method names) are not code-loaded.
+    assert!(!text.contains("java/lang/Object"), "{text}");
+    let (code, text, _) = stdout_of(&["strings", a, "--class", MAIN, "--substring", "zz"]);
+    assert_eq!(code, Some(0));
+    assert!(!text.contains(NEEDLE), "{text}");
+    let (code, _, _) = stdout_of(&["strings", a, "--class", "Lp/Absent;"]);
+    assert_eq!(code, Some(1));
+    let _ = std::fs::remove_file(&apk);
+}

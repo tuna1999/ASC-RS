@@ -53,10 +53,13 @@ asc-rs findrefs <apk> field  textColor --fuzzy-class --class Foo
 asc-rs getclass   <apk> Lcom/foo/Bar;              # decompiled Java source on stdout
 asc-rs getclass   <apk> com.foo.Bar                 # dotted form also accepted
 asc-rs disasm     <apk> Lcom/foo/Bar; [--method m]    # Smali-syntax listing (annotations/debug info not emitted)
+asc-rs disasm     <apk> Lcom/foo/Bar; --method m --view cfg   # basic blocks + edges (or --view bytecode)
+asc-rs calls      <apk> Lcom/foo/Bar; --method m [--depth 2]  # outgoing call tree of one method
 asc-rs listclass  <apk> --prefix Lcom/foo          # every descriptor in the APK
 asc-rs manifest   <apk>                             # full manifest: app attrs, meta-data, permissions, queries, deep links, aliases
 asc-rs inspect    <apk|dex>                         # inventory (incl. Hermes), DEX coverage, packer signals, split status
 asc-rs strings    <apk|dex> [--substring PAT]        # every DEX string-pool entry, with source DEX + index
+asc-rs strings    <apk|dex> --class Lcom/foo/Bar;    # string constants one class's code loads, with site counts
 asc-rs extract    <apk> <entry> [--verify-crc]       # pull one entry out (safe basename, optional CRC check)
 asc-rs axml       <apk> <entry>                      # decode any compiled binary-XML entry (res/xml/*)
 asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match

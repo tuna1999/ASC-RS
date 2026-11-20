@@ -1,7 +1,8 @@
 //! # asc-cli
 //!
 //! CLI parity frontend for `asc-rs`: `asc-rs getclass <apk> <class>`,
-//! `asc-rs disasm <apk|dex> <class> [--method NAME]`,
+//! `asc-rs disasm <apk|dex> <class> [--method NAME] [--view smali|bytecode|cfg]`,
+//! `asc-rs calls <apk|dex> <class> --method NAME [--depth N]`,
 //! `asc-rs findrefs <apk> {string|type|method|field} ...`, and
 //! `asc-rs listclass <apk> [--prefix P]`, `asc-rs manifest <apk>`,
 //! `asc-rs inspect <apk|dex>`, `asc-rs native <apk|dex>`, `asc-rs cert <apk>`, and
@@ -31,12 +32,14 @@ use std::time::Instant;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use asc_core::{
-    CoreError, DisasmJob, DisasmOptions, FindRefsJob, FindRefsOptions, GetClassJob,
-    GetClassOptions, ListClassesJob, ListClassesOptions, ResourcesQuery, format_cert_text,
-    format_getclass_json, format_getclass_text, format_inspect_text, format_listclasses_json_opt,
-    format_listclasses_text_opt, format_native_text, format_resources_text,
-    format_search_report_json, format_search_report_text, run_cert, run_disasm, run_findrefs,
-    run_getclass, run_inspect, run_listclasses, run_native, run_resources,
+    CallTreeJob, CallTreeOptions, ClassStringsJob, CoreError, DisasmJob, DisasmOptions,
+    FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob, ListClassesOptions,
+    ResourcesQuery, format_cert_text, format_getclass_json, format_getclass_text,
+    format_inspect_text, format_listclasses_json_opt, format_listclasses_text_opt,
+    format_native_text, format_resources_text, format_search_report_json,
+    format_search_report_text, run_bytecode, run_call_tree, run_cert, run_cfg, run_class_strings,
+    run_disasm, run_findrefs, run_getclass, run_inspect, run_listclasses, run_native,
+    run_resources,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -90,10 +93,12 @@ fn main() -> ExitCode {
         apk,
         substring,
         limit,
+        class,
     } = &cli.cmd
     {
         return run_strings_cmd(
             apk,
+            class.as_deref(),
             substring.as_deref(),
             *limit,
             cli.shared.output.as_deref(),
@@ -121,6 +126,24 @@ fn main() -> ExitCode {
             apk,
             pattern.as_deref(),
             *limit,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
+    }
+    if let Cmd::Calls {
+        apk,
+        class,
+        method,
+        depth,
+        max_nodes,
+    } = &cli.cmd
+    {
+        return run_calls_cmd(
+            apk,
+            class,
+            method,
+            *depth,
+            *max_nodes,
             cli.shared.output.as_deref(),
             cli.shared.format,
         );
@@ -156,6 +179,18 @@ enum OutputFormat {
     Text,
     /// JSON-ready value emitted via `serde_json`.
     Json,
+}
+
+/// Listing produced by `disasm --view`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
+enum DisasmView {
+    /// Smali-syntax listing (the default).
+    #[default]
+    Smali,
+    /// Raw bytecode: offset, code units and decoded instruction.
+    Bytecode,
+    /// Per-method basic blocks with successor edges.
+    Cfg,
 }
 
 /// Flags that are accepted in any position — before or after the APK
@@ -224,6 +259,29 @@ enum Cmd {
         /// Emit only methods with this exact name (all overloads).
         #[arg(long = "method", value_name = "NAME")]
         method: Option<String>,
+        /// Listing kind: smali, raw bytecode, or control-flow graph.
+        #[arg(long, value_enum, default_value_t = DisasmView::Smali)]
+        view: DisasmView,
+    },
+    /// Outgoing call tree of one method (callees, breadth-first).
+    ///
+    /// Every overload named `--method` is expanded. A method name that
+    /// does not exist yields an empty tree, not an error: confirm it
+    /// with `disasm --method` first.
+    Calls {
+        /// Path to the APK or raw DEX.
+        apk: PathBuf,
+        /// Class descriptor (`Lcom/poc/Main;` or `com.poc.Main`).
+        class: String,
+        /// Root method name.
+        #[arg(long = "method", value_name = "NAME")]
+        method: String,
+        /// Hops below the root (1 = direct callees only).
+        #[arg(long, default_value_t = 1)]
+        depth: u8,
+        /// Edge budget across all depths.
+        #[arg(long, default_value_t = 200)]
+        max_nodes: usize,
     },
     /// Find every caller of a matching reference in the APK.
     Findrefs {
@@ -298,6 +356,10 @@ enum Cmd {
         /// Maximum strings emitted.
         #[arg(long, default_value_t = 100_000)]
         limit: usize,
+        /// Only string constants loaded by this class's code
+        /// (`Lcom/poc/Main;` or `com.poc.Main`), with site counts.
+        #[arg(long, value_name = "CLASS")]
+        class: Option<String>,
     },
     /// Extract one archive entry to a file.
     Extract {
@@ -394,10 +456,16 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.decode_xor,
             shared.format,
         ),
-        Cmd::Disasm { apk, class, method } => run_disasm_cmd(
+        Cmd::Disasm {
+            apk,
+            class,
+            method,
+            view,
+        } => run_disasm_cmd(
             apk,
             class,
             method.as_deref(),
+            *view,
             shared.output.as_deref(),
             shared.threads,
             shared.debug,
@@ -421,6 +489,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         | Cmd::Cert { .. }
         | Cmd::Resources { .. }
         | Cmd::Strings { .. }
+        | Cmd::Calls { .. }
         | Cmd::Extract { .. }
         | Cmd::Axml { .. }
         | Cmd::Hermes { .. }
@@ -501,6 +570,7 @@ fn run_disasm_cmd(
     apk: &std::path::Path,
     class: &str,
     method: Option<&str>,
+    view: DisasmView,
     output: Option<&std::path::Path>,
     threads: usize,
     debug: bool,
@@ -512,7 +582,11 @@ fn run_disasm_cmd(
         scan_budget_bytes: 0, // engine default
     };
     let job = DisasmJob::new(apk.to_path_buf(), target, method);
-    let result = run_disasm(&job, &opts)?;
+    let result = match view {
+        DisasmView::Smali => run_disasm(&job, &opts)?,
+        DisasmView::Bytecode => run_bytecode(&job, &opts)?,
+        DisasmView::Cfg => run_cfg(&job, &opts)?,
+    };
     let listing = result.listing;
     if let Some(out_path) = output {
         std::fs::write(out_path, listing.as_bytes())
@@ -878,11 +952,15 @@ fn run_manifest_cmd(
 /// (per-string or per-DEX failures) still print in full and exit 2.
 fn run_strings_cmd(
     apk: &std::path::Path,
+    class: Option<&str>,
     substring: Option<&str>,
     limit: usize,
     output: Option<&std::path::Path>,
     format: OutputFormat,
 ) -> ExitCode {
+    if let Some(class) = class {
+        return run_class_strings_cmd(apk, class, substring, limit, output, format);
+    }
     let opts = asc_core::strings::StringsOptions {
         filter: substring.map(str::to_string),
         limit,
@@ -918,6 +996,169 @@ fn run_strings_cmd(
     } else {
         EXIT_INTERNAL
     })
+}
+
+/// Print `text` to `-o` or stdout, then map `complete` to exit 0/2.
+fn emit_partial(text: &str, output: Option<&std::path::Path>, complete: bool) -> ExitCode {
+    match output {
+        Some(p) => {
+            if let Err(e) = std::fs::write(p, text.as_bytes()) {
+                eprintln!("Error: write {p:?}: {e}");
+                return ExitCode::from(EXIT_USER_ERROR);
+            }
+        }
+        None => {
+            print!("{text}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    ExitCode::from(if complete { EXIT_OK } else { EXIT_INTERNAL })
+}
+
+/// Exit code + stderr line for an engine error (same mapping as `dispatch`).
+fn core_error_exit(e: &CoreError) -> ExitCode {
+    eprintln!("Error: {e}");
+    ExitCode::from(match e {
+        CoreError::ClassNotFound(_)
+        | CoreError::MethodNotFound(_)
+        | CoreError::Usage(_)
+        | CoreError::Class(_) => EXIT_USER_ERROR,
+        _ => EXIT_INTERNAL,
+    })
+}
+
+/// `asc-rs strings <apk> --class X`: string constants one class's code
+/// loads. Scan failures print the partial list and exit 2.
+fn run_class_strings_cmd(
+    apk: &std::path::Path,
+    class: &str,
+    substring: Option<&str>,
+    limit: usize,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    use std::fmt::Write as _;
+    let target = match asc_core::normalize_class_name(class) {
+        Ok(t) => t,
+        Err(e) => return core_error_exit(&CoreError::Class(e)),
+    };
+    let r = match run_class_strings(&ClassStringsJob::new(apk, target.as_str())) {
+        Ok(r) => r,
+        Err(e) => return core_error_exit(&e),
+    };
+    for e in &r.errors {
+        eprintln!("warning: {e}");
+    }
+    let matched: Vec<_> = r
+        .strings
+        .iter()
+        .filter(|s| substring.is_none_or(|f| s.text.contains(f)))
+        .collect();
+    let shown = &matched[..matched.len().min(limit)];
+    let text = match format {
+        OutputFormat::Text => {
+            let mut s = String::new();
+            for c in shown {
+                let _ = writeln!(s, "{} x{} {}", r.dex_name, c.sites, c.text);
+            }
+            if shown.len() < matched.len() {
+                let _ = writeln!(s, "... truncated: {} matches, limit {limit}", matched.len());
+            }
+            let _ = writeln!(s, "# complete: {}", r.complete);
+            s
+        }
+        OutputFormat::Json => to_json(&serde_json::json!({
+            "class": target,
+            "dex_name": r.dex_name,
+            "strings": shown
+                .iter()
+                .map(|c| serde_json::json!({ "text": c.text, "sites": c.sites }))
+                .collect::<Vec<_>>(),
+            "total_matched": matched.len(),
+            "truncated": shown.len() < matched.len(),
+            "errors": r.errors,
+            "complete": r.complete,
+        })),
+    };
+    emit_partial(&text, output, r.complete)
+}
+
+/// `asc-rs calls <apk> <class> --method NAME`: breadth-first callee tree.
+/// A class absent from every DEX exits 1; scan failures print the
+/// reachable part and exit 2.
+fn run_calls_cmd(
+    apk: &std::path::Path,
+    class: &str,
+    method: &str,
+    depth: u8,
+    max_nodes: usize,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    use std::fmt::Write as _;
+    let target = match asc_core::normalize_class_name(class) {
+        Ok(t) => t,
+        Err(e) => return core_error_exit(&CoreError::Class(e)),
+    };
+    let opts = CallTreeOptions {
+        depth,
+        max_nodes,
+        scan_budget_bytes: 0,
+    };
+    let r = match run_call_tree(&CallTreeJob::new(apk, target.as_str(), method), &opts) {
+        Ok(r) => r,
+        Err(e) => return core_error_exit(&e),
+    };
+    // The root hop records its DEX whenever the class exists.
+    if depth > 0 && r.dex_names.is_empty() && r.errors.is_empty() {
+        return core_error_exit(&CoreError::ClassNotFound(target));
+    }
+    for e in &r.errors {
+        eprintln!("warning: {e}");
+    }
+    let complete = r.errors.is_empty();
+    let text = match format {
+        OutputFormat::Text => {
+            let mut s = String::new();
+            for n in &r.nodes {
+                let _ = writeln!(
+                    s,
+                    "{}{}->{} -> {}->{} x{}",
+                    "  ".repeat(usize::from(n.depth.saturating_sub(1))),
+                    n.from_class,
+                    n.from_member,
+                    n.to_class,
+                    n.to_member,
+                    n.sites
+                );
+            }
+            let _ = writeln!(
+                s,
+                "# {} edges, truncated: {}, complete: {complete}",
+                r.nodes.len(),
+                r.truncated
+            );
+            s
+        }
+        OutputFormat::Json => to_json(&serde_json::json!({
+            "class": target,
+            "method": method,
+            "dex_names": r.dex_names,
+            "edges": r.nodes.iter().map(|n| serde_json::json!({
+                "depth": n.depth,
+                "from_class": n.from_class,
+                "from_member": n.from_member,
+                "to_class": n.to_class,
+                "to_member": n.to_member,
+                "sites": n.sites,
+                "dex": n.to_dex,
+            })).collect::<Vec<_>>(),
+            "truncated": r.truncated,
+            "errors": r.errors,
+            "complete": complete,
+        })),
+    };
+    emit_partial(&text, output, complete)
 }
 
 /// `asc-rs hermes <apk>`: extract Hermes bundle string tables. Partial
