@@ -858,13 +858,14 @@ fn apk_and_zipview_are_send_and_sync() {
 #[test]
 fn corpus_workload_apk_single_dex_matches_dex_fixture() {
     use std::path::Path;
-    let apk_path = Path::new("../../../corpus/apk/workload.apk");
-    let dex_path = Path::new("../../../corpus/dex/workload_classes.dex");
+    let apk_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/workload.apk");
+    let dex_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/dex/workload_classes.dex");
     if !apk_path.exists() || !dex_path.exists() {
         eprintln!("corpus fixtures missing; skipping");
         return;
     }
-    let apk = Apk::open(apk_path).expect("open workload.apk");
+    let apk = Apk::open(&apk_path).expect("open workload.apk");
     let dex_entries = apk.dex_entries();
     let names: Vec<&str> = dex_entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, vec!["classes.dex"], "expected single dex entry");
@@ -888,14 +889,17 @@ fn corpus_workload_apk_single_dex_matches_dex_fixture() {
 #[test]
 fn corpus_aurora_apk_multidex_matches_dex_fixtures() {
     use std::path::Path;
-    let apk_path = Path::new("../../../corpus/apk/com.aurora.store_60.apk");
-    let dex1_path = Path::new("../../../corpus/dex/aurora_classes.dex");
-    let dex2_path = Path::new("../../../corpus/dex/aurora_classes2.dex");
+    let apk_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/apk/com.aurora.store_60.apk");
+    let dex1_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/dex/aurora_classes.dex");
+    let dex2_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/dex/aurora_classes2.dex");
     if !apk_path.exists() || !dex1_path.exists() || !dex2_path.exists() {
         eprintln!("aurora fixtures missing; skipping");
         return;
     }
-    let apk = Apk::open(apk_path).expect("open aurora.apk");
+    let apk = Apk::open(&apk_path).expect("open aurora.apk");
     let dex_entries = apk.dex_entries();
     let names: Vec<&str> = dex_entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
