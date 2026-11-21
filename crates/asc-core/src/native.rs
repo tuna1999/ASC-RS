@@ -1,16 +1,19 @@
 //! `asc-rs native`: `.so` inventory + DEX native-method inventory, joined
 //! by JNI export *name*.
 //!
-//! A name match is a candidate link, not proof of runtime linkage. Zero
-//! matches only means "not bound by name": `RegisterNatives` (dynamic
-//! registration) is possible but is neither detected nor resolved here.
+//! A name match is a candidate link, not proof of runtime linkage. Each
+//! library is also scanned for static `JNINativeMethod` arrays (the
+//! `RegisterNatives` input, [`asc_apk::elf::jni_tables`]); a method whose
+//! name + descriptor appear in such a table is a *table match*. Tables only
+//! name the method, not its class, so a table match is a candidate too, and
+//! tables built at run time stay invisible: `unbound` never proves absence.
 //! Libraries stay in memory, one at a time; nothing is written to disk.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use asc_apk::elf::{ElfPath, parse_elf};
+use asc_apk::elf::{ElfPath, jni_tables, parse_elf};
 use asc_apk::{Apk, DexEntry, InflateLimits};
 use asc_dex::DexView;
 use asc_dex::ids::TypeIdx;
@@ -49,8 +52,21 @@ pub struct LibInfo {
     pub java_export_count: usize,
     /// Native methods whose short/long JNI name this library exports.
     pub matched_methods: usize,
+    /// Static `JNINativeMethod` entries found in this library's data.
+    pub jni_table: Vec<JniTableEntry>,
+    /// Native methods whose name + descriptor appear in `jni_table`.
+    pub table_matched_methods: usize,
     pub complete: bool,
     pub notes: Vec<String>,
+}
+
+/// One static `JNINativeMethod { name, signature, fnPtr }`.
+#[derive(Debug, Clone, Serialize)]
+pub struct JniTableEntry {
+    pub name: String,
+    pub signature: String,
+    /// Implementation address; `None` when bound by a symbolic relocation.
+    pub fn_addr: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +84,9 @@ pub struct NativeMethod {
     pub long_jni: String,
     /// Libraries exporting `short_jni` or `long_jni` (candidate link only).
     pub matched_libs: Vec<String>,
+    /// Libraries whose `JNINativeMethod` table lists this name + descriptor
+    /// (candidate link only: the table does not name the class).
+    pub table_libs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +97,9 @@ pub struct NativeReport {
     pub direct_count: usize,
     pub virtual_count: usize,
     pub matched_methods: usize,
+    /// Methods with a table match (may overlap `matched_methods`).
+    pub table_matched_methods: usize,
+    /// Methods with neither a name match nor a table match.
     pub unbound_methods: usize,
     pub note: Option<String>,
     pub errors: Vec<String>,
@@ -212,6 +234,7 @@ fn walk_view(
                     short_jni,
                     long_jni,
                     matched_libs: Vec::new(),
+                    table_libs: Vec::new(),
                 });
             }
         }
@@ -246,6 +269,12 @@ pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
     let mut methods = scan_methods(&apk, cap, &mut errors, &mut complete);
 
     bind_exports(&mut methods, &mut libs, &bound);
+    bind_tables(&mut methods, &mut libs);
+    let table_matched = methods.iter().filter(|m| !m.table_libs.is_empty()).count();
+    let unbound = methods
+        .iter()
+        .filter(|m| m.matched_libs.is_empty() && m.table_libs.is_empty())
+        .count();
     let matched = methods
         .iter()
         .filter(|m| !m.matched_libs.is_empty())
@@ -254,7 +283,7 @@ pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
     // ABI splits means "native code may be missing", not "no native
     // code". Augment the note instead of overriding it.
     let note = match (
-        binding_note(&methods, matched),
+        binding_note(&methods, unbound),
         abi_split_note(&apk, path, libs.is_empty()),
     ) {
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
@@ -268,7 +297,8 @@ pub fn run_native(path: &Path) -> Result<NativeReport, CoreError> {
         direct_count,
         virtual_count: methods.len() - direct_count,
         matched_methods: matched,
-        unbound_methods: methods.len() - matched,
+        table_matched_methods: table_matched,
+        unbound_methods: unbound,
         methods,
         note,
         errors,
@@ -322,6 +352,8 @@ fn scan_lib(
         export_count: 0,
         java_export_count: 0,
         matched_methods: 0,
+        jni_table: Vec::new(),
+        table_matched_methods: 0,
         complete: false,
         notes: Vec::new(),
     };
@@ -364,6 +396,19 @@ fn scan_lib(
                 });
                 lib.complete = elf.complete;
                 lib.notes.extend(elf.notes);
+                if let Ok(t) = jni_tables(bytes.as_slice()) {
+                    lib.complete &= t.complete;
+                    lib.notes.extend(t.notes);
+                    lib.jni_table = t
+                        .entries
+                        .into_iter()
+                        .map(|e| JniTableEntry {
+                            name: e.name,
+                            signature: e.signature,
+                            fn_addr: e.fn_addr,
+                        })
+                        .collect();
+                }
             }
         },
     }
@@ -454,25 +499,52 @@ fn bind_exports(
     }
 }
 
-/// Note about how many native methods lack a name-matched export.
-fn binding_note(methods: &[NativeMethod], matched: usize) -> Option<String> {
-    if methods.is_empty() {
+/// Join native methods to libraries whose static `JNINativeMethod` table
+/// lists the same name and descriptor. Candidate link only.
+fn bind_tables(methods: &mut [NativeMethod], libs: &mut [LibInfo]) {
+    let mut index: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, l) in libs.iter().enumerate() {
+        for e in &l.jni_table {
+            let v = index
+                .entry((e.name.clone(), e.signature.clone()))
+                .or_default();
+            if v.last() != Some(&i) {
+                v.push(i);
+            }
+        }
+    }
+    let mut counts = vec![0usize; libs.len()];
+    for m in methods.iter_mut() {
+        let key = (m.name.clone(), format!("({}){}", m.params.concat(), m.ret));
+        for &i in index.get(&key).into_iter().flatten() {
+            m.table_libs.push(libs[i].name.clone());
+            counts[i] += 1;
+        }
+    }
+    for (l, c) in libs.iter_mut().zip(counts) {
+        l.table_matched_methods = c;
+    }
+}
+
+/// Note about native methods with neither a name-matched export nor a
+/// static `JNINativeMethod` table entry.
+fn binding_note(methods: &[NativeMethod], unbound: usize) -> Option<String> {
+    if unbound == 0 {
         None
-    } else if matched == 0 {
+    } else if unbound == methods.len() {
         Some(
-            "no native method is bound by an exported Java_* name; dynamic registration \
-             (RegisterNatives) is possible but not verified"
+            "no native method is bound by an exported Java_* name or a static \
+             JNINativeMethod table; registration from run-time data is possible \
+             but not verified"
                 .to_string(),
         )
-    } else if matched < methods.len() {
+    } else {
         Some(format!(
-            "{} of {} native methods have no name-matched export; dynamic registration \
-             is possible for those (not verified)",
-            methods.len() - matched,
+            "{unbound} of {} native methods have neither a name-matched export nor a \
+             static JNINativeMethod table entry; registration from run-time data is \
+             possible for those (not verified)",
             methods.len()
         ))
-    } else {
-        None
     }
 }
 
@@ -501,13 +573,14 @@ pub fn format_native_text(r: &NativeReport) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
-        "input: {}\nnative libraries: {}\nnative methods: {} ({} direct, {} virtual), name-matched {}, unbound {}\ncomplete: {}",
+        "input: {}\nnative libraries: {}\nnative methods: {} ({} direct, {} virtual), name-matched {}, table-matched {}, unbound {}\ncomplete: {}",
         r.input,
         r.libs.len(),
         r.methods.len(),
         r.direct_count,
         r.virtual_count,
         r.matched_methods,
+        r.table_matched_methods,
         r.unbound_methods,
         r.complete
     );
@@ -526,7 +599,7 @@ pub fn format_native_text(r: &NativeReport) -> String {
         );
         let _ = writeln!(
             s,
-            "lib {} ({} B, abi_dir {}{}): {elf}; JNI_OnLoad={}, exports {} (Java_* {}), matched methods {}{}",
+            "lib {} ({} B, abi_dir {}{}): {elf}; JNI_OnLoad={}, exports {} (Java_* {}), matched methods {}, JNI table entries {} (matched {}){}",
             l.name,
             l.size,
             l.abi_dir.as_deref().unwrap_or("-"),
@@ -539,17 +612,32 @@ pub fn format_native_text(r: &NativeReport) -> String {
             l.export_count,
             l.java_export_count,
             l.matched_methods,
+            l.jni_table.len(),
+            l.table_matched_methods,
             if l.complete { "" } else { " [INCOMPLETE]" },
         );
         for n in &l.notes {
             let _ = writeln!(s, "  note: {n}");
         }
+        for e in &l.jni_table {
+            let addr = e
+                .fn_addr
+                .map_or("<symbol>".to_string(), |a| format!("{a:#x}"));
+            let _ = writeln!(s, "  jni-table {} {} -> {addr}", e.name, e.signature);
+        }
     }
     for m in &r.methods {
-        let link = if m.matched_libs.is_empty() {
+        let mut links = Vec::new();
+        if !m.matched_libs.is_empty() {
+            links.push(format!("name-match: {}", m.matched_libs.join(", ")));
+        }
+        if !m.table_libs.is_empty() {
+            links.push(format!("table-match: {}", m.table_libs.join(", ")));
+        }
+        let link = if links.is_empty() {
             "unbound".to_string()
         } else {
-            format!("name-match: {}", m.matched_libs.join(", "))
+            links.join("; ")
         };
         let _ = writeln!(
             s,

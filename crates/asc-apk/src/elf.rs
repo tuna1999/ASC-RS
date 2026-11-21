@@ -10,6 +10,11 @@
 //! string table. Fallback (no usable dynsym section, e.g. stripped section
 //! headers): `PT_DYNAMIC` → `DT_SYMTAB`/`DT_STRTAB`, symbol count from
 //! `DT_HASH.nchain` or a bounded `DT_GNU_HASH` walk.
+//!
+//! [`jni_tables`] separately scans non-executable `PT_LOAD` data for
+//! static `JNINativeMethod` arrays (the `RegisterNatives` input).
+
+use std::collections::{HashMap, HashSet};
 
 /// Max symbols examined.
 pub const MAX_SYMBOLS: usize = 65_536;
@@ -79,22 +84,7 @@ impl R<'_> {
 /// Parse `b` as an ELF shared object. `Err` only for a header that is not
 /// a usable ELF at all.
 pub fn parse_elf(b: &[u8]) -> Result<ElfInfo, &'static str> {
-    if b.len() < 0x34 || &b[..4] != b"\x7fELF" {
-        return Err("not an ELF file");
-    }
-    let is64 = match b[4] {
-        1 => false,
-        2 => true,
-        _ => return Err("bad ELF class"),
-    };
-    let le = match b[5] {
-        1 => true,
-        2 => false,
-        _ => return Err("bad ELF data encoding"),
-    };
-    if is64 && b.len() < 0x40 {
-        return Err("truncated ELF64 header");
-    }
+    let (is64, le) = header(b)?;
     let r = R { b, le };
     let machine = r.u16(0x12).unwrap_or(0) as u16;
     let mut info = ElfInfo {
@@ -120,6 +110,27 @@ pub fn parse_elf(b: &[u8]) -> Result<ElfInfo, &'static str> {
         }
     }
     Ok(info)
+}
+
+/// `(is64, little_endian)` of a usable ELF header.
+fn header(b: &[u8]) -> Result<(bool, bool), &'static str> {
+    if b.len() < 0x34 || &b[..4] != b"\x7fELF" {
+        return Err("not an ELF file");
+    }
+    let is64 = match b[4] {
+        1 => false,
+        2 => true,
+        _ => return Err("bad ELF class"),
+    };
+    let le = match b[5] {
+        1 => true,
+        2 => false,
+        _ => return Err("bad ELF data encoding"),
+    };
+    if is64 && b.len() < 0x40 {
+        return Err("truncated ELF64 header");
+    }
+    Ok((is64, le))
 }
 
 /// Section-header path. `false` = not usable (caller falls back).
@@ -184,63 +195,15 @@ fn from_sections(r: &R, is64: bool, info: &mut ElfInfo) -> bool {
 
 /// `PT_DYNAMIC` fallback.
 fn from_dynamic(r: &R, is64: bool, info: &mut ElfInfo) -> bool {
-    let (phoff, phentsize, phnum) = if is64 {
-        (r.n(0x20, 8), r.u16(0x36), r.u16(0x38))
-    } else {
-        (r.n(0x1C, 4), r.u16(0x2A), r.u16(0x2C))
-    };
-    let (Some(phoff), Some(phentsize), Some(phnum)) = (phoff, phentsize, phnum) else {
+    let Some(segs) = segments(r, is64) else {
         return false;
     };
-    let min_ent = if is64 { 56 } else { 32 };
-    if phoff == 0 || phnum == 0 || (phentsize as usize) < min_ent {
-        return false;
-    }
-    // (type, offset, vaddr, filesz)
-    let mut loads = Vec::new();
-    let mut dynamic = None;
-    for i in 0..phnum {
-        let h = phoff + i * phentsize;
-        let Some(ty) = r.u32(h) else { return false };
-        let seg = if is64 {
-            (r.n(h + 8, 8), r.n(h + 0x10, 8), r.n(h + 0x20, 8))
-        } else {
-            (r.u32(h + 4), r.u32(h + 8), r.u32(h + 0x10))
-        };
-        let (Some(off), Some(va), Some(fsz)) = seg else {
-            return false;
-        };
-        match ty {
-            1 => loads.push((off, va, fsz)),
-            2 => dynamic = dynamic.or(Some((off, fsz))),
-            _ => {}
-        }
-    }
-    let to_off = |va: u64| {
-        loads
-            .iter()
-            .find_map(|&(off, v, fsz)| (va >= v && va - v < fsz).then(|| off + (va - v)))
-    };
-    let Some((doff, dsz)) = dynamic else {
+    let Some(dynv) = dynamic_entries(r, is64, &segs) else {
         return false;
     };
-    let esz = if is64 { 16 } else { 8 };
-    let (mut symtab, mut strtab, mut strsz, mut hash, mut gnu) = (None, None, None, None, None);
-    for i in 0..(dsz / esz).min(MAX_DYN_ENTRIES as u64) {
-        let p = doff + i * esz;
-        let (Some(tag), Some(val)) = (r.w(p, is64), r.w(p + esz / 2, is64)) else {
-            break;
-        };
-        match tag {
-            0 => break,
-            4 => hash = Some(val),
-            5 => strtab = Some(val),
-            6 => symtab = Some(val),
-            10 => strsz = Some(val),
-            0x6fff_fef5 => gnu = Some(val),
-            _ => {}
-        }
-    }
+    let to_off = |va: u64| va_to_off(&segs, va);
+    let tag = |t: u64| dynv.iter().find(|e| e.0 == t).map(|e| e.1);
+    let (symtab, strtab, strsz, hash, gnu) = (tag(6), tag(5), tag(10), tag(4), tag(0x6fff_fef5));
     let (Some(symva), Some(strva)) = (symtab, strtab) else {
         return false;
     };
@@ -270,6 +233,79 @@ fn from_dynamic(r: &R, is64: bool, info: &mut ElfInfo) -> bool {
         strsz,
     );
     true
+}
+
+/// One program header.
+#[derive(Clone, Copy)]
+struct Seg {
+    ty: u64,
+    flags: u64,
+    off: u64,
+    va: u64,
+    fsz: u64,
+}
+
+const PT_LOAD: u64 = 1;
+const PF_X: u64 = 1;
+
+/// All program headers, `None` when the table itself is unreadable.
+fn segments(r: &R, is64: bool) -> Option<Vec<Seg>> {
+    let (phoff, phentsize, phnum) = if is64 {
+        (r.n(0x20, 8)?, r.u16(0x36)?, r.u16(0x38)?)
+    } else {
+        (r.n(0x1C, 4)?, r.u16(0x2A)?, r.u16(0x2C)?)
+    };
+    let min_ent = if is64 { 56 } else { 32 };
+    if phoff == 0 || phnum == 0 || (phentsize as usize) < min_ent {
+        return None;
+    }
+    (0..phnum)
+        .map(|i| {
+            let h = phoff.checked_add(i * phentsize)?;
+            Some(if is64 {
+                Seg {
+                    ty: r.u32(h)?,
+                    flags: r.u32(h + 4)?,
+                    off: r.n(h + 8, 8)?,
+                    va: r.n(h + 0x10, 8)?,
+                    fsz: r.n(h + 0x20, 8)?,
+                }
+            } else {
+                Seg {
+                    ty: r.u32(h)?,
+                    off: r.u32(h + 4)?,
+                    va: r.u32(h + 8)?,
+                    fsz: r.u32(h + 0x10)?,
+                    flags: r.u32(h + 0x18)?,
+                }
+            })
+        })
+        .collect()
+}
+
+/// File offset of virtual address `va` inside some `PT_LOAD`.
+fn va_to_off(segs: &[Seg], va: u64) -> Option<u64> {
+    segs.iter()
+        .filter(|s| s.ty == PT_LOAD)
+        .find_map(|s| (va >= s.va && va - s.va < s.fsz).then(|| s.off + (va - s.va)))
+}
+
+/// `(tag, value)` pairs of the first `PT_DYNAMIC`, up to `DT_NULL`.
+fn dynamic_entries(r: &R, is64: bool, segs: &[Seg]) -> Option<Vec<(u64, u64)>> {
+    let d = segs.iter().find(|s| s.ty == 2)?;
+    let esz = if is64 { 16 } else { 8 };
+    let mut out = Vec::new();
+    for i in 0..(d.fsz / esz).min(MAX_DYN_ENTRIES as u64) {
+        let p = d.off + i * esz;
+        let (Some(tag), Some(val)) = (r.w(p, is64), r.w(p + esz / 2, is64)) else {
+            break;
+        };
+        if tag == 0 {
+            break;
+        }
+        out.push((tag, val));
+    }
+    Some(out)
 }
 
 /// Symbol count from a `DT_GNU_HASH` table: highest bucket start, then walk
@@ -384,6 +420,242 @@ fn read_symbols(
         info.notes
             .push(format!("{bad} symbol name offsets outside dynstr"));
     }
+}
+
+/// Most `JNINativeMethod` entries [`jni_tables`] reports per library.
+pub const MAX_JNI_ENTRIES: usize = 4096;
+
+/// Most relocations read per table.
+const MAX_RELOCS: u64 = 1 << 20;
+
+/// One statically initialised `JNINativeMethod { name, signature, fnPtr }`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct JniEntry {
+    pub name: String,
+    pub signature: String,
+    /// Virtual address of the implementation; `None` when it is bound
+    /// through a symbolic relocation (an imported or preemptible symbol).
+    pub fn_addr: Option<u64>,
+}
+
+/// Result of [`jni_tables`].
+#[derive(Debug, Clone, Default)]
+pub struct JniTables {
+    pub entries: Vec<JniEntry>,
+    /// `false` when a cap or an undecoded relocation format limited the scan.
+    pub complete: bool,
+    pub notes: Vec<String>,
+}
+
+/// Find statically initialised `JNINativeMethod` arrays (the input of
+/// `RegisterNatives`) in the non-executable data of `b`.
+///
+/// A candidate is three consecutive pointer-sized words in a non-executable
+/// `PT_LOAD`: a pointer to a NUL-terminated method name, a pointer to a
+/// well-formed JNI method descriptor, and a pointer into an executable
+/// segment (or a symbolic relocation). Pointer words are resolved through
+/// `RELATIVE` relocations (`DT_RELA`) or, failing that, the word stored in
+/// the file (`DT_REL`, `DT_RELR` and non-PIE layouts keep it there).
+/// Tables built at run time (heap arrays, strings decrypted in
+/// `JNI_OnLoad`) are invisible to this scan.
+pub fn jni_tables(b: &[u8]) -> Result<JniTables, &'static str> {
+    let (is64, le) = header(b)?;
+    let r = R { b, le };
+    let mut out = JniTables {
+        complete: true,
+        ..JniTables::default()
+    };
+    let Some(segs) = segments(&r, is64) else {
+        out.complete = false;
+        out.notes
+            .push("no program headers; JNI table scan skipped".into());
+        return Ok(out);
+    };
+    let machine = r.u16(0x12).unwrap_or(0);
+    let dynv = dynamic_entries(&r, is64, &segs).unwrap_or_default();
+    let (relative, symbolic) = relocations(&r, is64, machine, &segs, &dynv, &mut out);
+    let word: u64 = if is64 { 8 } else { 4 };
+    let ptr = |off: u64| -> Option<u64> {
+        match relative.get(&off) {
+            Some(&v) => Some(v),
+            None => r.w(off, is64).filter(|&v| v != 0),
+        }
+    };
+    let cstr = |va: u64| -> Option<&[u8]> {
+        let s = b.get(usize::try_from(va_to_off(&segs, va)?).ok()?..)?;
+        let n = s.iter().take(MAX_NAME).position(|&c| c == 0)?;
+        Some(&s[..n])
+    };
+    let is_exec = |va: u64| {
+        segs.iter()
+            .any(|s| s.ty == PT_LOAD && s.flags & PF_X != 0 && va >= s.va && va - s.va < s.fsz)
+    };
+    let mut seen = HashSet::new();
+    for s in segs
+        .iter()
+        .filter(|s| s.ty == PT_LOAD && s.flags & PF_X == 0)
+    {
+        let end = s.off.saturating_add(s.fsz).min(b.len() as u64);
+        let mut p = s.off.next_multiple_of(word);
+        while p + 3 * word <= end {
+            let hit = (|| {
+                let name = cstr(ptr(p)?)?;
+                if !jni_name_ok(name) {
+                    return None;
+                }
+                let sig = cstr(ptr(p + word)?)?;
+                if !jni_sig_ok(sig) {
+                    return None;
+                }
+                let f = p + 2 * word;
+                let fn_addr = if symbolic.contains(&f) {
+                    None
+                } else {
+                    let mut v = ptr(f)?;
+                    if machine == 40 {
+                        v &= !1; // Thumb bit
+                    }
+                    if !is_exec(v) {
+                        return None;
+                    }
+                    Some(v)
+                };
+                Some(JniEntry {
+                    name: String::from_utf8_lossy(name).into_owned(),
+                    signature: String::from_utf8_lossy(sig).into_owned(),
+                    fn_addr,
+                })
+            })();
+            let Some(e) = hit else {
+                p += word;
+                continue;
+            };
+            if out.entries.len() >= MAX_JNI_ENTRIES {
+                out.complete = false;
+                out.notes.push(format!(
+                    "more than {MAX_JNI_ENTRIES} JNI entries; truncated"
+                ));
+                return Ok(out);
+            }
+            if seen.insert(e.clone()) {
+                out.entries.push(e);
+            }
+            p += 3 * word;
+        }
+    }
+    Ok(out)
+}
+
+/// File offset → value for `RELATIVE` relocations with an explicit addend,
+/// plus the file offsets of every non-`RELATIVE` (symbolic) relocation.
+fn relocations(
+    r: &R,
+    is64: bool,
+    machine: u64,
+    segs: &[Seg],
+    dynv: &[(u64, u64)],
+    out: &mut JniTables,
+) -> (HashMap<u64, u64>, HashSet<u64>) {
+    let mut relative = HashMap::new();
+    let mut symbolic = HashSet::new();
+    if dynv
+        .iter()
+        .any(|e| e.0 == 0x6000_000f || e.0 == 0x6000_0011)
+    {
+        out.complete = false;
+        out.notes.push(
+            "Android packed relocations (APS2) not decoded; table entries may be missed".into(),
+        );
+    }
+    let rel_type: u64 = match machine {
+        183 => 1027,
+        62 | 3 => 8,
+        40 => 23,
+        243 => 3,
+        _ => u64::MAX,
+    };
+    let tag = |t: u64| dynv.iter().find(|e| e.0 == t).map(|e| e.1);
+    let w: u64 = if is64 { 8 } else { 4 };
+    for (table, size, rela) in [(tag(7), tag(8), true), (tag(17), tag(18), false)] {
+        let (Some(va), Some(size)) = (table, size) else {
+            continue;
+        };
+        let Some(off) = va_to_off(segs, va) else {
+            continue;
+        };
+        let esz = if rela { 3 * w } else { 2 * w };
+        let count = size / esz;
+        if count > MAX_RELOCS {
+            out.complete = false;
+            out.notes
+                .push(format!("more than {MAX_RELOCS} relocations; truncated"));
+        }
+        for i in 0..count.min(MAX_RELOCS) {
+            let e = off + i * esz;
+            let (Some(at), Some(info)) = (r.w(e, is64), r.w(e + w, is64)) else {
+                break;
+            };
+            let ty = if is64 {
+                info & 0xffff_ffff
+            } else {
+                info & 0xff
+            };
+            let Some(at) = va_to_off(segs, at) else {
+                continue;
+            };
+            if ty != rel_type {
+                symbolic.insert(at);
+            } else if rela && let Some(a) = r.w(e + 2 * w, is64) {
+                relative.insert(at, a);
+            }
+        }
+    }
+    (relative, symbolic)
+}
+
+/// Plausible Java method name: no descriptor punctuation, no controls.
+fn jni_name_ok(s: &[u8]) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.iter()
+            .all(|&c| c >= 0x80 || c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'-'))
+}
+
+/// Strict JNI method descriptor: `(` field types `)` field type or `V`.
+fn jni_sig_ok(s: &[u8]) -> bool {
+    fn field(s: &[u8], mut i: usize) -> Option<usize> {
+        while s.get(i) == Some(&b'[') {
+            i += 1;
+        }
+        match *s.get(i)? {
+            b'Z' | b'B' | b'S' | b'C' | b'I' | b'J' | b'F' | b'D' => Some(i + 1),
+            b'L' => {
+                let start = i + 1;
+                let len = s[start..].iter().position(|&c| c == b';')?;
+                let ok = len > 0
+                    && s[start..start + len]
+                        .iter()
+                        .all(|&c| c > b' ' && !matches!(c, b'(' | b')' | b'.' | b'['));
+                ok.then_some(start + len + 1)
+            }
+            _ => None,
+        }
+    }
+    if s.first() != Some(&b'(') {
+        return false;
+    }
+    let mut i = 1;
+    while s.get(i) != Some(&b')') {
+        match field(s, i) {
+            Some(n) => i = n,
+            None => return false,
+        }
+    }
+    i += 1;
+    if s.get(i) == Some(&b'V') {
+        return i + 1 == s.len();
+    }
+    field(s, i) == Some(s.len())
 }
 
 #[cfg(test)]
@@ -503,5 +775,114 @@ mod tests {
         put(&mut b, 0x900 + 64 + 0x20, &(1u64 << 40).to_le_bytes());
         let i = parse_elf(&b).unwrap();
         assert!(!i.complete);
+    }
+
+    /// AArch64 ELF64: RX `PT_LOAD` va 0..0x1000, RW `PT_LOAD` file 0x1000
+    /// mapped at va 0x2000, `PT_DYNAMIC` with `DT_RELA` at va 0x2800.
+    /// `words`: (file offset, value) stored in place; `relocs`: (va, type,
+    /// addend).
+    fn jni_elf(words: &[(usize, u64)], relocs: &[(u64, u64, u64)]) -> Vec<u8> {
+        let mut b = vec![0u8; 0x2000];
+        b[..4].copy_from_slice(b"\x7fELF");
+        b[4] = 2;
+        b[5] = 1;
+        put(&mut b, 0x12, &183u16.to_le_bytes());
+        put(&mut b, 0x20, &0x40u64.to_le_bytes());
+        put(&mut b, 0x36, &56u16.to_le_bytes());
+        put(&mut b, 0x38, &3u16.to_le_bytes());
+        // (type, flags, off, va, filesz)
+        let ph: [(u32, u32, u64, u64, u64); 3] = [
+            (1, 5, 0, 0, 0x1000),
+            (1, 6, 0x1000, 0x2000, 0x1000),
+            (2, 6, 0x1800, 0x2800, 0x40),
+        ];
+        for (i, (t, f, o, v, s)) in ph.iter().enumerate() {
+            let h = 0x40 + i * 56;
+            put(&mut b, h, &t.to_le_bytes());
+            put(&mut b, h + 4, &f.to_le_bytes());
+            put(&mut b, h + 8, &o.to_le_bytes());
+            put(&mut b, h + 0x10, &v.to_le_bytes());
+            put(&mut b, h + 0x20, &s.to_le_bytes());
+        }
+        put(
+            &mut b,
+            0x1100,
+            b"nativeInit\0(Ljava/lang/String;[I)V\0bad\0not a sig\0",
+        );
+        for (i, (va, ty, add)) in relocs.iter().enumerate() {
+            let e = 0x1400 + i * 24;
+            put(&mut b, e, &va.to_le_bytes());
+            put(&mut b, e + 8, &ty.to_le_bytes());
+            put(&mut b, e + 16, &add.to_le_bytes());
+        }
+        let dynv: [(u64, u64); 3] = [(7, 0x2400), (8, relocs.len() as u64 * 24), (0, 0)];
+        for (i, (t, v)) in dynv.iter().enumerate() {
+            put(&mut b, 0x1800 + i * 16, &t.to_le_bytes());
+            put(&mut b, 0x1808 + i * 16, &v.to_le_bytes());
+        }
+        for (o, v) in words {
+            put(&mut b, *o, &v.to_le_bytes());
+        }
+        b
+    }
+
+    const NAME: u64 = 0x2100;
+    const SIG: u64 = 0x210b;
+
+    #[test]
+    fn jni_tables_resolve_rela_in_place_and_symbolic_pointers() {
+        const REL: u64 = 1027;
+        let relocs = [
+            // entry 0 (va 0x2200): all three RELATIVE
+            (0x2200, REL, NAME),
+            (0x2208, REL, SIG),
+            (0x2210, REL, 0x500 | 1),
+            // entry 1 (va 0x2240): signature pointer lands mid-string
+            (0x2240, REL, NAME),
+            (0x2248, REL, 0x211e), // "[I)V"
+            (0x2250, 257, 0),
+        ];
+        // entry 2 (file 0x1280 / va 0x2280): pointers stored in place
+        let words = [(0x1280, NAME), (0x1288, SIG), (0x1290, 0x600)];
+        let t = jni_tables(&jni_elf(&words, &relocs)).unwrap();
+        assert!(t.complete, "{:?}", t.notes);
+        let sig = "(Ljava/lang/String;[I)V";
+        let e = |f| JniEntry {
+            name: "nativeInit".into(),
+            signature: sig.into(),
+            fn_addr: f,
+        };
+        assert_eq!(t.entries, [e(Some(0x501)), e(Some(0x600))]);
+    }
+
+    #[test]
+    fn jni_tables_reject_bad_signature_and_data_fn_pointer() {
+        const REL: u64 = 1027;
+        let relocs = [
+            (0x2200, REL, NAME),
+            (0x2208, REL, 0x2123), // "bad"
+            (0x2210, REL, 0x500),
+            (0x2240, REL, NAME),
+            (0x2248, REL, SIG),
+            (0x2250, REL, 0x2100), // fn into data
+            (0x2280, REL, NAME),
+            (0x2288, REL, SIG),
+            (0x2290, 257, 0), // symbolic fn
+        ];
+        let t = jni_tables(&jni_elf(&[], &relocs)).unwrap();
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].fn_addr, None);
+    }
+
+    #[test]
+    fn jni_signature_grammar() {
+        for ok in ["()V", "(IJ)Z", "([[Ljava/lang/Object;)[B", "(La/B;)La/B;"] {
+            assert!(jni_sig_ok(ok.as_bytes()), "{ok}");
+        }
+        for bad in [
+            "", "()", "(V)V", "()VV", "(L;)V", "(La.B;)V", "(I", "([)V", "()[V",
+        ] {
+            assert!(!jni_sig_ok(bad.as_bytes()), "{bad}");
+        }
     }
 }

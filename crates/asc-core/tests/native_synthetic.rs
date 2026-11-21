@@ -2,6 +2,8 @@
 //! virtual public instance, both `code_off = 0`) plus a non-native virtual,
 //! and two ELF libs exporting short/long JNI names. Exercises the DEX walk,
 //! the direct+virtual coverage, short/long matching and the ABI cross-check.
+//! A third lib exports nothing but holds a static `JNINativeMethod` table
+//! (the `RegisterNatives` input), exercising the table match.
 
 use asc_core::run_native;
 
@@ -83,7 +85,10 @@ fn dex() -> Vec<u8> {
 }
 
 /// ELF64 LE with .dynsym/.dynstr sections exporting `names`.
-fn elf(machine: u16, names: &[&str]) -> Vec<u8> {
+/// ELF64 LE: dynsym/dynstr sections, an RX `PT_LOAD` (file 0..0x400,
+/// identity) and an RW `PT_LOAD` (file 0x400..0x600 at va 0x1400) holding
+/// `table` as in-place `JNINativeMethod { name, sig, fn = 0x10 }` entries.
+fn elf(machine: u16, names: &[&str], table: &[(&str, &str)]) -> Vec<u8> {
     let mut strs = vec![0u8];
     let mut syms = vec![0u8; 24];
     for n in names {
@@ -112,6 +117,35 @@ fn elf(machine: u16, names: &[&str]) -> Vec<u8> {
     p64(&mut b, 0x100 + 128 + 0x20, strs.len() as u64);
     b[0x200..0x200 + syms.len()].copy_from_slice(&syms);
     b[0x300..0x300 + strs.len()].copy_from_slice(&strs);
+    b.resize(0x600, 0);
+    p64(&mut b, 0x20, 0x40);
+    p16(&mut b, 0x36, 56);
+    p16(&mut b, 0x38, 2);
+    for (i, (flags, off, va, sz)) in [(5u32, 0u64, 0u64, 0x400u64), (6, 0x400, 0x1400, 0x200)]
+        .into_iter()
+        .enumerate()
+    {
+        let h = 0x40 + i * 56;
+        p32(&mut b, h, 1);
+        p32(&mut b, h + 4, flags);
+        p64(&mut b, h + 8, off);
+        p64(&mut b, h + 0x10, va);
+        p64(&mut b, h + 0x20, sz);
+    }
+    let (mut text, mut ent) = (0x500usize, 0x400usize);
+    for (name, sig) in table {
+        let mut ptr = |s: &str| {
+            let va = (text - 0x400 + 0x1400) as u64;
+            b[text..text + s.len()].copy_from_slice(s.as_bytes());
+            text += s.len() + 1;
+            va
+        };
+        let (n, g) = (ptr(name), ptr(sig));
+        for (k, v) in [n, g, 0x10].into_iter().enumerate() {
+            p64(&mut b, ent + k * 8, v);
+        }
+        ent += 24;
+    }
     b
 }
 
@@ -158,10 +192,14 @@ fn pairs_direct_and_virtual_natives_with_short_and_long_exports() {
         ("classes.dex", dex()),
         (
             "lib/arm64-v8a/liba.so",
-            elf(183, &["JNI_OnLoad", "Java_Nat_nat__I"]),
+            elf(183, &["JNI_OnLoad", "Java_Nat_nat__I"], &[]),
         ),
         // e_machine 183 (aarch64) under the x86 dir: must be flagged.
-        ("lib/x86/libb.so", elf(183, &["Java_Nat_nat"])),
+        ("lib/x86/libb.so", elf(183, &["Java_Nat_nat"], &[])),
+        (
+            "lib/arm64-v8a/libc.so",
+            elf(183, &["JNI_OnLoad"], &[("nat", "()V"), ("nat", "(J)V")]),
+        ),
     ]);
     let path = std::env::temp_dir().join(format!("asc_native_synth_{}.apk", std::process::id()));
     std::fs::write(&path, apk).unwrap();
@@ -189,4 +227,18 @@ fn pairs_direct_and_virtual_natives_with_short_and_long_exports() {
     assert!(a.jni_onload && a.abi_mismatch == Some(false) && a.matched_methods == 1);
     assert_eq!(r.libs[1].abi_mismatch, Some(true));
     assert_eq!(r.libs[1].matched_methods, 2);
+    // libc's table lists nat()V (and an unrelated nat(J)V).
+    let c = &r.libs[2];
+    assert_eq!(c.jni_table.len(), 2);
+    assert_eq!(c.jni_table[0].fn_addr, Some(0x10));
+    assert_eq!(c.table_matched_methods, 1);
+    assert_eq!(nat0.table_libs, ["lib/arm64-v8a/libc.so"]);
+    assert!(nat1.table_libs.is_empty());
+    assert_eq!((r.table_matched_methods, r.unbound_methods), (1, 0));
+    let text = asc_core::format_native_text(&r);
+    assert!(text.contains("  jni-table nat ()V -> 0x10"), "{text}");
+    assert!(
+        text.contains("name-match: lib/x86/libb.so; table-match: lib/arm64-v8a/libc.so"),
+        "{text}"
+    );
 }

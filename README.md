@@ -62,7 +62,7 @@ asc-rs strings    <apk|dex> [--substring PAT]        # every DEX string-pool ent
 asc-rs strings    <apk|dex> --class Lcom/foo/Bar;    # string constants one class's code loads, with site counts
 asc-rs extract    <apk> <entry> [--verify-crc]       # pull one entry out (safe basename, optional CRC check)
 asc-rs axml       <apk> <entry>                      # decode any compiled binary-XML entry (res/xml/*)
-asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name match
+asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name + RegisterNatives table match
 asc-rs cert       <apk>                             # signing certs (v1/v2/v3), fingerprints; v2/v3 signatures + digests verified
 asc-rs resources <apk> [--id 0x7f020000 | --strings PAT]   # resources.arsc inventory, ID lookup, key/value search
 asc-rs hermes    <apk> [--pattern PAT]                # Hermes bundle string tables (v96; other versions reported unsupported)
