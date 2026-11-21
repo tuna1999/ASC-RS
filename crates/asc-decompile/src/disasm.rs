@@ -65,7 +65,7 @@ use crate::DecompileError;
 
 /// First line of every listing. A documented omission, not a defect.
 pub(crate) const HEADER_NOTE: &str =
-    "# smali-syntax listing from asc-rs; parameter annotations and debug info are not emitted";
+    "# smali-syntax listing from asc-rs; registers are printed as vN";
 
 /// Opcodes the audit flagged; every other opcode goes through
 /// `fmt_instruction` unchanged.
@@ -327,13 +327,28 @@ pub(crate) fn render_class(
             .entry(a.method_idx.0)
             .or_insert(a.annotations_off);
     }
+    let mut param_ann: BTreeMap<u32, u32> = BTreeMap::new();
+    for a in dir.as_ref().map_or(&[][..], |d| &d.parameters[..]) {
+        param_ann.entry(a.method_idx.0).or_insert(a.annotations_off);
+    }
     for em in class_data
         .direct_methods
         .iter()
         .chain(class_data.virtual_methods.iter())
     {
-        let ann = method_ann.get(&em.method_idx.0).copied();
+        let ann = MethodAnn {
+            set: method_ann.get(&em.method_idx.0).copied(),
+            params: param_ann.get(&em.method_idx.0).copied(),
+        };
         render_method(&mut out, dex, bytes, descriptor, em, method, ann)?;
+        // Methods may share one debug_info_item or annotation set, so a
+        // small hostile file could multiply its output per method.
+        if out.len() > MAX_LISTING_BYTES {
+            return Err(err(
+                &c,
+                format!("listing exceeds {} MiB", MAX_LISTING_BYTES >> 20),
+            ));
+        }
     }
 
     Ok(out)
@@ -348,7 +363,7 @@ fn render_method(
     descriptor: &str,
     em: &EncodedMethod,
     filter: Option<&str>,
-    annotations_off: Option<u32>,
+    ann: MethodAnn,
 ) -> Result<(), DecompileError> {
     let bootstrap = ctx(descriptor, em.code_off, None);
     let method_id = dex.methods.get(em.method_idx.0 as usize).ok_or_else(|| {
@@ -382,6 +397,18 @@ fn render_method(
         type_at(dex, proto.return_type_idx, &c)?,
     );
 
+    let param_types: Vec<String> = if proto.parameters_off == 0 {
+        Vec::new()
+    } else {
+        dex.type_lists
+            .get(&proto.parameters_off)
+            .map(|l| l.iter().map(|t| type_at(dex, *t, &c)).collect())
+            .transpose()?
+            .unwrap_or_default()
+    };
+    let is_static = em.access_flags & 0x0008 != 0;
+    let param_sets = ann.params.map(|off| annotation_set_refs(bytes, off));
+
     if em.code_off != 0 {
         let code = dex.code_items.get(&em.code_off).ok_or_else(|| {
             err(
@@ -390,13 +417,62 @@ fn render_method(
             )
         })?;
         let _ = writeln!(out, "    .registers {}", code.registers_size);
-        if let Some(off) = annotations_off {
+        let debug = (code.debug_info_off != 0).then(|| {
+            // Real items carry a handful of entries per instruction;
+            // past this the directives have nothing to attach to.
+            let max_events = 8 * (code.instructions.len() + 1) + 256;
+            decode_debug_info(dex, bytes, code.debug_info_off as usize, max_events, &c)
+        });
+        let names = match &debug {
+            Some(Ok(d)) => &d.param_names[..],
+            _ => &[],
+        };
+        // Parameters sit in the last `ins_size` registers, `this` first.
+        let first =
+            u32::from(code.registers_size.saturating_sub(code.ins_size)) + u32::from(!is_static);
+        write_params(
+            out,
+            dex,
+            bytes,
+            &c,
+            &param_types,
+            names,
+            param_sets.as_ref(),
+            |n| format!("v{}", first + n),
+        );
+        if let Some(off) = ann.set {
             write_annotations(out, dex, bytes, off, "    ", &c);
         }
+        let events = match debug {
+            Some(Ok(d)) => d.events,
+            Some(Err(e)) => {
+                let _ = writeln!(
+                    out,
+                    "    # debug info at {:#x} unreadable: {e}",
+                    code.debug_info_off
+                );
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
         let _ = writeln!(out);
-        render_body(out, dex, bytes, &who, em.code_off, code)?;
-    } else if let Some(off) = annotations_off {
-        write_annotations(out, dex, bytes, off, "    ", &c);
+        render_body(out, dex, bytes, &who, em.code_off, code, &events)?;
+    } else {
+        // No code, no frame: baksmali numbers parameters `pN` (`p0` = this).
+        let first = u32::from(!is_static);
+        write_params(
+            out,
+            dex,
+            bytes,
+            &c,
+            &param_types,
+            &[],
+            param_sets.as_ref(),
+            |n| format!("p{}", first + n),
+        );
+        if let Some(off) = ann.set {
+            write_annotations(out, dex, bytes, off, "    ", &c);
+        }
     }
     out.push_str(".end method\n\n");
     Ok(())
@@ -411,6 +487,7 @@ fn render_body(
     who: &str,
     code_off: u32,
     code: &CodeItem,
+    events: &[(u32, String)],
 ) -> Result<(), DecompileError> {
     let c = ctx(who, code_off, None);
     if let Some(v) = code.invariant_violations.first() {
@@ -434,9 +511,16 @@ fn render_body(
     // Payload addresses print their own `:label` line with the directive.
     let payload_addrs: BTreeSet<u32> = code.payloads.keys().copied().collect();
 
+    // Debug directives are address-sorted; each prints before the first
+    // instruction at or past its address (baksmali orders them ahead of
+    // labels at the same address).
+    let mut pending = events.iter().peekable();
     for insn in &code.instructions {
         if payload_addrs.contains(&insn.addr) {
             continue;
+        }
+        while let Some((_, line)) = pending.next_if(|(a, _)| *a <= insn.addr) {
+            let _ = writeln!(out, "    {line}");
         }
         if labels.contains(&insn.addr) {
             let _ = writeln!(out, "    :{}", label(insn.addr));
@@ -463,6 +547,9 @@ fn render_body(
                 let _ = writeln!(out, "    {d}");
             }
         }
+    }
+    for (_, line) in pending {
+        let _ = writeln!(out, "    {line}");
     }
 
     for (addr, payload) in &code.payloads {
@@ -1174,6 +1261,9 @@ fn encoded_value(dex: &DexFile, v: &EncodedValue, c: &Ctx) -> Result<String, Dec
 /// recursion; rendering them recursively would overflow the stack.
 const MAX_VALUE_DEPTH: usize = 64;
 
+/// Upper bound on one class listing; past it the class is refused.
+const MAX_LISTING_BYTES: usize = 256 << 20;
+
 fn encoded_value_at(
     dex: &DexFile,
     v: &EncodedValue,
@@ -1218,6 +1308,197 @@ fn encoded_value_at(
         }
         EncodedValue::Annotation(a) => annotation_literal(dex, a, c, depth + 1),
     }
+}
+
+/// Annotations attached to one method: its own set and its
+/// `annotation_set_ref_list` of per-parameter sets.
+#[derive(Clone, Copy)]
+struct MethodAnn {
+    set: Option<u32>,
+    params: Option<u32>,
+}
+
+/// `annotation_set_ref_list`: `u32 size` then `size` set offsets (0 = none).
+/// The whole list must fit the file, so a lying size cannot allocate.
+fn annotation_set_refs(bytes: &[u8], off: u32) -> Result<Vec<u32>, String> {
+    let at = |p: usize| -> Result<u32, String> {
+        bytes
+            .get(p..p.saturating_add(4))
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| format!("annotation_set_ref_list at {off:#x} truncated"))
+    };
+    let base = off as usize;
+    let n = at(base)? as usize;
+    if n > bytes.len().saturating_sub(base.saturating_add(4)) / 4 {
+        return Err(format!("annotation_set_ref_list at {off:#x} truncated"));
+    }
+    (0..n).map(|i| at(base + 4 + 4 * i)).collect()
+}
+
+/// baksmali `.param` blocks: one per parameter that has a debug name or
+/// annotations, `.end param` only around an annotation block.
+#[allow(clippy::too_many_arguments)]
+fn write_params(
+    out: &mut String,
+    dex: &DexFile,
+    bytes: &[u8],
+    c: &Ctx,
+    types: &[String],
+    names: &[Option<String>],
+    sets: Option<&Result<Vec<u32>, String>>,
+    reg: impl Fn(u32) -> String,
+) {
+    if let Some(Err(e)) = sets {
+        let _ = writeln!(out, "    # parameter annotations unreadable: {e}");
+    }
+    let sets: &[u32] = match sets {
+        Some(Ok(v)) => v,
+        _ => &[],
+    };
+    let mut n = 0u32;
+    for (i, ty) in types.iter().enumerate() {
+        let name = names.get(i).and_then(Option::as_deref);
+        let mut block = String::new();
+        if let Some(&off) = sets.get(i).filter(|o| **o != 0) {
+            write_annotations(&mut block, dex, bytes, off, "        ", c);
+        }
+        if name.is_some() || !block.is_empty() {
+            let shown = name.map_or(String::new(), |s| {
+                format!(", \"{}\"", escape_smali_string(s))
+            });
+            let _ = writeln!(out, "    .param {}{shown}    # {ty}", reg(n));
+            if !block.is_empty() {
+                out.push_str(&block);
+                let _ = writeln!(out, "    .end param");
+            }
+        }
+        n += if ty == "J" || ty == "D" { 2 } else { 1 };
+    }
+}
+
+/// A decoded `debug_info_item`: parameter names and address-ordered
+/// directive lines (`.line`, `.local`, `.prologue`, …).
+struct DebugInfo {
+    param_names: Vec<Option<String>>,
+    events: Vec<(u32, String)>,
+}
+
+/// Runs the DEX debug state machine over raw bytes, like baksmali: `.line`
+/// is emitted only on a special opcode (a position entry), not on
+/// `DBG_ADVANCE_LINE`. Every opcode consumes at least one byte and the item
+/// must end with `DBG_END_SEQUENCE` before the file does, so work is bounded
+/// by the input. droidsaw's own `DebugInfo` drops prologue/epilogue,
+/// set_file, restart and local signatures, hence this decoder.
+fn decode_debug_info(
+    dex: &DexFile,
+    bytes: &[u8],
+    off: usize,
+    max_events: usize,
+    c: &Ctx,
+) -> Result<DebugInfo, String> {
+    let mut pos = off;
+    let uleb = |pos: &mut usize| -> Result<u32, String> {
+        let (v, n) = droidsaw_dex::mutf8::read_uleb128(bytes, *pos)
+            .map_err(|_| format!("bad uleb128 at {:#x}", *pos))?;
+        *pos += n;
+        Ok(v)
+    };
+    // uleb128p1 string index: 0 = absent.
+    let string = |raw: u32| -> Result<Option<String>, String> {
+        raw.checked_sub(1)
+            .map(|i| string_at(dex, StringIdx(i), c).map_err(|e| e.to_string()))
+            .transpose()
+    };
+    let ty = |raw: u32| -> Result<Option<String>, String> {
+        raw.checked_sub(1)
+            .map(|i| type_at(dex, TypeIdx(i), c).map_err(|e| e.to_string()))
+            .transpose()
+    };
+    let quoted = |s: &Option<String>| {
+        s.as_deref().map_or("null".to_owned(), |s| {
+            format!("\"{}\"", escape_smali_string(s))
+        })
+    };
+
+    let mut line = uleb(&mut pos)?;
+    let n_params = uleb(&mut pos)?;
+    if n_params > u32::from(u16::MAX) {
+        return Err(format!("{n_params} parameter names"));
+    }
+    let mut param_names = Vec::new();
+    for _ in 0..n_params {
+        let raw = uleb(&mut pos)?;
+        param_names.push(string(raw)?);
+    }
+
+    let mut addr = 0u32;
+    let mut events = Vec::new();
+    let mut locals: BTreeMap<u32, String> = BTreeMap::new();
+    loop {
+        if events.len() > max_events {
+            return Err(format!("more than {max_events} debug entries"));
+        }
+        let op = *bytes
+            .get(pos)
+            .ok_or_else(|| "debug info runs past the end of the file".to_owned())?;
+        pos += 1;
+        match op {
+            0x00 => break,
+            0x01 => addr = addr.wrapping_add(uleb(&mut pos)?),
+            0x02 => {
+                let (d, n) = droidsaw_dex::mutf8::read_sleb128(bytes, pos)
+                    .map_err(|_| format!("bad sleb128 at {pos:#x}"))?;
+                pos += n;
+                line = line.wrapping_add_signed(d);
+            }
+            0x03 | 0x04 => {
+                let reg = uleb(&mut pos)?;
+                let name = string(uleb(&mut pos)?)?;
+                let t = ty(uleb(&mut pos)?)?;
+                let sig = if op == 0x04 {
+                    string(uleb(&mut pos)?)?
+                } else {
+                    None
+                };
+                let mut desc = format!("{}:{}", quoted(&name), t.as_deref().unwrap_or("V"));
+                if let Some(sig) = &sig {
+                    let _ = write!(desc, ", {}", quoted(&Some(sig.clone())));
+                }
+                events.push((addr, format!(".local v{reg}, {desc}")));
+                locals.insert(reg, desc);
+            }
+            0x05 | 0x06 => {
+                let reg = uleb(&mut pos)?;
+                let what = if op == 0x05 {
+                    ".end local"
+                } else {
+                    ".restart local"
+                };
+                let note = locals
+                    .get(&reg)
+                    .map_or(String::new(), |d| format!("    # {d}"));
+                events.push((addr, format!("{what} v{reg}{note}")));
+            }
+            0x07 => events.push((addr, ".prologue".to_owned())),
+            0x08 => events.push((addr, ".epilogue".to_owned())),
+            0x09 => {
+                let file = string(uleb(&mut pos)?)?;
+                events.push((addr, format!(".source {}", quoted(&file))));
+            }
+            special => {
+                let adj = u32::from(special - 0x0A);
+                line = line.wrapping_add_signed(-4 + (adj % 15) as i32);
+                addr = addr.wrapping_add(adj / 15);
+                events.push((addr, format!(".line {line}")));
+            }
+        }
+    }
+    // Stable: same-address directives keep stream order.
+    events.sort_by_key(|(a, _)| *a);
+    Ok(DebugInfo {
+        param_names,
+        events,
+    })
 }
 
 /// Every annotation of the set at `set_off` as an `.annotation <visibility>

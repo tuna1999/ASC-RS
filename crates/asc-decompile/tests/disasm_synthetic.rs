@@ -31,8 +31,7 @@ use common::*;
 const GATE: &str = "Lgate/C;";
 
 /// Header comment the contract requires as the first line.
-const BANNER: &str =
-    "# smali-syntax listing from asc-rs; parameter annotations and debug info are not emitted";
+const BANNER: &str = "# smali-syntax listing from asc-rs; registers are printed as vN";
 
 fn disasm(dex: &[u8]) -> Result<String, DecompileError> {
     DroidsawBackend::new().disassemble(dex, GATE, None)
@@ -1414,5 +1413,121 @@ fn hostile_annotation_and_static_values_degrade() {
     );
     assert!(out.contains(".field static b:I = 0x5"), "{out}");
     assert!(out.contains("nested deeper than 64"), "{out}");
+    assert!(out.contains("return-void"), "{out}");
+}
+
+/// Debug info renders as baksmali directives: `.param` names (wide `J`
+/// takes two registers, `this` comes first), parameter annotations,
+/// `.prologue`, `.local`/`.end local`/`.restart local` and `.line` on
+/// position entries only, each before the instruction at its address. A
+/// method without code numbers parameters `pN`.
+#[test]
+fn debug_info_and_parameter_annotations_render() {
+    let mut s = empty_class();
+    let cls = s.classes[0].class_idx;
+    let void = s.ty("V");
+    let wide = s.ty("J");
+    let int = s.ty("I");
+    let string = s.ty("Ljava/lang/String;");
+    let ann_ty = s.ty("Lgate/A;");
+    let a = s.str("a");
+    let x = s.str("x");
+    let p_f = s.proto("VJL", void, &[wide, string]);
+    let p_h = s.proto("VI", void, &[int]);
+    let f = s.method(cls, p_f, "f");
+    let h = s.method(cls, p_h, "h");
+    s.classes[0].virtual_methods = vec![Method {
+        name: f,
+        flags: 0x0001,
+        code: Some(Code {
+            registers: 5,
+            ins: 4,
+            outs: 0,
+            units: vec![0x0012, 0x000E], // const/4 v0, 0x0; return-void
+            tries: vec![],
+            handlers: vec![],
+        }),
+    }];
+    s.classes[0].direct_methods = vec![Method {
+        name: h,
+        flags: 0x0108, // static native
+        code: None,
+    }];
+    let (a1, x1, i1) = (a as u8 + 1, x as u8 + 1, int as u8 + 1);
+    s.classes[0].debug_info = vec![(
+        f,
+        vec![
+            10, 2, a1, 0,    // line_start, two parameter names (second absent)
+            0x07, // prologue
+            0x03, 0, x1, i1,   // start_local v0 "x":I
+            0x0F, // special: line +1, addr +0
+            0x01, 1, // advance_pc 1
+            0x05, 0, // end_local v0
+            0x06, 0, // restart_local v0
+            0x02, 0x7F, // advance_line -1: no position entry, no .line
+            0x0F, // special: line +1 (back to 11), addr +0
+            0x00,
+        ],
+    )];
+    s.classes[0].annotations = vec![
+        (AnnTarget::Param(f, 1), annotation_item(1, ann_ty, &[])),
+        (AnnTarget::Param(h, 0), annotation_item(1, ann_ty, &[])),
+    ];
+    let out = ok(&s.build());
+    let want = "    .registers 5
+    .param v2, \"a\"    # J
+    .param v4    # Ljava/lang/String;
+        .annotation runtime Lgate/A;
+        .end annotation
+    .end param
+
+    .prologue
+    .local v0, \"x\":I
+    .line 11
+    const/4 v0, 0x0
+    .end local v0    # \"x\":I
+    .restart local v0    # \"x\":I
+    .line 11
+    return-void
+";
+    assert!(out.contains(want), "missing\n{want}\nin:\n{out}");
+    assert!(
+        out.contains(
+            "(I)V\n    .param p0    # I\n        .annotation runtime Lgate/A;\n        .end annotation\n    .end param\n.end method"
+        ),
+        "{out}"
+    );
+    assert_eq!(lines_eq(&out, "    .line 10"), 0, "{out}");
+}
+
+/// A debug_info_item with an out-of-range string index is reported in a
+/// comment; the code still lists.
+#[test]
+fn bad_debug_info_degrades_to_comment() {
+    let mut s = with_g();
+    set_code(&mut s, vec![0x000E], 1);
+    let g = s.classes[0].direct_methods[0].name;
+    s.classes[0].debug_info = vec![(g, vec![1, 1, 0x7F, 0x00])];
+    let out = ok(&s.build());
+    assert!(out.contains("    # debug info at 0x"), "{out}");
+    assert!(out.contains("unreadable"), "{out}");
+    assert!(out.contains("return-void"), "{out}");
+}
+
+/// A debug_info_item far longer than its method's code is refused with a
+/// comment instead of rendering every entry (several methods may share the
+/// item, so a small file could otherwise multiply its output).
+#[test]
+fn oversized_debug_info_is_capped() {
+    let mut s = with_g();
+    set_code(&mut s, vec![0x000E], 1);
+    let g = s.classes[0].direct_methods[0].name;
+    let mut item = vec![1, 0];
+    item.extend(std::iter::repeat_n(0x0F, 10_000));
+    item.push(0x00);
+    s.classes[0].debug_info = vec![(g, item)];
+    let out = ok(&s.build());
+    assert!(out.contains("debug entries"), "{out}");
+    assert_eq!(out.matches(".line").count(), 0, "{out}");
     assert!(out.contains("return-void"), "{out}");
 }

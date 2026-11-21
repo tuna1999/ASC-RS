@@ -427,6 +427,8 @@ pub enum AnnTarget {
     Field(u32),
     /// `method_ids` index.
     Method(u32),
+    /// `method_ids` index, parameter position.
+    Param(u32, u32),
 }
 
 /// An `annotation_item`: visibility byte, then `encoded_annotation`
@@ -461,6 +463,9 @@ pub struct ClassSpec {
     /// Raw `annotation_item`s with their target, grouped into one set per
     /// target in the order first seen.
     pub annotations: Vec<(AnnTarget, Vec<u8>)>,
+    /// Raw `debug_info_item` per `method_ids` index; the method's code
+    /// item points at it.
+    pub debug_info: Vec<(u32, Vec<u8>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -703,16 +708,28 @@ impl DexSpec {
         for c in &self.classes {
             let mut offs: Vec<u32> = Vec::new();
             for m in c.direct_methods.iter().chain(c.virtual_methods.iter()) {
-                let off = match &m.code {
-                    Some(code) => {
-                        d.align();
-                        let at = d.off();
-                        code_offs.push(at);
-                        d.raw(&code.body());
-                        at
-                    }
-                    None => 0,
-                };
+                let off =
+                    match &m.code {
+                        Some(code) => {
+                            let dbg = c.debug_info.iter().find(|(m2, _)| *m2 == m.name).map(
+                                |(_, raw)| {
+                                    let at = d.off();
+                                    d.raw(raw);
+                                    at
+                                },
+                            );
+                            d.align();
+                            let at = d.off();
+                            code_offs.push(at);
+                            let mut body = code.body();
+                            if let Some(dbg) = dbg {
+                                body[8..12].copy_from_slice(&dbg.to_le_bytes());
+                            }
+                            d.raw(&body);
+                            at
+                        }
+                        None => 0,
+                    };
                 offs.push(off);
             }
 
@@ -779,11 +796,13 @@ impl DexSpec {
                 d.raw(bytes);
             }
             let key = |t: &AnnTarget| match t {
-                AnnTarget::Class => (0u8, 0u32),
-                AnnTarget::Field(f) => (1, *f),
-                AnnTarget::Method(m) => (2, *m),
+                AnnTarget::Class => (0u8, 0u32, 0u32),
+                AnnTarget::Field(f) => (1, *f, 0),
+                AnnTarget::Method(m) => (2, *m, 0),
+                AnnTarget::Param(m, p) => (3, *m, *p),
             };
-            let mut targets: Vec<(u8, u32)> = c.annotations.iter().map(|(t, _)| key(t)).collect();
+            let mut targets: Vec<(u8, u32, u32)> =
+                c.annotations.iter().map(|(t, _)| key(t)).collect();
             targets.sort_unstable();
             targets.dedup();
             let mut sets = Vec::with_capacity(targets.len());
@@ -802,20 +821,40 @@ impl DexSpec {
                     d.u32(off);
                 }
             }
-            d.align();
-            annotation_dirs.push(d.off());
             let of = |kind: u8| {
                 targets
                     .iter()
                     .zip(&sets)
-                    .filter(move |((k, _), _)| *k == kind)
-                    .map(|((_, idx), off)| (*idx, *off))
+                    .filter(move |((k, _, _), _)| *k == kind)
+                    .map(|((_, idx, _), off)| (*idx, *off))
             };
+            // One annotation_set_ref_list per method with parameter
+            // annotations; unannotated positions hold 0.
+            let mut param_lists: Vec<(u32, u32)> = Vec::new();
+            let mut methods: Vec<u32> = targets.iter().filter(|t| t.0 == 3).map(|t| t.1).collect();
+            methods.dedup();
+            for m in methods {
+                let entries: Vec<(u32, u32)> = targets
+                    .iter()
+                    .zip(&sets)
+                    .filter(|(t, _)| t.0 == 3 && t.1 == m)
+                    .map(|(t, off)| (t.2, *off))
+                    .collect();
+                let n = entries.iter().map(|e| e.0 + 1).max().unwrap_or(0);
+                d.align();
+                param_lists.push((m, d.off()));
+                d.u32(n);
+                for i in 0..n {
+                    d.u32(entries.iter().find(|e| e.0 == i).map_or(0, |e| e.1));
+                }
+            }
+            d.align();
+            annotation_dirs.push(d.off());
             d.u32(of(0).next().map_or(0, |(_, off)| off));
             d.u32(of(1).count() as u32);
             d.u32(of(2).count() as u32);
-            d.u32(0);
-            for (idx, off) in of(1).chain(of(2)) {
+            d.u32(param_lists.len() as u32);
+            for (idx, off) in of(1).chain(of(2)).chain(param_lists.iter().copied()) {
                 d.u32(idx);
                 d.u32(off);
             }

@@ -501,6 +501,10 @@ CATCH_RE = re.compile(
 )
 
 
+DEBUG_DIRECTIVES = (".line ", ".local ", ".end local", ".restart local",
+                    ".prologue", ".epilogue", ".source ", ".param ", ".end param")
+
+
 def parse_our_listing(text: str) -> dict[str, OurMethod]:
     """Split an `asc-rs disasm` listing into per-method records.
 
@@ -530,6 +534,9 @@ def parse_our_listing(text: str) -> dict[str, OurMethod]:
         if line == ".end method":
             methods.setdefault(cur.key, cur)
             cur, switch, kind = None, None, ""
+            continue
+        # debug-info and parameter directives are metadata, not instructions
+        if switch is None and stripped.startswith(DEBUG_DIRECTIVES):
             continue
         if stripped.startswith(".registers"):
             cur.registers = int(stripped.split()[1])

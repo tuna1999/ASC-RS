@@ -278,7 +278,7 @@ enum Cmd {
     /// Unlike `getclass` this does NOT rebuild a minimal DEX: the
     /// whole class-defining DEX is handed to the backend, so
     /// cross-class references and method bodies stay verbatim.
-    /// Parameter annotations and debug info are not emitted.
+    /// Debug info (.line/.local/.param) and parameter annotations are included.
     Disasm {
         /// Path to the APK or raw DEX.
         apk: PathBuf,
@@ -723,6 +723,7 @@ fn run_findrefs_cmd(
             serde_json::to_string_pretty(&json).unwrap_or_default()
         }
     };
+    let rendered = with_original_names(rendered, format);
 
     if let Some(out_path) = output {
         match std::fs::write(out_path, rendered.as_bytes()) {
@@ -798,6 +799,7 @@ fn run_listclass_cmd(
         }
         OutputFormat::Json => to_json(&format_listclasses_json_opt(&result, with_dex)),
     };
+    let rendered = with_original_names(rendered, format);
 
     if debug {
         for (entry, n) in &result.per_dex_counts {
@@ -1078,6 +1080,12 @@ fn emit_partial(text: &str, output: Option<&std::path::Path>, complete: bool) ->
 /// name to the obfuscated one. A name the mapping does not know is kept
 /// as given (it may already be the obfuscated one). Unreadable file = exit 1.
 fn apply_mapping(cmd: &mut Cmd, path: &std::path::Path) -> Result<(), ExitCode> {
+    let text = std::fs::read(path).map_err(|e| {
+        eprintln!("Error: {}: {e}", path.display());
+        ExitCode::from(EXIT_USER_ERROR)
+    })?;
+    let index = asc_core::mapping::MappingIndex::parse(&String::from_utf8_lossy(&text));
+    let index = MAPPING.get_or_init(|| index);
     let class = match cmd {
         Cmd::Getclass { class, .. }
         | Cmd::Disasm { class, .. }
@@ -1099,11 +1107,6 @@ fn apply_mapping(cmd: &mut Cmd, path: &std::path::Path) -> Result<(), ExitCode> 
         } => class,
         _ => return Ok(()),
     };
-    let text = std::fs::read(path).map_err(|e| {
-        eprintln!("Error: {}: {e}", path.display());
-        ExitCode::from(EXIT_USER_ERROR)
-    })?;
-    let index = asc_core::mapping::MappingIndex::parse(&String::from_utf8_lossy(&text));
     // Mapping files are dotted; accept `Lcom/x/Y;` too.
     let dotted = match class.strip_prefix('L').and_then(|c| c.strip_suffix(';')) {
         Some(inner) => inner.replace('/', "."),
@@ -1116,6 +1119,158 @@ fn apply_mapping(cmd: &mut Cmd, path: &std::path::Path) -> Result<(), ExitCode> 
         eprintln!("mapping: {dotted} not in mapping, used as given");
     }
     Ok(())
+}
+
+/// `--mapping` index, parsed once in `main` (unset = no mapping given).
+static MAPPING: std::sync::OnceLock<asc_core::mapping::MappingIndex> = std::sync::OnceLock::new();
+
+/// `--mapping` on findrefs/listclass/calls/member output: obfuscated names
+/// stay as printed (scripts keep parsing them); the original names are
+/// added — text as a trailing `    # obf = orig` comment per line, JSON as
+/// a top-level `"mapping": {obf: orig}` object. No mapping = unchanged.
+fn with_original_names(rendered: String, format: OutputFormat) -> String {
+    let Some(index) = MAPPING.get() else {
+        return rendered;
+    };
+    match format {
+        OutputFormat::Text => {
+            let mut out = String::with_capacity(rendered.len());
+            for line in rendered.split_inclusive('\n') {
+                let body = line.trim_end_matches(['\n', '\r']);
+                let names = original_names(body, index);
+                out.push_str(body);
+                if !names.is_empty() {
+                    let pairs: Vec<String> =
+                        names.iter().map(|(o, r)| format!("{o} = {r}")).collect();
+                    out.push_str("    # ");
+                    out.push_str(&pairs.join(", "));
+                }
+                out.push_str(&line[body.len()..]);
+            }
+            out
+        }
+        OutputFormat::Json => {
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&rendered) else {
+                return rendered;
+            };
+            let mut found = Vec::new();
+            json_names(&v, index, &mut found);
+            let map: serde_json::Map<String, serde_json::Value> = found
+                .into_iter()
+                .map(|(o, r)| (o, serde_json::Value::String(r)))
+                .collect();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("mapping".into(), serde_json::Value::Object(map));
+            }
+            to_json(&v)
+        }
+    }
+}
+
+/// Every string in `v` (and `"L…;"` + member pairs spelled as separate
+/// keys) that the mapping renames, deduplicated in first-seen order.
+fn json_names(
+    v: &serde_json::Value,
+    index: &asc_core::mapping::MappingIndex,
+    out: &mut Vec<(String, String)>,
+) {
+    let mut add = |found: Vec<(String, String)>| {
+        for f in found {
+            if !out.contains(&f) {
+                out.push(f);
+            }
+        }
+    };
+    match v {
+        serde_json::Value::String(s) => add(original_names(s, index)),
+        serde_json::Value::Array(a) => a.iter().for_each(|x| json_names(x, index, out)),
+        serde_json::Value::Object(o) => {
+            for (class_key, member_key) in [
+                ("from_class", "from_member"),
+                ("to_class", "to_member"),
+                ("class", "method"),
+                ("descriptor", "name"),
+            ] {
+                if let (Some(c), Some(m)) = (
+                    o.get(class_key).and_then(|x| x.as_str()),
+                    o.get(member_key).and_then(|x| x.as_str()),
+                ) {
+                    add(original_names(&format!("{c}->{m}"), index));
+                }
+            }
+            o.values().for_each(|x| json_names(x, index, out));
+        }
+        _ => {}
+    }
+}
+
+/// `(obfuscated, original)` for each `Lpkg/Cls;` (and `Lpkg/Cls;->name`)
+/// in `text` that the mapping renames. Member names that several
+/// originals share print as `a|b`.
+fn original_names(text: &str, index: &asc_core::mapping::MappingIndex) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let starts = b[i] == b'L'
+            && (i == 0
+                || !(b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'$' | b'/')));
+        let Some(len) = starts.then(|| text[i..].find(';')).flatten() else {
+            i += 1;
+            continue;
+        };
+        let inner = &text[i + 1..i + len];
+        if inner.is_empty()
+            || inner.contains(|ch: char| ch.is_whitespace() || "\"(),:[".contains(ch))
+        {
+            i += 1;
+            continue;
+        }
+        let obf_class = inner.replace('/', ".");
+        let class_orig = index.original_class(&obf_class);
+        let descriptor = &text[i..=i + len];
+        let mut end = i + len + 1;
+        let mut member = None;
+        if let Some(rest) = text[end..].strip_prefix("->") {
+            let n = rest
+                .find(|ch: char| {
+                    !(ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '<' || ch == '>')
+                })
+                .unwrap_or(rest.len());
+            if n > 0 {
+                member = Some(&rest[..n]);
+                end += 2 + n;
+            }
+        }
+        let orig_desc = class_orig.map(|o| format!("L{};", o.replace('.', "/")));
+        let entry = match member {
+            Some(m) => {
+                let names = index.original_members(&obf_class, m);
+                (class_orig.is_some() || !names.is_empty()).then(|| {
+                    let member_orig = if names.is_empty() {
+                        m.to_owned()
+                    } else {
+                        names.join("|")
+                    };
+                    (
+                        format!("{descriptor}->{m}"),
+                        format!(
+                            "{}->{member_orig}",
+                            orig_desc.as_deref().unwrap_or(descriptor)
+                        ),
+                    )
+                })
+            }
+            None => orig_desc.map(|d| (descriptor.to_owned(), d)),
+        };
+        if let Some(e) = entry
+            && !out.contains(&e)
+        {
+            out.push(e);
+        }
+        i = end;
+    }
+    out
 }
 
 /// Exit code + stderr line for an engine error (same mapping as `dispatch`).
@@ -1270,6 +1425,7 @@ fn run_calls_cmd(
             "complete": complete,
         })),
     };
+    let text = with_original_names(text, format);
     emit_partial(&text, output, complete)
 }
 
@@ -1366,6 +1522,7 @@ fn run_member_cmd(
             })).collect::<Vec<_>>(),
         })),
     };
+    let text = with_original_names(text, format);
     emit_partial(&text, output, true)
 }
 

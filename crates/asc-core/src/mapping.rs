@@ -126,6 +126,32 @@ impl MappingIndex {
             .map(|(_, to)| to.as_str())
     }
 
+    /// Original name of the class obfuscated to `obfuscated` (exact,
+    /// dotted). First entry wins.
+    pub fn original_class(&self, obfuscated: &str) -> Option<&str> {
+        self.classes
+            .iter()
+            .find(|(_, to)| to == obfuscated)
+            .map(|(from, _)| from.as_str())
+    }
+
+    /// Original names of the members of class `obfuscated_class` renamed
+    /// to `obfuscated` (exact, dotted class). Overloads may share one
+    /// obfuscated name, so several distinct names can come back, in file
+    /// order.
+    pub fn original_members(&self, obfuscated_class: &str, obfuscated: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for (_, name, to_class, to_name) in &self.members {
+            if to_class == obfuscated_class
+                && to_name == obfuscated
+                && !out.contains(&name.as_str())
+            {
+                out.push(name);
+            }
+        }
+        out
+    }
+
     /// Parsed entry counts (classes, members).
     pub fn counts(&self) -> (usize, usize) {
         (self.classes.len(), self.members.len())
@@ -154,6 +180,18 @@ mod tests {
         assert_eq!(m.obfuscated_class("com.example.Secret"), Some("a.b"));
         assert_eq!(m.obfuscated_class("com.example.SecretBox"), Some("a.c"));
         assert_eq!(m.obfuscated_class("com.example"), None);
+    }
+
+    #[test]
+    fn reverse_lookups_are_exact() {
+        let m = MappingIndex::parse(
+            "com.x.A -> a:\n    void run() -> a\n    void run(int) -> a\n    int stop -> a\n    void go() -> b\n",
+        );
+        assert_eq!(m.original_class("a"), Some("com.x.A"));
+        assert_eq!(m.original_class("com.x.A"), None);
+        assert_eq!(m.original_members("a", "a"), vec!["run", "stop"]);
+        assert_eq!(m.original_members("a", "b"), vec!["go"]);
+        assert!(m.original_members("b", "a").is_empty());
     }
 
     const SAMPLE: &str = "\

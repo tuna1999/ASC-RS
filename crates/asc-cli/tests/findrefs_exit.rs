@@ -594,3 +594,67 @@ fn mapping_flag_translates_class_arguments() {
     let (code, _, e) = stdout_of(&["member", a, MAIN, "--method", "m", "--mapping", m]);
     assert_eq!(code, Some(1), "unreadable mapping must fail: {e}");
 }
+
+/// `--mapping` keeps the obfuscated names in findrefs/listclass/calls/member
+/// output and adds the originals (text: trailing comment, JSON: `mapping`).
+#[test]
+fn mapping_flag_annotates_output_with_original_names() {
+    let apk = write_apk("mapout", &[("classes.dex", call_dex())]);
+    let a = apk.to_str().unwrap();
+    let mut p = std::env::temp_dir();
+    p.push(format!("asc_cli_mapout_{}.txt", std::process::id()));
+    std::fs::write(
+        &p,
+        "com.example.Main -> p.Main:
+    void start() -> m
+    void helper() -> n
+",
+    )
+    .unwrap();
+    let m = p.to_str().unwrap();
+
+    let (code, text, e) = stdout_of(&["calls", a, MAIN, "--method", "m", "--mapping", m]);
+    assert_eq!(code, Some(0), "{e}");
+    let edge = text
+        .lines()
+        .find(|l| l.starts_with("Lp/Main;->m -> Lp/Main;->n"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        edge.ends_with("    # Lp/Main;->m = Lcom/example/Main;->start, Lp/Main;->n = Lcom/example/Main;->helper"),
+        "{edge}"
+    );
+
+    let (code, text, _) = stdout_of(&["listclass", a, "--mapping", m]);
+    assert_eq!(code, Some(0));
+    assert!(
+        text.contains("Lp/Main;    # Lp/Main; = Lcom/example/Main;"),
+        "{text}"
+    );
+
+    let (code, json, _) = stdout_of(&[
+        "--format",
+        "json",
+        "member",
+        a,
+        MAIN,
+        "--method",
+        "m",
+        "--mapping",
+        m,
+    ]);
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        v["mapping"]["Lp/Main;->m"], "Lcom/example/Main;->start",
+        "{json}"
+    );
+    assert_eq!(
+        v["overloads"][0]["name"], "m",
+        "obfuscated names stay: {json}"
+    );
+
+    // Without `--mapping` nothing is added.
+    let (_, text, _) = stdout_of(&["calls", a, MAIN, "--method", "m"]);
+    assert!(!text.contains(" = L"), "{text}");
+    let _ = std::fs::remove_file(&p);
+}
