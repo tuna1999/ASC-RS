@@ -2749,7 +2749,14 @@ pub struct MemberInfo {
     pub flag_names: Vec<&'static str>,
 }
 
+/// First declaration of `job.method` (the GUI inspector's view).
 pub fn run_member_info(job: &MemberInfoJob) -> Result<MemberInfo, CoreError> {
+    run_member_overloads(job).map(|mut v| v.swap_remove(0))
+}
+
+/// Every overload of `job.method` in its declaring class, declaration
+/// order; `MethodNotFound` when the class declares none.
+pub fn run_member_overloads(job: &MemberInfoJob) -> Result<Vec<MemberInfo>, CoreError> {
     let apk = Apk::open(&job.apk)?;
     check_raw_dex(&apk)?;
     for entry in apk.dex_entries() {
@@ -2760,16 +2767,19 @@ pub fn run_member_info(job: &MemberInfoJob) -> Result<MemberInfo, CoreError> {
         };
         hit.bytes = eb.into_vec();
         let backend = asc_decompile::droidsaw::DroidsawBackend::default();
-        let info = backend
+        let infos = backend
             .method_info(&hit.bytes, &hit.class, &job.method)
             .map_err(map_disasm_error)?;
-        return Ok(MemberInfo {
-            descriptor: hit.class,
-            flag_names: asc_decompile::disasm::access_flag_names(info.flags),
-            name: info.name,
-            proto: info.proto,
-            flags: info.flags,
-        });
+        return Ok(infos
+            .into_iter()
+            .map(|info| MemberInfo {
+                descriptor: hit.class.clone(),
+                flag_names: asc_decompile::disasm::access_flag_names(info.flags),
+                name: info.name,
+                proto: info.proto,
+                flags: info.flags,
+            })
+            .collect());
     }
     Err(CoreError::ClassNotFound(job.target.clone()))
 }

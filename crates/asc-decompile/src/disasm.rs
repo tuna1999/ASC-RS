@@ -663,16 +663,16 @@ pub fn access_flag_names(flags: u32) -> Vec<&'static str> {
         .collect()
 }
 
-/// Signature and flags of the first method named `method` in `descriptor`.
-/// Overloads beyond the first are not distinguished — the inspector shows
-/// the declaration the click resolved to by name, exactly like the Smali
-/// and bytecode lanes.
+/// Signature and flags of every method named `method` in `descriptor`
+/// (direct then virtual, declaration order). The GUI inspector takes the
+/// first, exactly like the Smali and bytecode lanes; the CLI lists all.
 pub(crate) fn method_info(
     dex: &DexFile,
     descriptor: &str,
     class_def: &ClassDefItem,
     method: &str,
-) -> Result<MethodInfo, DecompileError> {
+) -> Result<Vec<MethodInfo>, DecompileError> {
+    let mut out = Vec::new();
     let class_data = dex
         .class_datas
         .get(&class_def.class_data_off)
@@ -700,7 +700,7 @@ pub(crate) fn method_info(
                     format!("proto id {} out of range", method_id.proto_idx.0),
                 )
             })?;
-        return Ok(MethodInfo {
+        out.push(MethodInfo {
             name,
             proto: format!(
                 "({}){}",
@@ -710,9 +710,12 @@ pub(crate) fn method_info(
             flags: em.access_flags,
         });
     }
-    Err(DecompileError::MethodNotFound(format!(
-        "{descriptor}->{method}"
-    )))
+    if out.is_empty() {
+        return Err(DecompileError::MethodNotFound(format!(
+            "{descriptor}->{method}"
+        )));
+    }
+    Ok(out)
 }
 
 /// One instruction per line: `offset: raw units mnemonic`. Payload bodies are

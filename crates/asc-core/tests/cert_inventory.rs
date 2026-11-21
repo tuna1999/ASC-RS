@@ -52,8 +52,8 @@ fn fdroid_v1_v2_v3_agree_with_openssl_fingerprint() {
     };
     let r = run_cert(&p).expect("run_cert");
     assert!(r.complete, "{:?}", r.errors);
-    assert_eq!(r.verification, "v2_v3");
-    for sc in r.schemes.iter().filter(|s| s.name != "v1") {
+    assert_eq!(r.verification, "v1_v2_v3");
+    for sc in &r.schemes {
         for sg in &sc.signers {
             let v = sg.verification.as_ref().expect("v2/v3 signer is verified");
             assert_eq!(

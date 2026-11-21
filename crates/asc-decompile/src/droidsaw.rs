@@ -135,13 +135,14 @@ impl DroidsawBackend {
         })
     }
 
-    /// Signature + access flags of `descriptor->method` (ASC-RS-GUI-007).
+    /// Signature + access flags of every `descriptor->method` overload
+    /// (ASC-RS-GUI-007), declaration order; never empty on `Ok`.
     pub fn method_info(
         &self,
         dex_bytes: &[u8],
         target: &str,
         method: &str,
-    ) -> Result<MethodInfo, DecompileError> {
+    ) -> Result<Vec<MethodInfo>, DecompileError> {
         gate_input(dex_bytes)?;
         let descriptor = normalize_class_name(target)?;
         catch_unwind(AssertUnwindSafe(|| {

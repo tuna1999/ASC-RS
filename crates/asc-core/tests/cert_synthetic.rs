@@ -371,10 +371,13 @@ fn v1_only_reports_the_signer_and_its_own_sha256() {
     assert!(r.note.is_none(), "{:?}", r.note);
     assert!(r.errors.is_empty(), "{:?}", r.errors);
     assert!(r.complete);
-    assert_eq!(r.verification, "not_performed");
-    // A report that says nothing was verified must not imply validity.
+    // No MANIFEST.MF and a SignerInfo without a signature: v1 is checked
+    // and fails; it must never read as valid.
+    assert_eq!(r.verification, "v1");
+    let v = v1.signers[0].verification.as_ref().unwrap();
+    assert_eq!(v.status, "failed", "{:?}", v.checks);
     let text = format_cert_text(&r);
-    assert!(text.contains("verification: not_performed"), "{text}");
+    assert!(text.contains("verification: failed"), "{text}");
     assert!(!text.to_lowercase().contains(" is valid"), "{text}");
     assert!(!text.to_lowercase().contains("trusted"), "{text}");
 }
@@ -756,7 +759,7 @@ fn v2_block_layout_matches_the_spec() {
 fn forged_v2_signer_fails_verification() {
     let c = cert(b"v2 forger", &[0x01]);
     let r = run("forged_v2", &v1_v2_apk(&[&c], &[signer_info(&c)], &[&c]));
-    assert_eq!(r.verification, "v2_v3");
+    assert_eq!(r.verification, "v1_v2_v3");
     let v = scheme(&r, "v2").signers[0].verification.as_ref().unwrap();
     assert_eq!(v.status, "failed", "{:?}", v.checks);
     assert!(
@@ -765,5 +768,241 @@ fn forged_v2_signer_fails_verification() {
             .any(|c| c == "FAIL: signed public key matches the first certificate")
     );
     assert!(v.checks.iter().any(|c| c == "FAIL: content digest 0x0103"));
-    assert!(scheme(&r, "v1").signers[0].verification.is_none());
+    let v1 = scheme(&r, "v1").signers[0].verification.as_ref().unwrap();
+    assert_eq!(v1.status, "failed", "{:?}", v1.checks);
+}
+
+// ------------------------------------------------------ real v1 JAR signatures
+
+fn b64(b: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::new();
+    for c in b.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                s.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                s.push('=');
+            }
+        }
+    }
+    s
+}
+
+/// A P-256 self-signed-shaped certificate whose SPKI is the real key, and a
+/// v1 APK (`MANIFEST.MF`, `CERT.SF`, `CERT.EC`) signed with it. `tamper`
+/// rewrites the parts after signing.
+fn signed_v1_apk(tamper: impl Fn(&mut Vec<(&'static str, Vec<u8>)>)) -> Vec<u8> {
+    signed_v1_apk_with(None, tamper)
+}
+
+/// `entry`: the MANIFEST.MF body after the main section (default: one
+/// correct `classes.dex` section). The `.SF` signs it as one section, so
+/// the signature and the whole-manifest digest always hold.
+fn signed_v1_apk_with(
+    entry: Option<&str>,
+    tamper: impl Fn(&mut Vec<(&'static str, Vec<u8>)>),
+) -> Vec<u8> {
+    use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+    const OID_SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+    const OID_ECDSA_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+    let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+    // SubjectPublicKeyInfo { id-ecPublicKey, prime256v1 } + uncompressed point.
+    let point = key.verifying_key().to_encoded_point(false);
+    let spki = tlv(
+        0x30,
+        &[
+            tlv(
+                0x30,
+                &[
+                    tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]),
+                    tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
+                ]
+                .concat(),
+            ),
+            tlv(0x03, &[&[0u8][..], point.as_bytes()].concat()),
+        ]
+        .concat(),
+    );
+    let issuer = name(b"v1 real signer");
+    let alg = alg_id(OID_ECDSA_SHA256);
+    let tbs = tlv(
+        0x30,
+        &[
+            tlv(0xA0, &tlv(0x02, &[2])),
+            tlv(0x02, &[0x33]),
+            alg.clone(),
+            issuer.clone(),
+            tlv(
+                0x30,
+                &[utc_time(b"240101000000Z"), utc_time(b"490101000000Z")].concat(),
+            ),
+            issuer.clone(),
+            spki,
+        ]
+        .concat(),
+    );
+    let c = Cert {
+        der: tlv(0x30, &[tbs, alg, tlv(0x03, &[0x00])].concat()),
+        issuer,
+        serial: vec![0x33],
+    };
+    let dex = b"dex\n035\0stub".to_vec();
+    let entry = entry.map_or_else(
+        || {
+            format!(
+                "Name: classes.dex\r\nSHA-256-Digest: {}\r\n\r\n",
+                b64(&Sha256::digest(&dex))
+            )
+        },
+        str::to_string,
+    );
+    let mf = format!("Manifest-Version: 1.0\r\n\r\n{entry}");
+    let sf = format!(
+        "Signature-Version: 1.0\r\nSHA-256-Digest-Manifest: {}\r\n\r\nName: classes.dex\r\nSHA-256-Digest: {}\r\n\r\n",
+        b64(&Sha256::digest(mf.as_bytes())),
+        b64(&Sha256::digest(entry.as_bytes()))
+    );
+    let sig: Signature = key.sign(sf.as_bytes());
+    let si = tlv(
+        0x30,
+        &[
+            tlv(0x02, &[1]),
+            tlv(0x30, &[c.issuer.clone(), tlv(0x02, &c.serial)].concat()),
+            alg_id(OID_SHA256),
+            tlv(0x30, &tlv(0x06, OID_ECDSA_SHA256)),
+            tlv(0x04, sig.to_der().as_bytes()),
+        ]
+        .concat(),
+    );
+    let mut parts = vec![
+        ("classes.dex", dex),
+        ("META-INF/MANIFEST.MF", mf.into_bytes()),
+        ("META-INF/CERT.SF", sf.into_bytes()),
+        ("META-INF/CERT.EC", pkcs7(&[&c], &[si])),
+    ];
+    tamper(&mut parts);
+    zip(&parts, Vec::new(), None)
+}
+
+fn v1_status(r: &CertReport) -> (&'static str, Vec<String>) {
+    let v = scheme(r, "v1").signers[0]
+        .verification
+        .as_ref()
+        .expect("v1 signer verified");
+    (v.status, v.checks.clone())
+}
+
+#[test]
+fn real_v1_signature_verifies() {
+    let r = run("v1_real", &signed_v1_apk(|_| {}));
+    assert_eq!(r.verification, "v1");
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "verified", "{checks:?}");
+    assert!(checks.iter().all(|c| !c.starts_with("FAIL")), "{checks:?}");
+    assert!(format_cert_text(&r).contains("verification: v1 ("));
+}
+
+#[test]
+fn tampered_v1_entry_fails() {
+    let r = run(
+        "v1_tamper_dex",
+        &signed_v1_apk(|p| p[0].1 = b"dex\n035\0evil".to_vec()),
+    );
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "failed", "{checks:?}");
+    assert!(
+        checks
+            .iter()
+            .any(|c| c == "FAIL: classes.dex: SHA-256-Digest does not match the entry"),
+        "{checks:?}"
+    );
+}
+
+#[test]
+fn v1_entry_added_after_signing_fails() {
+    let r = run(
+        "v1_extra",
+        &signed_v1_apk(|p| p.push(("assets/payload.bin", b"x".to_vec()))),
+    );
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "failed", "{checks:?}");
+    assert!(
+        checks
+            .iter()
+            .any(|c| c == "FAIL: assets/payload.bin is not covered by MANIFEST.MF"),
+        "{checks:?}"
+    );
+}
+
+#[test]
+fn v1_signature_over_edited_sf_fails() {
+    let r = run(
+        "v1_sf",
+        &signed_v1_apk(|p| p[2].1.extend_from_slice(b"X-Extra: 1\r\n")),
+    );
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "failed", "{checks:?}");
+    assert!(
+        checks
+            .iter()
+            .any(|c| c.starts_with("FAIL: signature over META-INF/CERT.SF")),
+        "{checks:?}"
+    );
+}
+
+/// Review finding: a section without a supported digest must not count
+/// as coverage, or the entry is never hashed and can be swapped freely.
+#[test]
+fn v1_section_without_supported_digest_is_not_coverage() {
+    let entry = "Name: classes.dex\r\nMD5-Digest: AAAA\r\n\r\n";
+    let r = run(
+        "v1_md5_only",
+        &signed_v1_apk_with(Some(entry), |p| p[0].1 = b"evil".to_vec()),
+    );
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "failed", "{checks:?}");
+    assert!(
+        checks
+            .iter()
+            .any(|c| c == "FAIL: classes.dex is not covered by MANIFEST.MF"),
+        "{checks:?}"
+    );
+}
+
+/// Review finding: a repeated section is rejected (and hashed once).
+#[test]
+fn v1_repeated_manifest_section_fails() {
+    let one = format!(
+        "Name: classes.dex\r\nSHA-256-Digest: {}\r\n\r\n",
+        b64(&Sha256::digest(b"dex\n035\0stub"))
+    );
+    let r = run(
+        "v1_repeat",
+        &signed_v1_apk_with(Some(&one.repeat(3)), |_| {}),
+    );
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "failed", "{checks:?}");
+    assert!(
+        checks
+            .iter()
+            .any(|c| c == "FAIL: MANIFEST.MF repeats the section for classes.dex"),
+        "{checks:?}"
+    );
+}
+
+/// Review finding: a non-ASCII attribute name must not panic the digest
+/// scan (byte offset inside a multi-byte char).
+#[test]
+fn v1_non_ascii_attribute_name_does_not_panic() {
+    let entry = format!(
+        "Name: classes.dex\r\né123456: x\r\nSHA-256-Digest: {}\r\n\r\n",
+        b64(&Sha256::digest(b"dex\n035\0stub"))
+    );
+    let r = run("v1_utf8", &signed_v1_apk_with(Some(&entry), |_| {}));
+    let (status, checks) = v1_status(&r);
+    assert_eq!(status, "verified", "{checks:?}");
 }

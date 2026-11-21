@@ -73,7 +73,7 @@ pub use crate::pipeline::{
     FindRefsOptions, GetClassJob, GetClassOptions, GetClassResult, ListClassesJob,
     ListClassesOptions, ListClassesResult, MemberInfo, MemberInfoJob, logical_dex_name,
     run_bytecode, run_call_tree, run_callees, run_cfg, run_class_strings, run_disasm, run_findrefs,
-    run_findrefs_stream, run_getclass, run_listclasses, run_member_info,
+    run_findrefs_stream, run_getclass, run_listclasses, run_member_info, run_member_overloads,
 };
 pub use crate::report::{DexResults, RenderedMatch, SearchError, SearchErrorKind, SearchReport};
 pub use crate::resources::{

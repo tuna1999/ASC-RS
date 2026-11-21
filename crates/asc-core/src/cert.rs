@@ -2,8 +2,8 @@
 //! v2/v3/v3.1). Each v2/v3 signer is verified the way `apksig` does it:
 //! every supported signature over the signed data, the signed key against
 //! the first certificate, the algorithm lists, the v3 SDK copies and the
-//! chunked content digests. v1 JAR signatures, chains, revocation and
-//! trust are NOT checked, which every rendering states. Equality between
+//! chunked content digests. Each v1 signer is verified in [`v1`]. Chains,
+//! revocation and trust are NOT checked, which every rendering states. Equality between
 //! schemes is reported only when the fingerprints actually match, and "no
 //! signing material found" never means unsigned or valid.
 
@@ -19,6 +19,8 @@ use sha2::{Digest, Sha256, Sha512};
 
 use crate::pipeline::CoreError;
 
+mod v1;
+
 /// Cap for one v1 signature-block file.
 const V1_CAP: usize = 1 << 20;
 const MAX_V1_FILES: usize = 16;
@@ -27,6 +29,10 @@ const DISCLAIMER: &str = "verification: not_performed (no signature, digest, cha
      fingerprints only identify certificates)";
 const V2V3_NOTE: &str = "verification: v2_v3 (v2/v3/v3.1 signatures and content digests checked per \
      signer; v1 JAR, chain, revocation and trust NOT checked)";
+const V1_NOTE: &str = "verification: v1 (JAR signature, .SF and MANIFEST.MF digests checked per \
+     signer; chain, revocation and trust NOT checked)";
+const V1V2V3_NOTE: &str = "verification: v1_v2_v3 (v1 JAR and v2/v3/v3.1 signatures and digests \
+     checked per signer; chain, revocation and trust NOT checked)";
 const CHUNK: usize = 1 << 20;
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,8 +78,19 @@ pub struct SignerVerification {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hash {
+    S1,
     S256,
+    S384,
     S512,
+}
+
+fn hash_bytes(h: Hash, data: &[u8]) -> Vec<u8> {
+    match h {
+        Hash::S1 => Sha1::digest(data).to_vec(),
+        Hash::S256 => Sha256::digest(data).to_vec(),
+        Hash::S384 => sha2::Sha384::digest(data).to_vec(),
+        Hash::S512 => Sha512::digest(data).to_vec(),
+    }
 }
 
 /// Signature algorithm -> (key kind, signature hash, content digest).
@@ -106,10 +123,7 @@ fn verify_sig(
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
     use rsa::pkcs8::DecodePublicKey;
     use rsa::{Pkcs1v15Sign, Pss, RsaPublicKey};
-    let digest = match hash {
-        Hash::S256 => Sha256::digest(data).to_vec(),
-        Hash::S512 => Sha512::digest(data).to_vec(),
-    };
+    let digest = hash_bytes(hash, data);
     if kind == "ecdsa" {
         use p256::pkcs8::DecodePublicKey as _;
         if let Ok(k) = p256::ecdsa::VerifyingKey::from_public_key_der(spki) {
@@ -126,7 +140,22 @@ fn verify_sig(
     let r = match (kind, hash) {
         ("rsa-pss", Hash::S256) => k.verify(Pss::new::<Sha256>(), &digest, sig),
         ("rsa-pss", Hash::S512) => k.verify(Pss::new::<Sha512>(), &digest, sig),
+        ("rsa-pss", _) => return Err("RSA-PSS with this digest is not supported".into()),
+        (_, Hash::S1) => k.verify(
+            // DigestInfo prefix for SHA-1 (RFC 8017 9.2 note 1): the sha1
+            // crate is built without its `oid` feature.
+            Pkcs1v15Sign {
+                hash_len: Some(20),
+                prefix: Box::new([
+                    0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
+                    0x04, 0x14,
+                ]),
+            },
+            &digest,
+            sig,
+        ),
         (_, Hash::S256) => k.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, sig),
+        (_, Hash::S384) => k.verify(Pkcs1v15Sign::new::<sha2::Sha384>(), &digest, sig),
         (_, Hash::S512) => k.verify(Pkcs1v15Sign::new::<Sha512>(), &digest, sig),
     };
     Ok(r.map_err(|e| e.to_string()))
@@ -172,10 +201,11 @@ impl Digests<'_> {
         let slot = match h {
             Hash::S256 => &mut self.s256,
             Hash::S512 => &mut self.s512,
+            Hash::S1 | Hash::S384 => return None,
         };
         Some(slot.get_or_insert_with(|| match h {
             Hash::S256 => content_digest::<Sha256>(buf, l),
-            Hash::S512 => content_digest::<Sha512>(buf, l),
+            _ => content_digest::<Sha512>(buf, l),
         }))
     }
 }
@@ -423,6 +453,12 @@ fn v1_scheme(apk: &Apk, errors: &mut Vec<String>) -> SchemeReport {
             files.len()
         ));
     }
+    // Shared by every v1 signer: MANIFEST.MF and its ZIP-entry digests.
+    let mf = (!files.is_empty()).then(|| v1::read_capped(apk, "META-INF/MANIFEST.MF"));
+    let entries = mf
+        .as_ref()
+        .and_then(|m| m.as_ref().ok())
+        .map(|m| v1::check_entries(apk, m));
     for e in files.iter().take(MAX_V1_FILES) {
         rep.status = "present";
         let bytes = if e.uncompressed_size as usize > V1_CAP {
@@ -461,7 +497,17 @@ fn v1_scheme(apk: &Apk, errors: &mut Vec<String>) -> SchemeReport {
                     min_sdk: None,
                     max_sdk: None,
                     certs,
-                    verification: None,
+                    verification: mf.as_ref().map(|mf| {
+                        v1::verify_v1_signer(
+                            apk,
+                            &e.name,
+                            &p.signer_infos,
+                            p.signer_ids.len(),
+                            &p.certs,
+                            mf,
+                            &entries,
+                        )
+                    }),
                 });
             }
         }
@@ -575,20 +621,24 @@ pub fn run_cert(path: &Path) -> Result<CertReport, CoreError> {
         }
     }
     let any_present = schemes.iter().any(|s| s.status == "present");
-    let verified_any = schemes
-        .iter()
-        .flat_map(|s| &s.signers)
-        .any(|s| s.verification.is_some());
+    let verified = |v1: bool| {
+        schemes
+            .iter()
+            .filter(|s| (s.name == "v1") == v1)
+            .flat_map(|s| &s.signers)
+            .any(|s| s.verification.is_some())
+    };
     let note = (!any_present && errors.is_empty()).then(|| {
         "no signing material found; this does not establish that the APK is unsigned, valid or trusted"
             .to_string()
     });
     Ok(CertReport {
         input: path.display().to_string(),
-        verification: if verified_any {
-            "v2_v3"
-        } else {
-            "not_performed"
+        verification: match (verified(true), verified(false)) {
+            (true, true) => "v1_v2_v3",
+            (true, false) => "v1",
+            (false, true) => "v2_v3",
+            (false, false) => "not_performed",
         },
         block_status,
         block_offset: off,
@@ -624,10 +674,11 @@ fn algs(v: &[u32]) -> String {
 
 pub fn format_cert_text(r: &CertReport) -> String {
     let mut s = String::new();
-    let header = if r.verification == "v2_v3" {
-        V2V3_NOTE
-    } else {
-        DISCLAIMER
+    let header = match r.verification {
+        "v2_v3" => V2V3_NOTE,
+        "v1" => V1_NOTE,
+        "v1_v2_v3" => V1V2V3_NOTE,
+        _ => DISCLAIMER,
     };
     let _ = writeln!(s, "input: {}\n{header}", r.input);
     match (r.block_offset, r.block_size) {

@@ -330,6 +330,71 @@ pub struct Pkcs7 {
     pub certs: Vec<Vec<u8>>,
     /// `(issuer Name DER, serial INTEGER content)` per SignerInfo.
     pub signer_ids: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The fields JAR v1 verification needs, one per IssuerAndSerialNumber
+    /// SignerInfo (same order as `signer_ids`).
+    pub signer_infos: Vec<SignerInfo>,
+}
+
+/// One CMS `SignerInfo` (RFC 5652 5.3), IssuerAndSerialNumber form.
+#[derive(Debug, Clone, Default)]
+pub struct SignerInfo {
+    pub issuer_raw: Vec<u8>,
+    pub serial_raw: Vec<u8>,
+    /// OID content bytes of `digestAlgorithm`.
+    pub digest_oid: Vec<u8>,
+    /// Raw DER of `[0] IMPLICIT signedAttrs` (tag 0xA0), if present. The
+    /// signature covers it re-tagged as a SET (0x31).
+    pub signed_attrs: Option<Vec<u8>>,
+    /// `messageDigest` attribute value (OCTET STRING content), if present.
+    pub message_digest: Option<Vec<u8>>,
+    /// OID content bytes of `signatureAlgorithm`.
+    pub signature_oid: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+/// OID content of the first child of an `AlgorithmIdentifier`.
+fn alg_oid(t: Option<&Tlv<'_>>) -> Option<Vec<u8>> {
+    let t = t.filter(|t| t.tag == 0x30)?;
+    let (oid, _) = tlv(t.content).ok()?;
+    (oid.tag == 0x06).then(|| oid.content.to_vec())
+}
+
+const OID_MESSAGE_DIGEST: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04];
+
+fn signer_info(f: &[Tlv<'_>]) -> Option<SignerInfo> {
+    let ias = f.get(1).filter(|t| t.tag == 0x30)?;
+    let p = items(ias.content).ok()?;
+    let (iss, ser) = (p.first()?, p.get(1)?);
+    let mut si = SignerInfo {
+        issuer_raw: iss.raw.to_vec(),
+        serial_raw: ser.content.to_vec(),
+        digest_oid: alg_oid(f.get(2))?,
+        ..SignerInfo::default()
+    };
+    let mut i = 3;
+    if let Some(a) = f.get(3).filter(|t| t.tag == 0xA0) {
+        si.signed_attrs = Some(a.raw.to_vec());
+        for attr in items(a.content).ok()? {
+            let kv = items(attr.content).ok()?;
+            if kv
+                .first()
+                .is_some_and(|o| o.tag == 0x06 && o.content == OID_MESSAGE_DIGEST)
+            {
+                // Exactly one value in exactly one messageDigest attribute
+                // (RFC 5652 11.2); anything else is a malformed signer.
+                let vals = items(kv.get(1)?.content).ok()?;
+                let [v] = vals.as_slice() else { return None };
+                if v.tag != 0x04 || si.message_digest.is_some() {
+                    return None;
+                }
+                si.message_digest = Some(v.content.to_vec());
+            }
+        }
+        i = 4;
+    }
+    si.signature_oid = alg_oid(f.get(i))?;
+    si.signature = f.get(i + 1).filter(|t| t.tag == 0x04)?.content.to_vec();
+    Some(si)
 }
 
 /// Locate the certificate set (`[0] IMPLICIT`, tag 0xA0) of a CMS
@@ -359,6 +424,9 @@ pub fn parse_pkcs7(der: &[u8]) -> Result<Pkcs7, String> {
     if let Some(si) = it.iter().skip(3).rev().find(|t| t.tag == 0x31) {
         for s in items(si.content).map_err(str::to_string)? {
             let f = items(s.content).map_err(str::to_string)?;
+            if let Some(si) = signer_info(&f) {
+                out.signer_infos.push(si);
+            }
             // [1] IssuerAndSerialNumber; a [0] SubjectKeyIdentifier form is skipped.
             if let Some(ias) = f.get(1).filter(|t| t.tag == 0x30) {
                 let p = items(ias.content).map_err(str::to_string)?;

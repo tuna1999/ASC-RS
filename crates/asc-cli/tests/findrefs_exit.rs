@@ -440,6 +440,33 @@ fn calls_lists_callees_and_rejects_missing_class() {
     assert!(json.contains("\"complete\": true"), "{json}");
     let (code, _, e) = stdout_of(&["calls", a, "Lp/Absent;", "--method", "m"]);
     assert_eq!(code, Some(1), "{e}");
+    // A leaf method is an empty tree (exit 0); an unknown name is exit 1.
+    let (code, _, e) = stdout_of(&["calls", a, MAIN, "--method", "n"]);
+    assert_eq!(code, Some(0), "{e}");
+    let (code, _, e) = stdout_of(&["calls", a, MAIN, "--method", "nope"]);
+    assert_eq!(code, Some(1), "{e}");
+    assert!(e.contains("nope"), "{e}");
+    let _ = std::fs::remove_file(&apk);
+}
+
+#[test]
+fn member_lists_signature_and_flags() {
+    let apk = write_apk("member", &[("classes.dex", call_dex())]);
+    let a = apk.to_str().unwrap();
+    let (code, text, e) = stdout_of(&["member", a, "p.Main", "--method", "m"]);
+    assert_eq!(code, Some(0), "{e}");
+    assert_eq!(
+        text.trim(),
+        "Lp/Main;->m()Ljava/lang/String; flags=0x9 public static"
+    );
+    let (code, json, _) = stdout_of(&["--format", "json", "member", a, MAIN, "--method", "n"]);
+    assert_eq!(code, Some(0));
+    assert!(json.contains("\"proto\": \"()V\""), "{json}");
+    assert!(json.contains("\"flags\": 9"), "{json}");
+    let (code, _, e) = stdout_of(&["member", a, MAIN, "--method", "nope"]);
+    assert_eq!(code, Some(1), "{e}");
+    let (code, _, e) = stdout_of(&["member", a, "Lp/Absent;", "--method", "m"]);
+    assert_eq!(code, Some(1), "{e}");
     let _ = std::fs::remove_file(&apk);
 }
 
@@ -458,4 +485,44 @@ fn strings_class_scopes_to_one_class() {
     let (code, _, _) = stdout_of(&["strings", a, "--class", "Lp/Absent;"]);
     assert_eq!(code, Some(1));
     let _ = std::fs::remove_file(&apk);
+}
+
+#[test]
+fn mapping_looks_up_both_directions() {
+    let mut p = std::env::temp_dir();
+    p.push(format!("asc_cli_mapping_{}.txt", std::process::id()));
+    std::fs::write(
+        &p,
+        "# comment
+com.example.Secret -> a.b:
+    int balance -> a
+    12:34:void charge(int) -> c
+com.example.Other -> a.d:
+",
+    )
+    .unwrap();
+    let m = p.to_str().unwrap();
+    let (code, text, e) = stdout_of(&["mapping", m, "charge"]);
+    assert_eq!(code, Some(0), "{e}");
+    assert_eq!(text.trim(), "com.example.Secret.charge -> a.b.c");
+    // Obfuscated name -> original; classes come before members.
+    let (code, text, _) = stdout_of(&["mapping", m, "a.b"]);
+    assert_eq!(code, Some(0));
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines[0], "com.example.Secret -> a.b", "{text}");
+    assert!(
+        lines.contains(&"com.example.Secret.balance -> a.b.a"),
+        "{text}"
+    );
+    let (code, json, _) = stdout_of(&["--format", "json", "mapping", m, "OTHER"]);
+    assert_eq!(code, Some(0));
+    assert!(json.contains("\"mapped_class\": \"a.d\""), "{json}");
+    // No hit: empty output, exit 0 (like findrefs); unreadable file: exit 1.
+    let (code, text, e) = stdout_of(&["mapping", m, "zzz"]);
+    assert_eq!(code, Some(0), "{e}");
+    assert!(text.is_empty(), "{text}");
+    assert!(e.contains("2 classes, 2 members"), "{e}");
+    let _ = std::fs::remove_file(&p);
+    let (code, _, _) = stdout_of(&["mapping", m, "a"]);
+    assert_eq!(code, Some(1));
 }

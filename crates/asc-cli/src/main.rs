@@ -34,12 +34,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use asc_core::{
     CallTreeJob, CallTreeOptions, ClassStringsJob, CoreError, DisasmJob, DisasmOptions,
     FindRefsJob, FindRefsOptions, GetClassJob, GetClassOptions, ListClassesJob, ListClassesOptions,
-    ResourcesQuery, format_cert_text, format_getclass_json, format_getclass_text,
+    MemberInfoJob, ResourcesQuery, format_cert_text, format_getclass_json, format_getclass_text,
     format_inspect_text, format_listclasses_json_opt, format_listclasses_text_opt,
     format_native_text, format_resources_text, format_search_report_json,
     format_search_report_text, run_bytecode, run_call_tree, run_cert, run_cfg, run_class_strings,
-    run_disasm, run_findrefs, run_getclass, run_inspect, run_listclasses, run_native,
-    run_resources,
+    run_disasm, run_findrefs, run_getclass, run_inspect, run_listclasses, run_member_info,
+    run_member_overloads, run_native, run_resources,
 };
 use asc_query::{ClassConstraint, Query};
 
@@ -144,6 +144,23 @@ fn main() -> ExitCode {
             method,
             *depth,
             *max_nodes,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
+    }
+    if let Cmd::Member { apk, class, method } = &cli.cmd {
+        return run_member_cmd(
+            apk,
+            class,
+            method,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
+    }
+    if let Cmd::Mapping { mapping, needle } = &cli.cmd {
+        return run_mapping_cmd(
+            mapping,
+            needle,
             cli.shared.output.as_deref(),
             cli.shared.format,
         );
@@ -265,9 +282,8 @@ enum Cmd {
     },
     /// Outgoing call tree of one method (callees, breadth-first).
     ///
-    /// Every overload named `--method` is expanded. A method name that
-    /// does not exist yields an empty tree, not an error: confirm it
-    /// with `disasm --method` first.
+    /// Every overload named `--method` is expanded. A method name the
+    /// class does not declare exits 1 (not-found), like a missing class.
     Calls {
         /// Path to the APK or raw DEX.
         apk: PathBuf,
@@ -282,6 +298,27 @@ enum Cmd {
         /// Edge budget across all depths.
         #[arg(long, default_value_t = 200)]
         max_nodes: usize,
+    },
+    /// Signature and access flags of every overload of one method.
+    Member {
+        /// Path to the APK or raw DEX.
+        apk: PathBuf,
+        /// Class descriptor (`Lcom/poc/Main;` or `com.poc.Main`).
+        class: String,
+        /// Method name (all overloads are listed).
+        #[arg(long = "method", value_name = "NAME")]
+        method: String,
+    },
+    /// Look up names in an R8/ProGuard `mapping.txt` (either direction).
+    ///
+    /// Case-insensitive substring match on original and obfuscated class
+    /// and member names; classes are listed first. No hit is exit 0 with
+    /// empty output (like `findrefs`); an unreadable file exits 1.
+    Mapping {
+        /// Path to the `mapping.txt`.
+        mapping: PathBuf,
+        /// Name fragment (original or obfuscated).
+        needle: String,
     },
     /// Find every caller of a matching reference in the APK.
     Findrefs {
@@ -491,6 +528,8 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         | Cmd::Resources { .. }
         | Cmd::Strings { .. }
         | Cmd::Calls { .. }
+        | Cmd::Member { .. }
+        | Cmd::Mapping { .. }
         | Cmd::Extract { .. }
         | Cmd::Axml { .. }
         | Cmd::Hermes { .. }
@@ -1122,6 +1161,15 @@ fn run_calls_cmd(
     if depth > 0 && r.dex_names.is_empty() && r.errors.is_empty() {
         return core_error_exit(&CoreError::ClassNotFound(target));
     }
+    // An empty tree is ambiguous: a leaf method, or no method of that name.
+    // The callee walk cannot tell them apart, so ask the declaration table.
+    if r.nodes.is_empty()
+        && r.errors.is_empty()
+        && let Err(e @ CoreError::MethodNotFound(_)) =
+            run_member_info(&MemberInfoJob::new(apk, target.as_str(), method))
+    {
+        return core_error_exit(&e);
+    }
     for e in &r.errors {
         eprintln!("warning: {e}");
     }
@@ -1168,6 +1216,102 @@ fn run_calls_cmd(
         })),
     };
     emit_partial(&text, output, complete)
+}
+
+/// `asc-rs member <apk> <class> --method NAME`: every overload's
+/// signature and access flags. Unknown class or method → exit 1.
+fn run_mapping_cmd(
+    mapping: &std::path::Path,
+    needle: &str,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    use std::fmt::Write as _;
+    let text = match std::fs::read(mapping) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) => {
+            eprintln!("Error: {}: {e}", mapping.display());
+            return ExitCode::from(EXIT_USER_ERROR);
+        }
+    };
+    let index = asc_core::mapping::MappingIndex::parse(&text);
+    let hits = index.lookup(needle);
+    if hits.is_empty() && format == OutputFormat::Text {
+        let (c, m) = index.counts();
+        eprintln!("no mapping entry contains {needle:?} ({c} classes, {m} members parsed)");
+    }
+    let join = |c: &str, m: &str| {
+        if m.is_empty() {
+            c.to_string()
+        } else {
+            format!("{c}.{m}")
+        }
+    };
+    let out = match format {
+        OutputFormat::Text => hits.iter().fold(String::new(), |mut s, h| {
+            let _ = writeln!(
+                s,
+                "{} -> {}",
+                join(&h.original_class, &h.original_member),
+                join(&h.mapped_class, &h.mapped_member)
+            );
+            s
+        }),
+        OutputFormat::Json => to_json(&serde_json::json!({
+            "needle": needle,
+            "hits": hits.iter().map(|h| serde_json::json!({
+                "original_class": h.original_class,
+                "original_member": h.original_member,
+                "mapped_class": h.mapped_class,
+                "mapped_member": h.mapped_member,
+            })).collect::<Vec<_>>(),
+        })),
+    };
+    emit_partial(&out, output, true)
+}
+
+fn run_member_cmd(
+    apk: &std::path::Path,
+    class: &str,
+    method: &str,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    use std::fmt::Write as _;
+    let target = match asc_core::normalize_class_name(class) {
+        Ok(t) => t,
+        Err(e) => return core_error_exit(&CoreError::Class(e)),
+    };
+    let infos = match run_member_overloads(&MemberInfoJob::new(apk, target.as_str(), method)) {
+        Ok(v) => v,
+        Err(e) => return core_error_exit(&e),
+    };
+    let text = match format {
+        OutputFormat::Text => infos.iter().fold(String::new(), |mut s, m| {
+            let _ = writeln!(
+                s,
+                "{}->{}{} flags=0x{:x} {}",
+                m.descriptor,
+                m.name,
+                m.proto,
+                m.flags,
+                m.flag_names.join(" ")
+            );
+            s
+        }),
+        OutputFormat::Json => to_json(&serde_json::json!({
+            "class": target,
+            "method": method,
+            "overloads": infos.iter().map(|m| serde_json::json!({
+                "descriptor": m.descriptor,
+                "name": m.name,
+                "proto": m.proto,
+                "flags": m.flags,
+                "flag_names": m.flag_names,
+            })).collect::<Vec<_>>(),
+        })),
+    };
+    emit_partial(&text, output, true)
 }
 
 /// `asc-rs hermes <apk>`: extract Hermes bundle string tables. Partial
