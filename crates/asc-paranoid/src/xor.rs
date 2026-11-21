@@ -14,6 +14,12 @@
 //! [`find_xor_decoders`] recognizes decoders (static `([B)Ljava/lang/String;`
 //! bodies on a strict opcode allow-list that must XOR with a provable key,
 //! store back into the parameter and end in `new String(byte[])`).
+//!
+//! P2: the key may also come from `sget*` of a `static final` int-like
+//! field declared in the same DEX: either its encoded `static_values`
+//! initializer (no `sput` in the declaring class, the only place ART lets
+//! code write a final field), or the single `<clinit>` `sput` of a
+//! constant that runs before anything else (see [`final_static_int`]).
 //! [`XorResolver::calls`] decodes call sites with a per-method forward
 //! dataflow whose meet keeps only values every predecessor path agrees
 //! on; arrays come from `const`+`aput-byte` chains or `fill-array-data`,
@@ -28,7 +34,7 @@
 
 use std::collections::HashMap;
 
-use asc_dex::{CodeItem, DexView, MethodIdx, ProtoIdx};
+use asc_dex::{CodeItem, DexView, EncodedValue, FieldIdx, MethodIdx, ProtoIdx};
 
 use crate::dex::{
     Regs, decode_insns, is_payload, leaders, lossy, regs, str_bytes, string_protos, type_bytes,
@@ -36,6 +42,7 @@ use crate::dex::{
 };
 
 const ACC_STATIC: u32 = 0x0008;
+const ACC_FINAL: u32 = 0x0010;
 const STRING: &[u8] = b"Ljava/lang/String;";
 const BYTE_ARRAY: &[u8] = b"[B";
 const VOID: &[u8] = b"V";
@@ -82,6 +89,7 @@ fn decoder_allowed(op: u8) -> bool {
         | 0x32..=0x3d          // if-eq … if-lez
         | 0x48                 // aget-byte
         | 0x4f                 // aput-byte
+        | 0x60 | 0x63..=0x66   // sget, sget-boolean/byte/char/short (P2 key)
         | 0x70                 // invoke-direct (must be String.<init>([B)V)
         | 0x8d                 // int-to-byte
         | 0x90 | 0x97          // add-int, xor-int
@@ -96,6 +104,7 @@ fn decoder_allowed(op: u8) -> bool {
 /// `new String(byte[])`. Malformed methods contribute nothing.
 pub fn find_xor_decoders(view: &DexView<'_>) -> Vec<XorDecoder> {
     let mut out = Vec::new();
+    let mut finals = HashMap::new();
     let protos = string_protos(view, &[BYTE_ARRAY]);
     if protos.is_empty() {
         return out;
@@ -118,8 +127,10 @@ pub fn find_xor_decoders(view: &DexView<'_>) -> Vec<XorDecoder> {
             let Ok(Some(code)) = view.code_item(em.code_off) else {
                 continue;
             };
-            let (Some(key), Some(name)) = (analyze_decoder(view, &code), str_bytes(view, mi.name))
-            else {
+            let (Some(key), Some(name)) = (
+                analyze_decoder(view, &code, &mut finals),
+                str_bytes(view, mi.name),
+            ) else {
                 continue;
             };
             out.push(XorDecoder {
@@ -133,7 +144,11 @@ pub fn find_xor_decoders(view: &DexView<'_>) -> Vec<XorDecoder> {
 }
 
 /// Proves the decoder shape and extracts the key, or `None`.
-fn analyze_decoder(view: &DexView<'_>, code: &CodeItem<'_>) -> Option<u8> {
+fn analyze_decoder(
+    view: &DexView<'_>,
+    code: &CodeItem<'_>,
+    finals: &mut HashMap<u32, Option<i64>>,
+) -> Option<u8> {
     if code.ins_size == 0 || code.registers_size < code.ins_size {
         return None;
     }
@@ -204,6 +219,16 @@ fn analyze_decoder(view: &DexView<'_>, code: &CodeItem<'_>) -> Option<u8> {
             }
             0x48 => {
                 consts.remove(&a4); // aget-byte: unknown
+            }
+            0x60 | 0x63..=0x66 => {
+                let f = unit(insns, off, 1) as u32;
+                let v = *finals
+                    .entry(f)
+                    .or_insert_with(|| final_static_int(view, FieldIdx(f)));
+                match v {
+                    Some(v) => consts.insert(b1, DVal::Const(v)),
+                    None => consts.remove(&b1),
+                };
             }
             0x4f => {
                 if unit(insns, off, 1) & 0xFF == p0 {
@@ -333,6 +358,115 @@ fn analyze_decoder(view: &DexView<'_>, code: &CodeItem<'_>) -> Option<u8> {
     (aput_on_param && new_string)
         .then(|| key.map(|k| (k & 0xFF) as u8))
         .flatten()
+}
+
+/// Value of a `static final` int-like field when it is provably constant.
+/// The field must be declared in this DEX with `ACC_STATIC | ACC_FINAL`
+/// (ART only lets its declaring class write it), and either
+/// - no method of that class `sput`s it: the value is the encoded
+///   `static_values` initializer (absent entry = unprovable), or
+/// - exactly one `sput` exists, in `<clinit>`, preceded only by
+///   straight-line `const*` instructions (no branch target, no invoke or
+///   field access that could run code observing the field first): the
+///   value is the constant last loaded into the `sput` source register.
+fn final_static_int(view: &DexView<'_>, field: FieldIdx) -> Option<i64> {
+    let owner = view.field(field).ok()?.class;
+    let cd = (0..view.class_def_count())
+        .filter_map(|i| view.class_def(i).ok())
+        .find(|cd| cd.class == owner)?;
+    let data = view.class_data(cd.class_data_off).ok()??;
+    let pos = data
+        .static_fields
+        .iter()
+        .position(|f| f.field_idx == field)?;
+    let flags = data.static_fields[pos].access_flags;
+    if flags & (ACC_STATIC | ACC_FINAL) != ACC_STATIC | ACC_FINAL {
+        return None;
+    }
+    let mut clinit_value = None;
+    let mut writes = 0;
+    for em in data.direct_methods.iter().chain(&data.virtual_methods) {
+        if em.code_off == 0 {
+            continue;
+        }
+        let code = view.code_item(em.code_off).ok()??;
+        let insns = code.insns_exact();
+        let list = decode_insns(insns, code.insns_size)?;
+        for (k, &(off, _)) in list.iter().enumerate() {
+            let op = unit(insns, off, 0) as u8;
+            if !(0x67..=0x6d).contains(&op) || unit(insns, off, 1) as u32 != field.0 {
+                continue;
+            }
+            writes += 1;
+            let name = view
+                .method(em.method_idx)
+                .ok()
+                .and_then(|m| str_bytes(view, m.name));
+            if writes > 1 || op == 0x68 || name != Some(&b"<clinit>"[..]) {
+                return None;
+            }
+            clinit_value = clinit_prefix_const(view, &code, insns, &list, k);
+            clinit_value?;
+        }
+    }
+    if writes == 1 {
+        return clinit_value;
+    }
+    match view.static_values(cd.static_values_off).ok()??.get(pos)? {
+        EncodedValue::Byte(v) => Some(*v as i64),
+        EncodedValue::Short(v) => Some(*v as i64),
+        EncodedValue::Char(v) => Some(*v as i64),
+        EncodedValue::Int(v) => Some(*v as i64),
+        EncodedValue::Boolean(v) => Some(*v as i64),
+        _ => None,
+    }
+}
+
+/// Source value of the `sput` at `list[k]` when every instruction before
+/// it is a `const*` and none of them (nor the `sput`) is a branch target.
+fn clinit_prefix_const(
+    view: &DexView<'_>,
+    code: &CodeItem<'_>,
+    insns: &[u8],
+    list: &[(u32, u32)],
+    k: usize,
+) -> Option<i64> {
+    let lead = leaders(view, code, insns, list);
+    let mut regs: HashMap<u16, i64> = HashMap::new();
+    for &(off, _) in &list[..k] {
+        if off != 0 && lead.contains(&off) {
+            return None;
+        }
+        let u0 = unit(insns, off, 0);
+        let a8 = u0 >> 8;
+        match u0 as u8 {
+            0x12 => {
+                regs.insert(a8 & 0xf, ((u0 as i16) >> 12) as i64);
+            }
+            0x13 => {
+                regs.insert(a8, unit(insns, off, 1) as i16 as i64);
+            }
+            0x14 => {
+                regs.insert(a8, unit32(insns, off, 1) as i32 as i64);
+            }
+            0x15 => {
+                regs.insert(a8, ((unit(insns, off, 1) as i32) << 16) as i64);
+            }
+            0x16..=0x19 => {
+                regs.remove(&a8);
+                regs.remove(&(a8 + 1));
+            }
+            0x1a | 0x1b => {
+                regs.remove(&a8);
+            }
+            _ => return None,
+        }
+    }
+    let (off, _) = list[k];
+    if lead.contains(&off) {
+        return None;
+    }
+    regs.get(&(unit(insns, off, 0) >> 8)).copied()
 }
 
 /// Decoder register value: int constant or `p0.length`.

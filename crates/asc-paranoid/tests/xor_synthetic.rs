@@ -25,6 +25,9 @@ struct MDef {
 struct Cls {
     type_idx: u16,
     methods: Vec<MDef>,
+    /// (field idx, access flags, int initializer); `None` initializers
+    /// must come last (encoded `static_values` may be shorter).
+    statics: Vec<(u32, u32, Option<i32>)>,
 }
 
 struct Fixture<'a> {
@@ -35,6 +38,8 @@ struct Fixture<'a> {
     protos: &'a [(u32, u16, &'a [u16])],
     /// (class type idx, proto idx, name string idx)
     methods: &'a [(u16, u16, u32)],
+    /// (class type idx, type idx, name string idx)
+    fields: &'a [(u16, u16, u32)],
     classes: &'a [Cls],
 }
 
@@ -58,7 +63,8 @@ fn build(fx: &Fixture) -> Vec<u8> {
     let string_ids = header;
     let type_ids = string_ids + fx.strings.len() as u32 * 4;
     let proto_ids = type_ids + fx.types.len() as u32 * 4;
-    let method_ids = proto_ids + fx.protos.len() as u32 * 12;
+    let field_ids = proto_ids + fx.protos.len() as u32 * 12;
+    let method_ids = field_ids + fx.fields.len() as u32 * 8;
     let class_defs = method_ids + fx.methods.len() as u32 * 8;
     let mut tail = class_defs + fx.classes.len() as u32 * 32;
     let tail_base = tail;
@@ -128,10 +134,16 @@ fn build(fx: &Fixture) -> Vec<u8> {
         tail = align4(tail);
         class_data_off[ci] = tail;
         let mut cd = Vec::new();
-        cd.extend(uleb(0)); // static fields
+        cd.extend(uleb(c.statics.len() as u32));
         cd.extend(uleb(0)); // instance fields
         cd.extend(uleb(c.methods.len() as u32));
         cd.extend(uleb(0)); // virtual methods
+        let mut prev = 0u32;
+        for &(f, acc, _) in &c.statics {
+            cd.extend(uleb(f.wrapping_sub(prev)));
+            prev = f;
+            cd.extend(uleb(acc));
+        }
         let mut prev = 0u32;
         for (mi, m) in c.methods.iter().enumerate() {
             cd.extend(uleb(m.method_idx.wrapping_sub(prev)));
@@ -147,6 +159,23 @@ fn build(fx: &Fixture) -> Vec<u8> {
         }
         push(&mut buf, &cd, tail);
         tail += cd.len() as u32;
+    }
+
+    // encoded_array_item per class with initializers (VALUE_INT, 4 bytes)
+    let mut static_values_off = vec![0u32; fx.classes.len()];
+    for (ci, c) in fx.classes.iter().enumerate() {
+        let vals: Vec<i32> = c.statics.iter().map_while(|s| s.2).collect();
+        if vals.is_empty() {
+            continue;
+        }
+        static_values_off[ci] = tail;
+        let mut ea = uleb(vals.len() as u32);
+        for v in vals {
+            ea.push((3 << 5) | 0x04);
+            ea.extend_from_slice(&v.to_le_bytes());
+        }
+        push(&mut buf, &ea, tail);
+        tail += ea.len() as u32;
     }
 
     // ---- map list ----
@@ -165,6 +194,17 @@ fn build(fx: &Fixture) -> Vec<u8> {
     }
     if fx.classes.iter().any(|c| !c.methods.is_empty()) {
         entries.push((0x2000, fx.classes.len() as u32, class_data_off[0]));
+    }
+    if !fx.fields.is_empty() {
+        entries.push((0x0004, fx.fields.len() as u32, field_ids));
+    }
+    let sv: Vec<u32> = static_values_off
+        .iter()
+        .copied()
+        .filter(|&o| o != 0)
+        .collect();
+    if let Some(&first) = sv.first() {
+        entries.push((0x2005, sv.len() as u32, first));
     }
     entries.push((0x2002, fx.strings.len() as u32, string_data_off[0]));
     entries.push((0x1000, 1, map_off));
@@ -199,8 +239,12 @@ fn build(fx: &Fixture) -> Vec<u8> {
     put32(&mut out, 0x44, type_ids);
     put32(&mut out, 0x48, fx.protos.len() as u32);
     put32(&mut out, 0x4c, proto_ids);
-    put32(&mut out, 0x50, 0);
-    put32(&mut out, 0x54, 0);
+    put32(&mut out, 0x50, fx.fields.len() as u32);
+    put32(
+        &mut out,
+        0x54,
+        if fx.fields.is_empty() { 0 } else { field_ids },
+    );
     put32(&mut out, 0x58, fx.methods.len() as u32);
     put32(&mut out, 0x5c, method_ids);
     put32(&mut out, 0x60, fx.classes.len() as u32);
@@ -219,6 +263,12 @@ fn build(fx: &Fixture) -> Vec<u8> {
         put16(&mut out, at + 4, *ret);
         put32(&mut out, at + 8, proto_params_off[i]);
     }
+    for (i, (class, ty, name)) in fx.fields.iter().enumerate() {
+        let at = field_ids + i as u32 * 8;
+        put16(&mut out, at, *class);
+        put16(&mut out, at + 2, *ty);
+        put32(&mut out, at + 4, *name);
+    }
     for (i, (class, proto, name)) in fx.methods.iter().enumerate() {
         let at = method_ids + i as u32 * 8;
         put16(&mut out, at, *class);
@@ -234,7 +284,7 @@ fn build(fx: &Fixture) -> Vec<u8> {
         put32(&mut out, at + 16, 0xFFFF_FFFF); // no source file
         put32(&mut out, at + 20, 0); // no annotations
         put32(&mut out, at + 24, class_data_off[i]);
-        put32(&mut out, at + 28, 0); // no static values
+        put32(&mut out, at + 28, static_values_off[i]);
     }
     out
 }
@@ -387,11 +437,27 @@ const STRINGS: &[&str] = &[
     "L",                  // 9 shorty ()String / ([B)V
     "LLII",               // 10 shorty ([BII)V
     "I",                  // 11 int descriptor
+    "<clinit>",           // 12
 ];
 const TYPES: &[u32] = &[0, 1, 2, 3, 4, 11];
-const PROTOTYPES: &[(u32, u16, &[u16])] =
-    &[(8, 2, &[3]), (9, 2, &[]), (9, 4, &[3]), (10, 4, &[3, 5, 5])];
-const METHODS: &[(u16, u16, u32)] = &[(0, 0, 5), (2, 2, 6), (1, 1, 7), (2, 3, 6)];
+const PROTOTYPES: &[(u32, u16, &[u16])] = &[
+    (8, 2, &[3]),
+    (9, 2, &[]),
+    (9, 4, &[3]),
+    (10, 4, &[3, 5, 5]),
+    (4, 4, &[]),
+];
+/// 4 = `LDec;-><clinit>()V`, 5 = `LDec;->b()V` (P2 key writers).
+const METHODS: &[(u16, u16, u32)] = &[
+    (0, 0, 5),
+    (2, 2, 6),
+    (1, 1, 7),
+    (2, 3, 6),
+    (0, 4, 12),
+    (0, 4, 7),
+];
+const CLINIT: u32 = 4;
+const NOT_CLINIT: u32 = 5;
 
 fn dex_with_callers(callers: &[MDef]) -> Vec<u8> {
     dex_with(decoder_insns(105), callers)
@@ -401,6 +467,7 @@ fn dex_with(decoder: Vec<u16>, callers: &[MDef]) -> Vec<u8> {
     let classes = &[
         Cls {
             type_idx: 0,
+            statics: vec![],
             methods: vec![MDef {
                 method_idx: 0,
                 access: 0x8, // static
@@ -412,6 +479,7 @@ fn dex_with(decoder: Vec<u16>, callers: &[MDef]) -> Vec<u8> {
         },
         Cls {
             type_idx: 1,
+            statics: vec![],
             methods: callers.to_vec(),
         },
     ];
@@ -420,6 +488,7 @@ fn dex_with(decoder: Vec<u16>, callers: &[MDef]) -> Vec<u8> {
         types: TYPES,
         protos: PROTOTYPES,
         methods: METHODS,
+        fields: &[],
         classes,
     })
 }
@@ -644,6 +713,7 @@ fn decoder_with_field_access_is_rejected() {
     let classes = &[
         Cls {
             type_idx: 0,
+            statics: vec![],
             methods: vec![MDef {
                 method_idx: 0,
                 access: 0x8,
@@ -655,6 +725,7 @@ fn decoder_with_field_access_is_rejected() {
         },
         Cls {
             type_idx: 1,
+            statics: vec![],
             methods: vec![caller("a", caller_insns(1, 0))],
         },
     ];
@@ -663,6 +734,7 @@ fn decoder_with_field_access_is_rejected() {
         types: TYPES,
         protos: PROTOTYPES,
         methods: METHODS,
+        fields: &[],
         classes,
     });
     let view = DexView::parse(&bytes).unwrap();
@@ -746,4 +818,156 @@ fn fill_array_data_caller_decodes() {
     assert_eq!(calls.len(), 1, "fill-array-data site decodes");
     assert_eq!(calls[0].value, vec![0x68, 0x69]);
     assert!(calls[0].patchable);
+}
+
+// ---------------- P2: key from a `static final` field ----------------
+
+fn sget(dst: u8, field: u16) -> Vec<u16> {
+    vec![(dst as u16) << 8 | 0x60, field]
+}
+fn sput(src: u8, field: u16) -> Vec<u16> {
+    vec![(src as u16) << 8 | 0x67, field]
+}
+fn xor_int_2addr(a: u8, b: u8) -> Vec<u16> {
+    vec![(b as u16) << 12 | (a as u16) << 8 | 0xb7]
+}
+
+/// [`decoder_insns`] with the key read from `LDec;->a:I` into v3 (free
+/// until `new-instance`) and applied with `xor-int/2addr`.
+fn decoder_insns_sget() -> Vec<u16> {
+    concat(&[
+        &sget(3, 0),
+        &const4(0, 0),
+        &array_length(1, 4),
+        &if_ge(0, 1, 11),
+        &aget_byte(2, 4, 0),
+        &xor_int_2addr(2, 3),
+        &int_to_byte(2, 2),
+        &aput_byte(2, 4, 0),
+        &add_int_lit8(0, 0, 1),
+        &goto8(-11),
+        &new_instance(3, 2),
+        &invoke_direct_2(1, 3, 4),
+        &return_object(3),
+    ])
+}
+
+/// `LDec;` holds `a:I` with `access` / `init` and, optionally, a second
+/// method whose body is `extra`.
+fn dex_p2(access: u32, init: Option<i32>, extra: Option<(u32, Vec<u16>)>) -> Vec<u8> {
+    let mut methods = vec![MDef {
+        method_idx: 0,
+        access: 0x8,
+        registers: 5,
+        ins: 1,
+        outs: 2,
+        insns: decoder_insns_sget(),
+    }];
+    if let Some((method_idx, insns)) = extra {
+        methods.push(MDef {
+            method_idx,
+            access: 0x8,
+            registers: 1,
+            ins: 0,
+            outs: 0,
+            insns,
+        });
+    }
+    let classes = &[
+        Cls {
+            type_idx: 0,
+            statics: vec![(0, access, init)],
+            methods,
+        },
+        Cls {
+            type_idx: 1,
+            statics: vec![],
+            methods: vec![caller("a", caller_insns(1, 0))],
+        },
+    ];
+    build(&Fixture {
+        strings: STRINGS,
+        types: TYPES,
+        protos: PROTOTYPES,
+        methods: METHODS,
+        fields: &[(0, 5, 7)], // LDec;->a:I
+        classes,
+    })
+}
+
+const STATIC_FINAL: u32 = 0x8 | 0x10;
+
+#[test]
+fn p2_static_final_initializer_key_is_recognized() {
+    let bytes = dex_p2(STATIC_FINAL, Some(105), None);
+    let view = DexView::parse(&bytes).unwrap();
+    let decoders = find_xor_decoders(&view);
+    assert_eq!(decoders.len(), 1, "sget key decoder recognized");
+    assert_eq!(decoders[0].key, 105);
+    let resolver = XorResolver::new(&view, &decoders);
+    let calls = resolver.calls(&view, &code_of_first_method(&bytes, "LCalls;"));
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].value, vec![0x68, 0x69]);
+}
+
+#[test]
+fn p2_non_final_field_is_not_a_key() {
+    let bytes = dex_p2(0x8, Some(105), None);
+    let view = DexView::parse(&bytes).unwrap();
+    assert!(find_xor_decoders(&view).is_empty());
+}
+
+#[test]
+fn p2_field_without_initializer_is_not_a_key() {
+    let bytes = dex_p2(STATIC_FINAL, None, None);
+    let view = DexView::parse(&bytes).unwrap();
+    assert!(find_xor_decoders(&view).is_empty());
+}
+
+/// A write outside `<clinit>` makes the key unprovable, initializer or not.
+#[test]
+fn p2_field_written_outside_clinit_is_not_a_key() {
+    let extra = concat(&[&const4(0, 7), &sput(0, 0), &vec![0x000e]]);
+    let bytes = dex_p2(STATIC_FINAL, Some(105), Some((NOT_CLINIT, extra)));
+    let view = DexView::parse(&bytes).unwrap();
+    assert!(find_xor_decoders(&view).is_empty());
+}
+
+/// `static final int a; static { a = 105; }`: the one `<clinit>` write of
+/// a constant in straight-line code before any call is the key.
+#[test]
+fn p2_clinit_constant_write_is_the_key() {
+    let extra = concat(&[&const16(0, 105), &sput(0, 0), &vec![0x000e]]);
+    let bytes = dex_p2(STATIC_FINAL, None, Some((CLINIT, extra)));
+    let view = DexView::parse(&bytes).unwrap();
+    let decoders = find_xor_decoders(&view);
+    assert_eq!(decoders.len(), 1);
+    assert_eq!(decoders[0].key, 105);
+    let resolver = XorResolver::new(&view, &decoders);
+    let calls = resolver.calls(&view, &code_of_first_method(&bytes, "LCalls;"));
+    assert_eq!(calls[0].value, vec![0x68, 0x69]);
+}
+
+/// Anything but constants before the `<clinit>` write (here a call whose
+/// result could be the key) is unprovable, as are two writes.
+#[test]
+fn p2_clinit_non_constant_or_double_write_is_not_a_key() {
+    let call = concat(&[
+        &invoke_static_1(0, 0),
+        &const16(0, 105),
+        &sput(0, 0),
+        &vec![0x000e],
+    ]);
+    let twice = concat(&[
+        &const16(0, 105),
+        &sput(0, 0),
+        &const4(0, 7),
+        &sput(0, 0),
+        &vec![0x000e],
+    ]);
+    for extra in [call, twice] {
+        let bytes = dex_p2(STATIC_FINAL, None, Some((CLINIT, extra)));
+        let view = DexView::parse(&bytes).unwrap();
+        assert!(find_xor_decoders(&view).is_empty());
+    }
 }
