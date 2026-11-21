@@ -28,7 +28,7 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 # std::sync::Mutex in the GUI's hot path (see CLAUDE rule rs-parking-lot).
 parking_lot = "0.12"
 # Native file dialogs (File ▸ Open…, Ctrl+O).
-rfd = "0.17"
+rfd = "0.18"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu"] }
