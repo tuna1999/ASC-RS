@@ -526,3 +526,71 @@ com.example.Other -> a.d:
     let (code, _, _) = stdout_of(&["mapping", m, "a"]);
     assert_eq!(code, Some(1));
 }
+
+/// `--mapping` translates an original class argument to the obfuscated name
+/// in the APK; a name the mapping does not know is used as given.
+#[test]
+fn mapping_flag_translates_class_arguments() {
+    let apk = write_apk("mapflag", &[("classes.dex", call_dex())]);
+    let a = apk.to_str().unwrap();
+    let mut p = std::env::temp_dir();
+    p.push(format!("asc_cli_mapflag_{}.txt", std::process::id()));
+    std::fs::write(
+        &p,
+        "com.example.Main -> p.Main:
+    void m() -> m
+",
+    )
+    .unwrap();
+    let m = p.to_str().unwrap();
+    for args in [
+        vec![
+            "member",
+            a,
+            "com.example.Main",
+            "--method",
+            "m",
+            "--mapping",
+            m,
+        ],
+        vec![
+            "--mapping",
+            m,
+            "member",
+            a,
+            "Lcom/example/Main;",
+            "--method",
+            "m",
+        ],
+        vec!["member", a, MAIN, "--method", "m", "--mapping", m],
+    ] {
+        let (code, text, e) = stdout_of(&args);
+        assert_eq!(code, Some(0), "{args:?}: {e}");
+        assert!(text.contains("Lp/Main;->m()"), "{text}");
+    }
+    let (code, _, e) = stdout_of(&[
+        "member",
+        a,
+        "com.example.Main",
+        "--method",
+        "m",
+        "--mapping",
+        m,
+    ]);
+    assert_eq!(code, Some(0));
+    assert!(e.contains("mapping: com.example.Main -> p.Main"), "{e}");
+    let (code, text, _) = stdout_of(&[
+        "calls",
+        a,
+        "com.example.Main",
+        "--method",
+        "m",
+        "--mapping",
+        m,
+    ]);
+    assert_eq!(code, Some(0));
+    assert!(text.contains("Lp/Main;->m -> Lp/Main;->n"), "{text}");
+    let _ = std::fs::remove_file(&p);
+    let (code, _, e) = stdout_of(&["member", a, MAIN, "--method", "m", "--mapping", m]);
+    assert_eq!(code, Some(1), "unreadable mapping must fail: {e}");
+}

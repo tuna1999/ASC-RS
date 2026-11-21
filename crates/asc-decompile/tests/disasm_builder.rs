@@ -32,6 +32,7 @@ fn base_spec() -> DexSpec {
         instance_fields: vec![],
         direct_methods: vec![],
         virtual_methods: vec![],
+        ..Default::default()
     });
     s
 }

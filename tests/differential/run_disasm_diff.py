@@ -511,8 +511,17 @@ def parse_our_listing(text: str) -> dict[str, OurMethod]:
     cur: OurMethod | None = None
     switch: list | None = None
     kind = first_key = width = payload_addr = 0
+    in_annotation = False
     for line in text.splitlines():
         stripped = line.strip()
+        # method annotation blocks sit between `.registers` and the code and
+        # are metadata, not instructions
+        if in_annotation:
+            in_annotation = stripped != ".end annotation"
+            continue
+        if cur is not None and switch is None and stripped.startswith(".annotation "):
+            in_annotation = True
+            continue
         if line.startswith(".method "):
             cur = OurMethod(key=line.rsplit(" ", 1)[-1])
             continue

@@ -32,7 +32,7 @@ const GATE: &str = "Lgate/C;";
 
 /// Header comment the contract requires as the first line.
 const BANNER: &str =
-    "# smali-syntax listing from asc-rs; annotations, static values and debug info are not emitted";
+    "# smali-syntax listing from asc-rs; parameter annotations and debug info are not emitted";
 
 fn disasm(dex: &[u8]) -> Result<String, DecompileError> {
     DroidsawBackend::new().disassemble(dex, GATE, None)
@@ -89,6 +89,7 @@ fn empty_class() -> DexSpec {
         instance_fields: vec![],
         direct_methods: vec![],
         virtual_methods: vec![],
+        ..Default::default()
     });
     s
 }
@@ -1302,4 +1303,116 @@ fn both_dex_versions_038_and_039_disassemble() {
             disasm(&s.build()).unwrap_or_else(|e| panic!("dex {version} must disassemble: {e}"));
         assert!(contains(&out, "    return-void"), "dex {version}:\n{out}");
     }
+}
+
+/// `.source`, static initial values and class / field / method annotations
+/// render baksmali-style; an unreadable annotation set degrades to a `#`
+/// comment instead of refusing the class.
+#[test]
+fn source_static_values_and_annotations_render() {
+    let mut s = with_g();
+    let cls = s.classes[0].class_idx;
+    let int_ty = s.ty("I");
+    let ann_ty = s.ty("Lgate/A;");
+    let src = s.str("C.java");
+    let key = s.str("value");
+    let msg = s.str("hi");
+    let a = s.field(cls, int_ty, "a");
+    let b = s.field(cls, int_ty, "b");
+    s.classes[0].source_file = Some(src);
+    s.classes[0].static_fields = vec![
+        FieldSpec {
+            idx: a,
+            flags: 0x0018,
+        }, // static final
+        FieldSpec {
+            idx: b,
+            flags: 0x0008,
+        }, // static, no initial value
+    ];
+    s.classes[0].static_values = encoded_array(&[Ev::Int(7)]);
+    s.classes[0].annotations = vec![
+        (
+            AnnTarget::Class,
+            annotation_item(1, ann_ty, &[(key, Ev::Str(msg))]),
+        ),
+        (AnnTarget::Field(a), annotation_item(0, ann_ty, &[])),
+        (
+            AnnTarget::Method(0),
+            annotation_item(2, ann_ty, &[(key, Ev::Int(-1))]),
+        ),
+    ];
+    let out = ok(&s.build());
+    for want in [
+        ".source \"C.java\"",
+        ".annotation runtime Lgate/A;\n    value = \"hi\"\n.end annotation",
+        ".field static final a:I = 0x7\n    .annotation build Lgate/A;\n    .end annotation\n.end field",
+        ".field static b:I\n",
+        "    .annotation system Lgate/A;\n        value = 0xffffffff\n    .end annotation",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    assert!(!out.contains("unreadable"), "{out}");
+}
+
+/// A malformed annotation is reported in a comment; the code still lists.
+#[test]
+fn bad_annotation_degrades_to_comment() {
+    let mut s = with_g();
+    set_code(&mut s, vec![0x000E], 1);
+    let ann_ty = s.ty("Lgate/A;");
+    s.classes[0].annotations = vec![(AnnTarget::Method(0), annotation_item(9, ann_ty, &[]))];
+    let out = ok(&s.build());
+    assert!(out.contains("    # annotation at 0x"), "{out}");
+    assert!(out.contains("unreadable: visibility 0x9"), "{out}");
+    assert!(out.contains("return-void"), "{out}");
+}
+
+/// Hostile metadata never refuses the class or recurses unboundedly: a value
+/// nested 100 arrays deep, a static value with a bad string index and an
+/// empty field annotation set each degrade locally.
+#[test]
+fn hostile_annotation_and_static_values_degrade() {
+    let mut s = with_g();
+    set_code(&mut s, vec![0x000E], 1);
+    let cls = s.classes[0].class_idx;
+    let int_ty = s.ty("I");
+    let ann_ty = s.ty("Lgate/A;");
+    let key = s.str("value");
+    let a = s.field(cls, int_ty, "a");
+    let b = s.field(cls, int_ty, "b");
+    s.classes[0].static_fields = vec![
+        FieldSpec {
+            idx: a,
+            flags: 0x0008,
+        },
+        FieldSpec {
+            idx: b,
+            flags: 0x0008,
+        },
+    ];
+    // a = "string #9999" (out of range), b = 5
+    s.classes[0].static_values = vec![2, 0x17 | (1 << 5), 0x0f, 0x27, 0x04, 5];
+    // runtime annotation, one element whose value is 100 nested arrays.
+    let mut deep = vec![1];
+    deep.extend(uleb(ann_ty));
+    deep.push(1);
+    deep.extend(uleb(key));
+    for _ in 0..100 {
+        deep.extend([0x1c, 1]);
+    }
+    deep.push(0x1e);
+    s.classes[0].annotations = vec![(AnnTarget::Method(0), deep)];
+    let out = ok(&s.build());
+    assert!(out.contains("# static value unreadable:"), "{out}");
+    assert!(
+        out.contains(
+            ".field static a:I
+"
+        ),
+        "{out}"
+    );
+    assert!(out.contains(".field static b:I = 0x5"), "{out}");
+    assert!(out.contains("nested deeper than 64"), "{out}");
+    assert!(out.contains("return-void"), "{out}");
 }

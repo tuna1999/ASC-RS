@@ -49,7 +49,12 @@ const EXIT_USER_ERROR: u8 = 1;
 const EXIT_INTERNAL: u8 = 2;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(path) = cli.shared.mapping.clone()
+        && let Err(code) = apply_mapping(&mut cli.cmd, &path)
+    {
+        return code;
+    }
     if let Cmd::Manifest { apk, match_uri } = &cli.cmd {
         return run_manifest_cmd(
             apk,
@@ -241,6 +246,12 @@ struct SharedFlags {
     /// also matches decoded values. Ignored by other subcommands.
     #[arg(long = "decode-xor", default_value_t = false, global = true)]
     decode_xor: bool,
+    /// R8/ProGuard `mapping.txt`: a class argument (`getclass`, `disasm`,
+    /// `calls`, `member`, `findrefs method|field --class`) given by its
+    /// ORIGINAL name is translated to the obfuscated name in the APK.
+    /// Output is not renamed.
+    #[arg(long = "mapping", global = true)]
+    mapping: Option<PathBuf>,
 }
 
 /// Per-subcommand shared args.
@@ -267,7 +278,7 @@ enum Cmd {
     /// Unlike `getclass` this does NOT rebuild a minimal DEX: the
     /// whole class-defining DEX is handed to the backend, so
     /// cross-class references and method bodies stay verbatim.
-    /// Annotations, static values and debug info are not emitted.
+    /// Parameter annotations and debug info are not emitted.
     Disasm {
         /// Path to the APK or raw DEX.
         apk: PathBuf,
@@ -363,8 +374,8 @@ enum Cmd {
         apk: PathBuf,
     },
     /// Display signing certificates (JAR v1, APK Signature Scheme v2/v3)
-    /// and verify v2/v3 signers (signatures + content digests; v1 and
-    /// trust are not checked).
+    /// and verify v1/v2/v3 signers (signatures + digests; trust is not
+    /// checked).
     Cert {
         /// Path to the APK.
         apk: PathBuf,
@@ -1061,6 +1072,50 @@ fn emit_partial(text: &str, output: Option<&std::path::Path>, complete: bool) ->
         }
     }
     ExitCode::from(if complete { EXIT_OK } else { EXIT_INTERNAL })
+}
+
+/// `--mapping`: rewrite the command's class argument from its original
+/// name to the obfuscated one. A name the mapping does not know is kept
+/// as given (it may already be the obfuscated one). Unreadable file = exit 1.
+fn apply_mapping(cmd: &mut Cmd, path: &std::path::Path) -> Result<(), ExitCode> {
+    let class = match cmd {
+        Cmd::Getclass { class, .. }
+        | Cmd::Disasm { class, .. }
+        | Cmd::Calls { class, .. }
+        | Cmd::Member { class, .. } => class,
+        Cmd::Findrefs {
+            kind:
+                FindRefsKind::Method {
+                    class: Some(class),
+                    fuzzy_class: false,
+                    ..
+                }
+                | FindRefsKind::Field {
+                    class: Some(class),
+                    fuzzy_class: false,
+                    ..
+                },
+            ..
+        } => class,
+        _ => return Ok(()),
+    };
+    let text = std::fs::read(path).map_err(|e| {
+        eprintln!("Error: {}: {e}", path.display());
+        ExitCode::from(EXIT_USER_ERROR)
+    })?;
+    let index = asc_core::mapping::MappingIndex::parse(&String::from_utf8_lossy(&text));
+    // Mapping files are dotted; accept `Lcom/x/Y;` too.
+    let dotted = match class.strip_prefix('L').and_then(|c| c.strip_suffix(';')) {
+        Some(inner) => inner.replace('/', "."),
+        None => class.clone(),
+    };
+    if let Some(obf) = index.obfuscated_class(&dotted) {
+        eprintln!("mapping: {dotted} -> {obf}");
+        *class = obf.to_string();
+    } else {
+        eprintln!("mapping: {dotted} not in mapping, used as given");
+    }
+    Ok(())
 }
 
 /// Exit code + stderr line for an engine error (same mapping as `dispatch`).

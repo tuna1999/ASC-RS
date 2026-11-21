@@ -419,7 +419,30 @@ pub struct FieldSpec {
     pub flags: u16,
 }
 
-#[derive(Clone, Debug)]
+/// What one annotation item is attached to.
+#[derive(Clone, Copy, Debug)]
+pub enum AnnTarget {
+    Class,
+    /// `field_ids` index.
+    Field(u32),
+    /// `method_ids` index.
+    Method(u32),
+}
+
+/// An `annotation_item`: visibility byte, then `encoded_annotation`
+/// (`type_idx`, element count, `(name_idx, encoded_value)` pairs).
+pub fn annotation_item(visibility: u8, type_idx: u32, elements: &[(u32, Ev)]) -> Vec<u8> {
+    let mut b = vec![visibility];
+    b.extend(uleb(type_idx));
+    b.extend(uleb(elements.len() as u32));
+    for (name, v) in elements {
+        b.extend(uleb(*name));
+        b.extend(v.bytes());
+    }
+    b
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ClassSpec {
     pub flags: u32,
     /// `type_ids` index of the class itself.
@@ -431,6 +454,13 @@ pub struct ClassSpec {
     pub instance_fields: Vec<FieldSpec>,
     pub direct_methods: Vec<Method>,
     pub virtual_methods: Vec<Method>,
+    /// `string_ids` index of the source file name.
+    pub source_file: Option<u32>,
+    /// Raw `encoded_array` of static initial values (empty = none).
+    pub static_values: Vec<u8>,
+    /// Raw `annotation_item`s with their target, grouped into one set per
+    /// target in the order first seen.
+    pub annotations: Vec<(AnnTarget, Vec<u8>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -732,6 +762,65 @@ impl DexSpec {
             d.raw(a);
         }
 
+        // Per-class static values and annotation directories.
+        let mut annotation_dirs: Vec<u32> = Vec::with_capacity(self.classes.len());
+        for (i, c) in self.classes.iter().enumerate() {
+            if !c.static_values.is_empty() {
+                static_value_offs[i] = d.off();
+                d.raw(&c.static_values);
+            }
+            if c.annotations.is_empty() {
+                annotation_dirs.push(0);
+                continue;
+            }
+            let mut items = Vec::with_capacity(c.annotations.len());
+            for (_, bytes) in &c.annotations {
+                items.push(d.off());
+                d.raw(bytes);
+            }
+            let key = |t: &AnnTarget| match t {
+                AnnTarget::Class => (0u8, 0u32),
+                AnnTarget::Field(f) => (1, *f),
+                AnnTarget::Method(m) => (2, *m),
+            };
+            let mut targets: Vec<(u8, u32)> = c.annotations.iter().map(|(t, _)| key(t)).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            let mut sets = Vec::with_capacity(targets.len());
+            for t in &targets {
+                d.align();
+                sets.push(d.off());
+                let members: Vec<u32> = c
+                    .annotations
+                    .iter()
+                    .zip(&items)
+                    .filter(|((a, _), _)| key(a) == *t)
+                    .map(|(_, off)| *off)
+                    .collect();
+                d.u32(members.len() as u32);
+                for off in members {
+                    d.u32(off);
+                }
+            }
+            d.align();
+            annotation_dirs.push(d.off());
+            let of = |kind: u8| {
+                targets
+                    .iter()
+                    .zip(&sets)
+                    .filter(move |((k, _), _)| *k == kind)
+                    .map(|((_, idx), off)| (*idx, *off))
+            };
+            d.u32(of(0).next().map_or(0, |(_, off)| off));
+            d.u32(of(1).count() as u32);
+            d.u32(of(2).count() as u32);
+            d.u32(0);
+            for (idx, off) in of(1).chain(of(2)) {
+                d.u32(idx);
+                d.u32(off);
+            }
+        }
+
         d.align();
         let map_off = d.off() as usize;
         let entries = self.map_entries();
@@ -810,8 +899,8 @@ impl DexSpec {
                 p32(&mut b, base + 12, type_lists[ti].0);
                 ti += 1;
             }
-            p32(&mut b, base + 16, 0xFFFF_FFFF); // source_file_idx
-            p32(&mut b, base + 20, 0); // annotations_off
+            p32(&mut b, base + 16, c.source_file.unwrap_or(0xFFFF_FFFF));
+            p32(&mut b, base + 20, annotation_dirs[i]);
             p32(&mut b, base + 24, class_data_offs[i]);
             p32(&mut b, base + 28, static_value_offs[i]);
         }

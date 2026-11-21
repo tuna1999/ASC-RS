@@ -559,7 +559,9 @@ def main() -> int:
     if not args.binary:
         parser.error("binary is required unless --selftest is given")
 
-    bin_path = args.binary
+    # Absolute: cases run with cwd=REPO_ROOT, and on Windows a relative path
+    # then fails to spawn -> every case SKIPs and the run exits 0.
+    bin_path = str(Path(args.binary).resolve())
     if not Path(bin_path).exists():
         print(f"ERROR: binary not found: {bin_path}", file=sys.stderr)
         return 2

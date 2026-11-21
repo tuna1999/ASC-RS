@@ -117,6 +117,15 @@ impl MappingIndex {
         hits
     }
 
+    /// Obfuscated name of the class originally called `original` (exact,
+    /// dotted, as written in the mapping file). First entry wins.
+    pub fn obfuscated_class(&self, original: &str) -> Option<&str> {
+        self.classes
+            .iter()
+            .find(|(from, _)| from == original)
+            .map(|(_, to)| to.as_str())
+    }
+
     /// Parsed entry counts (classes, members).
     pub fn counts(&self) -> (usize, usize) {
         (self.classes.len(), self.members.len())
@@ -138,6 +147,14 @@ fn halves(line: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obfuscated_class_is_exact() {
+        let m = MappingIndex::parse("com.example.Secret -> a.b:\ncom.example.SecretBox -> a.c:\n");
+        assert_eq!(m.obfuscated_class("com.example.Secret"), Some("a.b"));
+        assert_eq!(m.obfuscated_class("com.example.SecretBox"), Some("a.c"));
+        assert_eq!(m.obfuscated_class("com.example"), None);
+    }
 
     const SAMPLE: &str = "\
 # compiler: R8

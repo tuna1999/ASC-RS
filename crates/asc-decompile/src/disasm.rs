@@ -47,7 +47,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use droidsaw_dex::annotation::{EncodedAnnotation, EncodedValue};
+use droidsaw_dex::annotation::{
+    AnnotationDirectoryItem, EncodedAnnotation, EncodedValue, parse_annotation_item,
+    parse_annotation_set,
+};
 use droidsaw_dex::decode::{
     ClassData, CodeItem, EncodedMethod, Instruction, PayloadData, PoolIndex,
 };
@@ -62,7 +65,7 @@ use crate::DecompileError;
 
 /// First line of every listing. A documented omission, not a defect.
 pub(crate) const HEADER_NOTE: &str =
-    "# smali-syntax listing from asc-rs; annotations, static values and debug info are not emitted";
+    "# smali-syntax listing from asc-rs; parameter annotations and debug info are not emitted";
 
 /// Opcodes the audit flagged; every other opcode goes through
 /// `fmt_instruction` unchanged.
@@ -210,6 +213,13 @@ pub(crate) fn render_class(
     if let Some(super_idx) = class_def.superclass_idx {
         let _ = writeln!(out, ".super {}", type_at(dex, super_idx, &c)?);
     }
+    if let Some(src) = class_def.source_file_idx {
+        let _ = writeln!(
+            out,
+            ".source \"{}\"",
+            escape_smali_string(&string_at(dex, src, &c)?)
+        );
+    }
     for iface in dex
         .type_lists
         .get(&class_def.interfaces_off)
@@ -217,6 +227,23 @@ pub(crate) fn render_class(
         .flatten()
     {
         let _ = writeln!(out, ".implements {}", type_at(dex, *iface, &c)?);
+    }
+
+    // Annotations are metadata over hostile bytes: a broken directory is
+    // reported in a comment, never a reason to refuse the code listing.
+    let dir = if class_def.annotations_off == 0 {
+        None
+    } else {
+        match AnnotationDirectoryItem::parse(bytes, class_def.annotations_off) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                let _ = writeln!(out, "# annotations unreadable: {e}");
+                None
+            }
+        }
+    };
+    if let Some(d) = &dir {
+        write_annotations(&mut out, dex, bytes, d.class_annotations_off, "", &c);
     }
 
     let class_data = if class_def.class_data_off == 0 {
@@ -235,31 +262,78 @@ pub(crate) fn render_class(
     // A name filter means the caller wants that method only; the field
     // inventory would be noise, so it is dropped.
     if method.is_none() {
-        for f in class_data
+        let statics: &[EncodedValue] = if class_def.static_values_off == 0 {
+            &[]
+        } else if let Some(v) = dex.encoded_arrays.get(&class_def.static_values_off) {
+            v
+        } else {
+            let _ = writeln!(
+                out,
+                "# static values at {:#x} unreadable",
+                class_def.static_values_off
+            );
+            &[]
+        };
+        let n_static = class_data.static_fields.len();
+        // Hostile directories may list ~file_len/8 entries: index once, not
+        // a linear scan per field. First entry wins, like the scan did.
+        let mut field_ann: BTreeMap<u32, u32> = BTreeMap::new();
+        for a in dir.as_ref().map_or(&[][..], |d| &d.fields[..]) {
+            field_ann.entry(a.field_idx.0).or_insert(a.annotations_off);
+        }
+        for (i, f) in class_data
             .static_fields
             .iter()
             .chain(class_data.instance_fields.iter())
+            .enumerate()
         {
             let field = dex
                 .fields
                 .get(f.field_idx.0 as usize)
                 .ok_or_else(|| err(&c, format!("field id {} out of range", f.field_idx.0)))?;
+            // A bad initial value is metadata: report it, keep the listing.
+            let (init, bad_init) = match statics.get(i).filter(|_| i < n_static) {
+                Some(v) => match encoded_value(dex, v, &c) {
+                    Ok(v) => (format!(" = {v}"), None),
+                    Err(e) => (String::new(), Some(e)),
+                },
+                None => (String::new(), None),
+            };
+            if let Some(e) = bad_init {
+                let _ = writeln!(out, "# static value unreadable: {e}");
+            }
             let _ = writeln!(
                 out,
-                ".field {}{}:{}",
+                ".field {}{}:{}{init}",
                 flag_prefix(f.access_flags, FIELD_FLAGS),
                 string_at(dex, field.name_idx, &c)?,
                 type_at(dex, field.type_idx, &c)?
             );
+            if let Some(&off) = field_ann.get(&f.field_idx.0) {
+                let mut block = String::new();
+                write_annotations(&mut block, dex, bytes, off, "    ", &c);
+                // baksmali closes a field block only when it printed one.
+                if !block.is_empty() {
+                    out.push_str(&block);
+                    let _ = writeln!(out, ".end field");
+                }
+            }
         }
     }
 
+    let mut method_ann: BTreeMap<u32, u32> = BTreeMap::new();
+    for a in dir.as_ref().map_or(&[][..], |d| &d.methods[..]) {
+        method_ann
+            .entry(a.method_idx.0)
+            .or_insert(a.annotations_off);
+    }
     for em in class_data
         .direct_methods
         .iter()
         .chain(class_data.virtual_methods.iter())
     {
-        render_method(&mut out, dex, bytes, descriptor, em, method)?;
+        let ann = method_ann.get(&em.method_idx.0).copied();
+        render_method(&mut out, dex, bytes, descriptor, em, method, ann)?;
     }
 
     Ok(out)
@@ -274,6 +348,7 @@ fn render_method(
     descriptor: &str,
     em: &EncodedMethod,
     filter: Option<&str>,
+    annotations_off: Option<u32>,
 ) -> Result<(), DecompileError> {
     let bootstrap = ctx(descriptor, em.code_off, None);
     let method_id = dex.methods.get(em.method_idx.0 as usize).ok_or_else(|| {
@@ -315,8 +390,13 @@ fn render_method(
             )
         })?;
         let _ = writeln!(out, "    .registers {}", code.registers_size);
+        if let Some(off) = annotations_off {
+            write_annotations(out, dex, bytes, off, "    ", &c);
+        }
         let _ = writeln!(out);
         render_body(out, dex, bytes, &who, em.code_off, code)?;
+    } else if let Some(off) = annotations_off {
+        write_annotations(out, dex, bytes, off, "    ", &c);
     }
     out.push_str(".end method\n\n");
     Ok(())
@@ -1071,24 +1151,41 @@ fn call_site_ref(dex: &DexFile, c: &Ctx, insn: &Instruction) -> Result<String, D
         proto_ref(dex, *mt, c)?,
     ];
     for (slot, v) in values.iter().enumerate().skip(3) {
-        args.push(call_site_arg(dex, v, c, n, slot)?);
+        args.push(
+            encoded_value(dex, v, c)
+                .map_err(|e| err(c, format!("call_site {n} slot {slot}: {e}")))?,
+        );
     }
     Ok(format!("call_site_{n}({})@{bootstrap}", args.join(", ")))
 }
 
-/// One `invoke-custom` extra argument, baksmali's
+/// One encoded value (call-site argument, annotation element, static field
+/// initial value), baksmali's
 /// `DexFormattedWriter.writeEncodedValue`: `Boolean.toString`,
 /// `String.format("0x%x", …)` for every integral width, `Float.toString`,
 /// `Double.toString`, `null`, the reference forms, and `writeAnnotation` /
 /// `writeArray` recursions.
-fn call_site_arg(
+fn encoded_value(dex: &DexFile, v: &EncodedValue, c: &Ctx) -> Result<String, DecompileError> {
+    encoded_value_at(dex, v, c, 0)
+}
+
+/// Nesting cap for rendering arrays/annotations (the workspace's
+/// encoded-value depth bound). droidsaw parses up to 65 536 levels without
+/// recursion; rendering them recursively would overflow the stack.
+const MAX_VALUE_DEPTH: usize = 64;
+
+fn encoded_value_at(
     dex: &DexFile,
     v: &EncodedValue,
     c: &Ctx,
-    n: u32,
-    slot: usize,
+    depth: usize,
 ) -> Result<String, DecompileError> {
-    let at = |detail: String| err(c, format!("call_site {n} slot {slot}: {detail}"));
+    if depth > MAX_VALUE_DEPTH {
+        return Err(err(
+            c,
+            format!("encoded value nested deeper than {MAX_VALUE_DEPTH}"),
+        ));
+    }
     match v {
         EncodedValue::Boolean(b) => Ok(b.to_string()),
         // `String.format("0x%x", …)`: the i32/i64 sign-extends to u32/u64, so a
@@ -1103,27 +1200,77 @@ fn call_site_arg(
         EncodedValue::Null => Ok("null".to_string()),
         EncodedValue::String(s) => Ok(format!(
             "\"{}\"",
-            escape_smali_string(&string_at(dex, *s, c).map_err(|e| at(e.to_string()))?)
+            escape_smali_string(&string_at(dex, *s, c)?)
         )),
-        EncodedValue::Type(t) => type_at(dex, *t, c).map_err(|e| at(e.to_string())),
-        EncodedValue::Field(f) => field_ref(dex, *f, c).map_err(|e| at(e.to_string())),
+        EncodedValue::Type(t) => type_at(dex, *t, c),
+        EncodedValue::Field(f) => field_ref(dex, *f, c),
         // An enum value renders exactly like a field reference.
-        EncodedValue::Enum(f) => field_ref(dex, *f, c).map_err(|e| at(e.to_string())),
-        EncodedValue::Method(m) => method_ref(dex, *m, c).map_err(|e| at(e.to_string())),
-        EncodedValue::MethodType(p) => proto_ref(dex, *p, c).map_err(|e| at(e.to_string())),
-        EncodedValue::MethodHandle(h) => {
-            method_handle_ref(dex, *h, c).map_err(|e| at(e.to_string()))
-        }
+        EncodedValue::Enum(f) => field_ref(dex, *f, c),
+        EncodedValue::Method(m) => method_ref(dex, *m, c),
+        EncodedValue::MethodType(p) => proto_ref(dex, *p, c),
+        EncodedValue::MethodHandle(h) => method_handle_ref(dex, *h, c),
         EncodedValue::Array(items) => {
             let parts = items
                 .iter()
-                .map(|i| call_site_arg(dex, i, c, n, slot))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| at(e.to_string()))?;
+                .map(|i| encoded_value_at(dex, i, c, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(format!("{{{}}}", parts.join(", ")))
         }
-        EncodedValue::Annotation(a) => {
-            annotation_literal(dex, a, c, n, slot).map_err(|e| at(e.to_string()))
+        EncodedValue::Annotation(a) => annotation_literal(dex, a, c, depth + 1),
+    }
+}
+
+/// Every annotation of the set at `set_off` as an `.annotation <visibility>
+/// Ltype;` block, one `key = value` line per element. Unreadable bytes become
+/// a `#` comment: annotations are metadata, the code listing stays usable.
+fn write_annotations(
+    out: &mut String,
+    dex: &DexFile,
+    bytes: &[u8],
+    set_off: u32,
+    indent: &str,
+    c: &Ctx,
+) {
+    let items = match parse_annotation_set(bytes, set_off) {
+        Ok(items) => items,
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "{indent}# annotation set at {set_off:#x} unreadable: {e}"
+            );
+            return;
+        }
+    };
+    for off in items {
+        let rendered = parse_annotation_item(bytes, off)
+            .map_err(|e| e.to_string())
+            .and_then(|item| {
+                let vis = match item.visibility {
+                    0 => "build",
+                    1 => "runtime",
+                    2 => "system",
+                    v => return Err(format!("visibility {v:#x}")),
+                };
+                let mut block = format!(
+                    "{indent}.annotation {vis} {}\n",
+                    type_at(dex, item.annotation.type_idx, c).map_err(|e| e.to_string())?
+                );
+                for (name, value) in &item.annotation.elements {
+                    let _ = writeln!(
+                        block,
+                        "{indent}    {} = {}",
+                        string_at(dex, *name, c).map_err(|e| e.to_string())?,
+                        encoded_value(dex, value, c).map_err(|e| e.to_string())?
+                    );
+                }
+                let _ = writeln!(block, "{indent}.end annotation");
+                Ok(block)
+            });
+        match rendered {
+            Ok(block) => out.push_str(&block),
+            Err(e) => {
+                let _ = writeln!(out, "{indent}# annotation at {off:#x} unreadable: {e}");
+            }
         }
     }
 }
@@ -1133,14 +1280,13 @@ fn annotation_literal(
     dex: &DexFile,
     a: &EncodedAnnotation,
     c: &Ctx,
-    n: u32,
-    slot: usize,
+    depth: usize,
 ) -> Result<String, DecompileError> {
     let type_desc = type_at(dex, a.type_idx, c)?;
     let mut parts = Vec::with_capacity(a.elements.len());
     for (name, value) in &a.elements {
         let key = string_at(dex, *name, c)?;
-        parts.push(format!("{key}={}", call_site_arg(dex, value, c, n, slot)?));
+        parts.push(format!("{key}={}", encoded_value_at(dex, value, c, depth)?));
     }
     Ok(format!("{type_desc}{{{}}}", parts.join(", ")))
 }
