@@ -120,20 +120,70 @@ fn pattern_filters_output() {
 
 #[test]
 fn unsupported_version_is_reported_not_guessed() {
-    let apk = tmp_apk("v95", &[("assets/index.android.bundle", bundle(95, None))]);
+    for v in [58u32, 60, 73, 97] {
+        let tag = format!("v{v}");
+        let apk = tmp_apk(&tag, &[("assets/index.android.bundle", bundle(v, None))]);
+        let r = asc_core::hermes::run_hermes(&apk, &asc_core::hermes::HermesOptions::default())
+            .expect("run");
+        assert!(!r.complete);
+        let b = &r.bundles[0];
+        assert!(!b.supported);
+        assert!(b.strings.is_empty());
+        assert!(
+            b.note
+                .as_deref()
+                .unwrap()
+                .contains(&format!("unsupported hermes version {v}"))
+        );
+        let _ = std::fs::remove_file(&apk);
+    }
+}
+
+fn decoded(tag: &str, b: Vec<u8>) -> asc_core::hermes::BundleInfo {
+    let apk = tmp_apk(tag, &[("assets/index.android.bundle", b)]);
     let r = asc_core::hermes::run_hermes(&apk, &asc_core::hermes::HermesOptions::default())
         .expect("run");
-    assert!(!r.complete);
-    let b = &r.bundles[0];
-    assert!(!b.supported);
-    assert!(b.strings.is_empty());
-    assert!(
-        b.note
-            .as_deref()
-            .unwrap()
-            .contains("unsupported hermes version 95")
-    );
     let _ = std::fs::remove_file(&apk);
+    assert!(r.complete, "errors: {:?}", r.errors);
+    let b = r.bundles.into_iter().next().unwrap();
+    assert!(b.supported, "note: {:?}", b.note);
+    assert_eq!(b.strings.len(), 3);
+    assert_eq!(b.strings[1].text, "https://example.com/api");
+    assert_eq!(b.strings[2].text, "h\u{e9}llo");
+    b
+}
+
+#[test]
+fn tagged_versions_decode_without_note() {
+    for v in [74u32, 76, 83, 84, 89] {
+        let b = decoded(&format!("t{v}"), bundle(v, None));
+        assert_eq!(b.strings[0].kind, "identifier");
+        assert!(b.note.is_none(), "v{v}: {:?}", b.note);
+    }
+}
+
+#[test]
+fn untagged_version_in_range_decodes_with_note() {
+    let b = decoded("u94", bundle(94, None));
+    assert!(b.note.as_deref().unwrap().contains("not a tagged release"));
+}
+
+/// v59 packs the string kind in 2 bits (count in the low 30): a top-bit
+/// test would read `Identifier = 1 << 30` as a plain string and add
+/// 2^30 to its count.
+#[test]
+fn v59_two_bit_string_kinds() {
+    let mut raw = bundle(59, None);
+    // kinds RLE sits right after the 128-byte header (0 functions).
+    raw[128..132].copy_from_slice(&((1u32 << 30) | 1).to_le_bytes()); // Identifier x1
+    raw[132..136].copy_from_slice(&2u32.to_le_bytes()); // String x2
+    let b = decoded("v59", raw.clone());
+    assert_eq!(b.strings[0].kind, "identifier");
+    assert_eq!(b.strings[1].kind, "string");
+    assert!(b.note.is_none());
+    // Predefined (2 << 30) is an identifier too.
+    raw[128..132].copy_from_slice(&((2u32 << 30) | 1).to_le_bytes());
+    assert_eq!(decoded("v59p", raw).strings[0].kind, "identifier");
 }
 
 #[test]

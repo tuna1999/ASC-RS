@@ -65,7 +65,7 @@ asc-rs axml       <apk> <entry>                      # decode any compiled binar
 asc-rs native     <apk|dex>                         # native libs (ELF), DEX native methods, JNI name + RegisterNatives table match
 asc-rs cert       <apk>                             # signing certs (v1/v2/v3), fingerprints; v2/v3 signatures + digests verified
 asc-rs resources <apk> [--id 0x7f020000 | --strings PAT]   # resources.arsc inventory, ID lookup, key/value search
-asc-rs hermes    <apk> [--pattern PAT]                # Hermes bundle string tables (v96; other versions reported unsupported)
+asc-rs hermes    <apk> [--pattern PAT]                # Hermes bundle string tables (v59, v74..=96; others reported unsupported)
 asc-rs xapk      <file.xapk>                          # XAPK member inventory: base/split APKs, per-member DEX + native libs
 ```
 

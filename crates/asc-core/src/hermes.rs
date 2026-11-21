@@ -6,9 +6,14 @@
 //! header → function headers → string kinds (RLE) → identifier hashes →
 //! small string table → overflow string table → string storage.
 //!
-//! Only the layout of bytecode **version 96** is verified (against a real
-//! bundle and the upstream header definition); any other version is
-//! reported as `supported=false` with its strings NOT guessed. No
+//! The string-table layout was checked against the upstream header of
+//! every tagged release: bytecode versions 59 (v0.1.0), 74, 76, 83, 84,
+//! 89 and 96 (v0.13.0) share the 128-byte file header prefix, the 16-byte
+//! small function header and the segment order; they differ only in the
+//! string-kind RLE (v59 uses 2 kind bits, 74+ use 1). Versions 59 and
+//! 74..=96 are decoded; an untagged version inside that range carries a
+//! note saying its layout is assumed. Anything else is reported as
+//! `supported=false` with its strings NOT guessed. No
 //! bytecode is interpreted, no JavaScript executed. Bounded: per-entry
 //! read cap, per-string length cap, emitted-string cap.
 
@@ -20,8 +25,18 @@ use serde::Serialize;
 
 use crate::pipeline::CoreError;
 
-/// The single Hermes bytecode version whose segment layout is verified.
-pub const SUPPORTED_VERSION: u32 = 96;
+/// Bytecode versions of tagged Hermes releases whose layout was checked.
+pub const TAGGED_VERSIONS: [u32; 7] = [59, 74, 76, 83, 84, 89, 96];
+
+/// String-kind count bits for a decodable version: 30 for v59 (kinds
+/// String/Identifier/Predefined), 31 for 74..=96 (String/Identifier).
+fn kind_count_bits(version: u32) -> Option<u32> {
+    match version {
+        59 => Some(30),
+        74..=96 => Some(31),
+        _ => None,
+    }
+}
 /// Largest bundle read in full (same cap as `inspect`).
 const FILE_CAP: usize = 64 << 20;
 /// Default and hard maximum number of emitted strings.
@@ -143,9 +158,9 @@ pub fn run_hermes(path: &Path, opts: &HermesOptions) -> Result<HermesReport, Cor
             truncated: false,
             note: None,
         };
-        if version != SUPPORTED_VERSION {
+        if kind_count_bits(version).is_none() {
             info.note = Some(format!(
-                "unsupported hermes version {version} (supported: {SUPPORTED_VERSION}); strings not decoded"
+                "unsupported hermes version {version} (supported: 59, 74..=96); strings not decoded"
             ));
             report.complete = false;
             report.bundles.push(info);
@@ -158,6 +173,11 @@ pub fn run_hermes(path: &Path, opts: &HermesOptions) -> Result<HermesReport, Cor
                 info.strings = strings;
                 info.truncated = truncated;
                 info.supported = true;
+                if !TAGGED_VERSIONS.contains(&version) {
+                    info.note = Some(format!(
+                        "hermes version {version} is not a tagged release; layout assumed equal to its tagged neighbours"
+                    ));
+                }
             }
             Err(why) => {
                 info.note = Some(format!("decode failed: {why}"));
@@ -169,7 +189,7 @@ pub fn run_hermes(path: &Path, opts: &HermesOptions) -> Result<HermesReport, Cor
     Ok(report)
 }
 
-/// Decode every string of a v96 bundle (bounded by `limit` after the
+/// Decode every string of a supported bundle (bounded by `limit` after the
 /// pattern filter). Public bytes-level API: the fuzz target drives it
 /// directly, without a filesystem or ZIP wrapper. Returns
 /// `(strings, truncated_by_limit)`.
@@ -229,6 +249,8 @@ struct Layout {
 }
 
 fn table_layout(b: &[u8]) -> Result<Layout, String> {
+    let version = u32_at(b, 8).ok_or("truncated header")?;
+    let bits = kind_count_bits(version).ok_or("unsupported hermes version")?;
     let function_count = u32_at(b, 40).ok_or("truncated header")?;
     let string_kind_count = u32_at(b, 44).ok_or("truncated header")?;
     let identifier_count = u32_at(b, 48).ok_or("truncated header")?;
@@ -261,17 +283,18 @@ fn table_layout(b: &[u8]) -> Result<Layout, String> {
             b.len()
         ));
     }
-    // String kinds: RLE u32 entries (kind in the top bit, count low 31).
+    // String kinds: RLE u32 entries (kind above `bits`, count below).
     let mut kinds = vec!["unknown"; string_count as usize];
     let mut idx = 0usize;
     for i in 0..string_kind_count as usize {
         let d = u32_at(b, kinds_off + i * 4).ok_or("truncated string kinds")?;
-        let kind = if d & 0x8000_0000 != 0 {
+        // Non-zero kind = Identifier (or v59 Predefined, also an identifier).
+        let kind = if d >> bits != 0 {
             "identifier"
         } else {
             "string"
         };
-        let count = (d & 0x7FFF_FFFF) as usize;
+        let count = (d & ((1u32 << bits) - 1)) as usize;
         if idx
             .checked_add(count)
             .map(|e| e > kinds.len())
