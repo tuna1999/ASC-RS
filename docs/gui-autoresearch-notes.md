@@ -57,10 +57,10 @@ Sorted by feature weight (P0 = 8) and ease of fix:
 | ASC-GUI-013 | No post-search filter on result rows | Oracle filters visible rows by free-text after search | small — `bottom_panel::draw_result_rows` accepts an additional filter param |
 | ASC-GUI-015 | Text-tab kind for `AndroidManifest.xml` | Oracle has a separate `kind="text"` EditorTab | small — extend `TabKind` + add text-tab path through `TabController` |
 | ASC-GUI-025 | No dedicated Settings dialog | Oracle has `SettingsDialog` with theme combo | small — new `Command::OpenSettings` + egui modal |
-| ASC-GUI-028 | Middle-click close on tab | Oracle binds `<Button-2>` | small — `ui::editor::draw_tab_strip` add middle-click handler |
+| ASC-GUI-028 | Middle-click close on tab | Oracle binds `<Button-2>` | done 2026-11-21 (`draw_tab_strip`, `middle_click_closes_tab`) |
 | ASC-GUI-029 | Tab overflow popup | Oracle has `more` button + filtered listbox | medium — popup with `egui` + filterable list |
 | ASC-GUI-030 | Close others / close all | Oracle right-click context | small — extend `TabController` |
-| ASC-GUI-035 | Per-DEX load progress text | Oracle streams progress; we batch | medium — small `WorkspaceSession::open` callback API per AGENTS.md §18 |
+| ASC-GUI-035 | Per-DEX load progress text | Oracle streams progress | done 2026-11-21 (`task::LoadProgress`; worker enumerates each DEX once, status bar mirrors it) |
 | ASC-GUI-036 | Search history dropdown | Oracle persists recent queries | small — surface `WorkspaceSession::findrefs_history` |
 
 ### P1 (jadx-inspired RE workflows)

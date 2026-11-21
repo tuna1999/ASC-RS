@@ -134,6 +134,9 @@ impl AscApp {
                                     if resp.double_clicked() {
                                         pinned = Some(descriptor.clone());
                                     }
+                                    if resp.middle_clicked() {
+                                        closed = Some(descriptor.clone());
+                                    }
                                     if matches!(status, TabStatus::Loading) {
                                         ui.add(egui::Spinner::new().size(11.0));
                                     }
@@ -159,6 +162,10 @@ impl AscApp {
                             })
                             .response
                             .interact(egui::Sense::click());
+                        // Middle-click anywhere on the tab closes it (browser/IDE idiom).
+                        if tab_resp.middle_clicked() {
+                            closed = Some(descriptor.clone());
+                        }
                         // Right-click a tab: the tab-scoped bulk
                         // operations that have no other surface
                         // (JADX-GUI-005/011). Every verb acts on the tab

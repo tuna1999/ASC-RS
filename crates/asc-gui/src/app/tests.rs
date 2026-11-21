@@ -2424,6 +2424,74 @@ fn load_artifact_reports_running_status() {
     assert!(line.contains(&path.display().to_string()));
 }
 
+/// ASC-GUI-035: while an open is pending, the status bar names the DEX
+/// the worker is enumerating and how many are done; a superseded or
+/// finished open's progress is dropped, never shown.
+#[test]
+fn load_progress_names_current_dex() {
+    use std::sync::atomic::Ordering;
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    let progress = std::sync::Arc::new(crate::task::LoadProgress {
+        path: "a.apk".into(),
+        ..Default::default()
+    });
+    let id = crate::task::TaskId(4242);
+    app.tasks.load_progress = Some((id, std::sync::Arc::clone(&progress)));
+    app.pending_open = Some(id);
+    app.loading_artifact = true;
+    // Archive not open yet: status untouched.
+    app.status = None;
+    app.sync_load_progress();
+    assert!(app.status.is_none());
+    progress.total.store(3, Ordering::Release);
+    progress.done.store(1, Ordering::Release);
+    *progress.current.lock() = "classes2.dex".into();
+    crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+    let line = app
+        .status
+        .as_ref()
+        .map(|s| s.text.clone())
+        .unwrap_or_default();
+    assert_eq!(line, "opening a.apk… classes2.dex (1/3 DEX)");
+    // A newer open supersedes this one: its progress handle is dropped.
+    app.pending_open = Some(crate::task::TaskId(4243));
+    app.sync_load_progress();
+    assert!(app.tasks.load_progress.is_none());
+}
+
+/// ASC-GUI-035 end to end: the production open path publishes per-DEX
+/// progress that reaches N/N before the artifact lands.
+#[test]
+fn load_progress_reaches_every_dex() {
+    let Some(apk) = corpus() else {
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut app = AscApp::new(None);
+    app.open_path(&apk, &ctx);
+    let (_, progress) = app.tasks.load_progress.clone().expect("progress handle");
+    for _ in 0..600 {
+        crate::app::AscApp::run_ui(&ctx, |ui| app.test_frame(ui));
+        if app.session.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(app.session.is_some(), "artifact loaded");
+    let total = progress.total.load(std::sync::atomic::Ordering::Acquire);
+    assert!(total >= 1);
+    assert_eq!(
+        progress.done.load(std::sync::atomic::Ordering::Acquire),
+        total
+    );
+    assert!(progress.current.lock().ends_with(".dex"));
+    assert!(
+        app.tasks.load_progress.is_none(),
+        "handle dropped after load"
+    );
+}
+
 /// `close_tab` removes the tab's metadata (descriptor gone from
 /// `tabs.tabs()`, neighbour activated). Covers ASC-GUI-028 (close
 /// tab removes metadata).
@@ -2541,6 +2609,34 @@ fn used_by_class_button_routes_to_findrefs_class() {
             .any(|c| matches!(c, Command::FindReferences)),
         "FindReferences queued via UsedByClass"
     );
+}
+
+/// ASC-GUI-028 render level: middle-clicking a tab closes exactly that
+/// tab (the active one stays active).
+#[test]
+fn middle_click_closes_tab() {
+    let _guard = render_lock();
+    use egui_kittest::kittest::Queryable;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .build_ui_state(|ui, app: &mut AscApp| app.test_frame(ui), empty_app());
+    h.state_mut().tabs.open_pinned("LAA;");
+    h.state_mut().tabs.open_pinned("LBB;");
+    h.state_mut().tabs.open_pinned("LCC;");
+    h.run_steps(2);
+    h.get_by_label_contains("BB")
+        .click_button(egui::PointerButton::Middle);
+    h.run_steps(2);
+    assert_eq!(
+        h.state()
+            .tabs
+            .tabs()
+            .iter()
+            .map(|t| t.descriptor.as_str())
+            .collect::<Vec<_>>(),
+        vec!["LAA;", "LCC;"]
+    );
+    assert_eq!(h.state().tabs.active_descriptor(), Some("LCC;"));
 }
 
 /// JADX-GUI-005 render level: the tab right-click menu offers

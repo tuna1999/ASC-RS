@@ -52,14 +52,14 @@ PASS only when its `acceptance` identifier returns green.
 | ASC-GUI-025 | Settings dialog (theme picker) | `settings.py:5-39` | P0 | 8 | `settings_strip` panel with dark/light theme pickers + close (View menu / `OpenSettings`) | None | None | app/tests.rs::overlay_windows_render | COMPLETE |
 | ASC-GUI-026 | Find in document count + current/other highlight | `app.py:1203-1242` | P0 | 8 | `find_matches` line list, `find_index` current; `draw_code` tints current differently from other matches | None | None | `app.rs::tests::find_step_cycles_through_matches`; visual `find_current_vs_other` | COMPLETE |
 | ASC-GUI-027 | Tab navigation: next / previous (Ctrl+Tab / Ctrl+Shift+Tab) | `app.py:909-919` | P0 | 8 | `Command::NextTab` / `Command::PreviousTab` | None | None | `state/tabs.rs::tests::cycle_*` | COMPLETE |
-| ASC-GUI-028 | Close tab (Ctrl+W) + middle-click close | `app.py:905-907`, `app.py:271-274` | P0 | 8 | Ctrl+W via `Command::CloseTab` | Middle-click close on tab strip | None — egui doesn't surface middle-click via the same API | `app.rs::tests::close_tab_removes_metadata` | PARTIAL (manifest scores COMPLETE: the acceptance test covers the Ctrl+W scope) |
+| ASC-GUI-028 | Close tab (Ctrl+W) + middle-click close | `app.py:905-907`, `app.py:271-274` | P0 | 8 | Ctrl+W via `Command::CloseTab`; middle-click on a tab (`Response::middle_clicked` in `ui::editor::draw_tab_strip`) | None | None | `app.rs::tests::close_tab_removes_metadata` + `middle_click_closes_tab` (kittest) | COMPLETE |
 | ASC-GUI-029 | Tab "more" overflow + open-tabs popup with filter | `widgets.py:300-527` | P0 | 8 | `open_tabs_strip` picker (Ctrl+Shift+H): filter box + clickable rows, Esc closes | None | None | app/tests.rs::overlay_windows_render | COMPLETE |
 | ASC-GUI-030 | Clear tabs / Close Tab context actions | `widgets.py:398-399, 385-396` | P0 | 8 | `Command::CloseOthers` / `CloseAll` (tab right-click context menu) drop tabs + their documents | None | None | state/tabs.rs::tests::close_others_close_all | COMPLETE |
 | ASC-GUI-031 | Class kind taxonomy (class / interface / enum / annotation) | `app.py:357-364` plain text | P0 | 8 | `ClassKind::{Class,Interface,Enum,Annotation}` from `access_flags`; jadx-style raster icons | None | `access_flags` already parsed (free) | `session.rs::tests::class_kind_*`; visual `tree_class_kinds` | COMPLETE |
 | ASC-GUI-032 | Per-DEX class counts | `app.py:486, 491` | P0 | 8 | `dex_counts: Vec<(String, usize)>`; `inspector_dex` shows per-DEX | None | None | `app.rs::tests::dex_counts_aggregate_per_entry`; visual `inspector_dex_section` | COMPLETE |
 | ASC-GUI-033 | Async syntax highlighting on worker | `app.py:1119-1162` | P0 | 8 | `Document::new` builds `spans` + `line_offsets` on `DecompileClass` worker task | None | None | `state/documents.rs::tests::document_tokenizes_offline` | COMPLETE |
 | ASC-GUI-034 | Window title with artifact name | `app.py:316` `f"ASC GUI Auth: MG1937 - {os.path.basename(self.apk_path)}"` | P0 | 8 | `self.window_title` set in `apply_artifact`, pushed via `ViewportCommand::Title` | None | None | `app.rs::tests::apply_artifact_sets_window_title`; visual `window_title_with_artifact` | COMPLETE |
-| ASC-GUI-035 | Async per-DEX load progress feedback | `app.py:485, 516-522` | P0 | 8 | Loading state shown as spinner in tab + "opening…" status; per-DEX count visible after completion | Live per-DEX progress text in status bar (oracle has progress callback) | `WorkspaceSession::open` doesn't stream; would need a small `load_progress` callback API | `app.rs::tests::load_artifact_reports_running_status` | PARTIAL (manifest scores COMPLETE: the acceptance test covers the running-status scope) |
+| ASC-GUI-035 | Async per-DEX load progress feedback | `app.py:485, 516-522` | P0 | 8 | "opening …" status, then live `opening <apk>… classesN.dex (k/n DEX)` from the load worker (`task::LoadProgress`, mirrored by `AscApp::sync_load_progress`) | None | None | `app.rs::tests::load_artifact_reports_running_status` + `load_progress_names_current_dex` + `load_progress_reaches_every_dex` (corpus) | COMPLETE |
 | ASC-GUI-036 | Search history (re-run previous queries) | implicit in `runtime.py` | P0 | 8 | `hist (n)` menu-button on the search bar; entries filter on the current input; click refills kind/pattern/class filter (`apply_history`) | None | None | `app/tests.rs::member_scoped_search_bar_widgets`; `state/search.rs::tests::search_autocomplete_over_recent_queries` | COMPLETE |
 | ASC-GUI-037 | Source-edit key bindings (n for rename, ; for line comment) | `app.py:758-762` | P0 | 8 | `frame_shortcuts` consumes `n` + `;` when `code_hovered` | None | None | `app.rs::tests::frame_shortcut_n_routes_to_rename` | COMPLETE |
 | ASC-GUI-038 | Editor cursor + line navigation keys | `app.py:755-770` `_SOURCE_NAV_KEYS` | P0 | 8 | egui handles nav keys (no handler needed); the click anchor (`last_click`) records the document it was clicked in, so a line number never anchors an action in another document (audit GUI-F1) | None | None | `app/tests.rs::clicked_line_persists` | COMPLETE |
@@ -153,12 +153,8 @@ context close 030, history 036, manifest text tab 015, settings 025;
 JADX go-to-declaration, find-usages, outline filter, copy
 descriptor/FQN). Remaining open work:
 
-P0 residuals (acceptance-tested core only):
-
-1. ASC-GUI-028 — middle-click tab close (needs an egui middle-click
-   API path).
-2. ASC-GUI-035 — live per-DEX progress text (needs a load_progress
-   callback API in `WorkspaceSession::open`).
+P0 residuals: none (ASC-GUI-028 middle-click close and ASC-GUI-035
+live per-DEX progress landed 2026-11-21).
 
 P2 (engine-extending): see §4/§5; BYTECODE/STRINGS inspectors, R8
 mappings and transitive views stay BLOCKED on engine work by policy.

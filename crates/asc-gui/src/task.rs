@@ -266,6 +266,8 @@ pub const MAX_TASK_THREADS: usize = 32;
 pub struct TaskManager {
     /// Streaming search shared with the UI (`spawn_findrefs` only).
     pub live: Option<(TaskId, std::sync::Arc<LiveSearch>)>,
+    /// Per-DEX progress of the newest artifact open (`spawn_load` only).
+    pub load_progress: Option<(TaskId, Arc<LoadProgress>)>,
     next_id: u64,
     generation: SessionGeneration,
     in_flight: Vec<InFlight>,
@@ -289,6 +291,7 @@ impl TaskManager {
     pub fn new() -> Self {
         Self {
             live: None,
+            load_progress: None,
             next_id: 0,
             generation: SessionGeneration::INITIAL,
             in_flight: Vec::new(),
@@ -441,12 +444,20 @@ impl TaskManager {
             }
         }
         let apk: PathBuf = apk.to_path_buf();
-        self.submit(
+        let progress = Arc::new(LoadProgress {
+            path: apk.display().to_string(),
+            ..LoadProgress::default()
+        });
+        let shared = Arc::clone(&progress);
+        let ctx2 = ctx.clone();
+        let id = self.submit(
             TaskKind::LoadArtifact,
             apk.display().to_string(),
-            move || run_load_job(&apk),
+            move || run_load_job(&apk, &shared, &ctx2),
             ctx,
-        )
+        );
+        self.load_progress = Some((id, progress));
+        id
     }
 
     /// Spawn a `run_findrefs` task. Supersedes any previous findrefs:
@@ -1057,11 +1068,22 @@ pub(crate) fn load_manifest(path: &Path) -> (Option<asc_manifest::ManifestInfo>,
 
 /// Run one APK-open job (worker-thread body): open the session,
 /// enumerate every DEX's classes, parse the manifest.
-fn run_load_job(apk: &Path) -> TaskOutcome {
+fn run_load_job(apk: &Path, progress: &LoadProgress, ctx: &egui::Context) -> TaskOutcome {
     let session = match crate::session::WorkspaceSession::open(apk) {
         Ok(s) => s,
         Err(e) => return TaskOutcome::Failed(e.to_string()),
     };
+    // Enumerate each DEX once up front (filling the session's per-DEX
+    // cache) so the status bar can show which DEX is being read; the
+    // counts and the merged list below are then cache hits.
+    let entries = session.dex_entries();
+    progress.total.store(entries.len(), Ordering::Release);
+    for (i, entry) in entries.iter().enumerate() {
+        *progress.current.lock() = entry.name.clone();
+        ctx.request_repaint();
+        let _ = session.classes_for_dex(i);
+        progress.done.store(i + 1, Ordering::Release);
+    }
     let (manifest, manifest_error) = load_manifest(session.path());
     // Per-DEX counts come from the DEXes themselves, not from
     // `all_classes()` (which collapses a class shadowed by an earlier DEX
@@ -1084,6 +1106,37 @@ fn run_load_job(apk: &Path) -> TaskOutcome {
 /// Partial rows a streaming search has produced so far, shared with the
 /// UI thread. `done` flips when the worker stops (success or error), so
 /// the panel can stop treating the table as live.
+/// Live per-DEX progress of an artifact open (ASC-GUI-035), written by
+/// the load worker and read by the UI thread each frame.
+#[derive(Default)]
+pub struct LoadProgress {
+    /// Artifact path as shown in the status bar.
+    pub path: String,
+    /// DEX entries fully enumerated so far.
+    pub done: AtomicUsize,
+    /// DEX entries in the artifact (0 until the archive is open).
+    pub total: AtomicUsize,
+    /// Entry name currently being enumerated.
+    pub current: parking_lot::Mutex<String>,
+}
+
+impl LoadProgress {
+    /// Status line, e.g. `opening a.apk… classes2.dex (1/3 DEX)`; `None`
+    /// before the archive is open.
+    pub fn describe(&self) -> Option<String> {
+        let total = self.total.load(Ordering::Acquire);
+        if total == 0 {
+            return None;
+        }
+        let done = self.done.load(Ordering::Acquire);
+        Some(format!(
+            "opening {}… {} ({done}/{total} DEX)",
+            self.path,
+            self.current.lock()
+        ))
+    }
+}
+
 #[derive(Default)]
 pub struct LiveSearch {
     /// Query label the rows belong to.
@@ -1484,7 +1537,7 @@ mod tests {
             "load_job_corrupt_manifest",
             &[("AndroidManifest.xml", b"not axml at all")],
         );
-        let outcome = run_load_job(&apk);
+        let outcome = run_load_job(&apk, &LoadProgress::default(), &egui::Context::default());
         let _ = std::fs::remove_file(&apk);
 
         let TaskOutcome::Loaded(artifact) = outcome else {
@@ -1506,7 +1559,7 @@ mod tests {
     fn load_job_reports_an_absent_manifest_as_absence() {
         let apk =
             crate::test_zip::write_temp_apk("load_job_no_manifest", &[("assets/x.txt", b"hi")]);
-        let outcome = run_load_job(&apk);
+        let outcome = run_load_job(&apk, &LoadProgress::default(), &egui::Context::default());
         let _ = std::fs::remove_file(&apk);
 
         let TaskOutcome::Loaded(artifact) = outcome else {

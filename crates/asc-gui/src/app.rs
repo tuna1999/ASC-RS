@@ -388,9 +388,8 @@ impl AscApp {
         self.loading_artifact = true;
         // Surface a "running" hint at the status bar so the user sees
         // the load is in progress even before the task lands
-        // (ASC-GUI-035: per-DEX load progress feedback — at minimum
-        // the artifact-level status, since per-DEX progress lives on
-        // the worker thread and is not observable from the UI loop).
+        // (ASC-GUI-035); `sync_load_progress` then appends the DEX
+        // being enumerated each frame.
         self.set_status(format!("opening {}…", path.display()), true);
     }
 
@@ -429,6 +428,7 @@ impl AscApp {
         self.resources_pattern.clear();
         self.resources_id.clear();
         self.tasks.live = None;
+        self.tasks.load_progress = None;
         self.last_click = None;
         self.comment_target = None;
         // Session swap: drop find results that belonged to the old
@@ -873,6 +873,7 @@ impl AscApp {
 
     fn poll_workers(&mut self, ctx: &egui::Context) {
         self.sync_live_search();
+        self.sync_load_progress();
         let completed = self.tasks.poll();
         let any = !completed.is_empty();
         for task in completed {
@@ -888,6 +889,21 @@ impl AscApp {
     /// Copy rows a streaming search has produced so far into the RESULTS
     /// tab (ASC-RS-GUI-109). The final `Search` outcome replaces the
     /// table wholesale, so partial rows never outlive their task.
+    /// Mirror the open worker's per-DEX progress into the status bar
+    /// (ASC-GUI-035) while that open is still the pending one.
+    fn sync_load_progress(&mut self) {
+        let Some((id, progress)) = self.tasks.load_progress.as_ref() else {
+            return;
+        };
+        if !self.loading_artifact || self.pending_open != Some(*id) {
+            self.tasks.load_progress = None;
+            return;
+        }
+        if let Some(line) = progress.describe() {
+            self.set_status(line, true);
+        }
+    }
+
     fn sync_live_search(&mut self) {
         // `done` (not in-flight-ness) is the stop signal: a search that is
         // still queued behind `MAX_TASK_THREADS` has no running thread yet

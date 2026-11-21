@@ -347,7 +347,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": false,
       "reference": "ASC frozen: app.py:905-907",
-      "notes": "close_tab removes metadata + close_all empties. Test close_tab_removes_metadata passes."
+      "notes": "close_tab removes metadata + close_all empties; middle-click on a tab closes it (middle_click_closes_tab, kittest)."
     },
     {
       "id": "ASC-GUI-029",
@@ -434,7 +434,7 @@
       "test_kind": "cargo_test_new",
       "blocking_engine_change": true,
       "reference": "ASC frozen: app.py:485",
-      "notes": "open_path flips loading_artifact and sets a running status; test `load_artifact_reports_running_status` passes."
+      "notes": "open_path flips loading_artifact and sets a running status; the load worker then publishes per-DEX progress (LoadProgress) mirrored into the status bar (load_progress_names_current_dex, load_progress_reaches_every_dex)."
     },
     {
       "id": "ASC-GUI-036",
