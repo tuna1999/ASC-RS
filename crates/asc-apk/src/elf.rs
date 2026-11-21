@@ -558,15 +558,6 @@ fn relocations(
 ) -> (HashMap<u64, u64>, HashSet<u64>) {
     let mut relative = HashMap::new();
     let mut symbolic = HashSet::new();
-    if dynv
-        .iter()
-        .any(|e| e.0 == 0x6000_000f || e.0 == 0x6000_0011)
-    {
-        out.complete = false;
-        out.notes.push(
-            "Android packed relocations (APS2) not decoded; table entries may be missed".into(),
-        );
-    }
     let rel_type: u64 = match machine {
         183 => 1027,
         62 | 3 => 8,
@@ -576,6 +567,21 @@ fn relocations(
     };
     let tag = |t: u64| dynv.iter().find(|e| e.0 == t).map(|e| e.1);
     let w: u64 = if is64 { 8 } else { 4 };
+    let mut classify = |at: u64, info: u64, addend: Option<u64>| {
+        let ty = if is64 {
+            info & 0xffff_ffff
+        } else {
+            info & 0xff
+        };
+        let Some(at) = va_to_off(segs, at) else {
+            return;
+        };
+        if ty != rel_type {
+            symbolic.insert(at);
+        } else if let Some(a) = addend {
+            relative.insert(at, a);
+        }
+    };
     for (table, size, rela) in [(tag(7), tag(8), true), (tag(17), tag(18), false)] {
         let (Some(va), Some(size)) = (table, size) else {
             continue;
@@ -595,22 +601,121 @@ fn relocations(
             let (Some(at), Some(info)) = (r.w(e, is64), r.w(e + w, is64)) else {
                 break;
             };
-            let ty = if is64 {
-                info & 0xffff_ffff
-            } else {
-                info & 0xff
-            };
-            let Some(at) = va_to_off(segs, at) else {
-                continue;
-            };
-            if ty != rel_type {
-                symbolic.insert(at);
-            } else if rela && let Some(a) = r.w(e + 2 * w, is64) {
-                relative.insert(at, a);
-            }
+            let addend = if rela { r.w(e + 2 * w, is64) } else { None };
+            classify(at, info, addend);
+        }
+    }
+    // Android packed relocations: DT_ANDROID_REL(A) + size tag.
+    for (t, sz, rela) in [
+        (0x6000_000f, 0x6000_0010, false),
+        (0x6000_0011, 0x6000_0012, true),
+    ] {
+        let (Some(va), Some(size)) = (tag(t), tag(sz)) else {
+            continue;
+        };
+        let data = va_to_off(segs, va).and_then(|o| {
+            r.b.get(usize::try_from(o).ok()?..)?
+                .get(..usize::try_from(size).ok()?)
+        });
+        let res = match data {
+            Some(d) => decode_aps2(d, is64, rela, &mut |at, info, a| classify(at, info, a)),
+            None => Err("APS2 table outside the file"),
+        };
+        if let Err(why) = res {
+            out.complete = false;
+            out.notes.push(format!(
+                "Android packed relocations (APS2): {why}; table entries may be missed"
+            ));
         }
     }
     (relative, symbolic)
+}
+
+/// Decode an Android `APS2` packed relocation table (bionic
+/// `linker_reloc_iterators.h` `packed_reloc_iterator`): a SLEB128 stream
+/// of relocation groups whose offset / info / addend are delta-coded.
+/// Calls `f(r_offset, r_info, addend)` per relocation (`addend` only for
+/// RELA). Stops at `MAX_RELOCS`; any malformed stream is an error.
+fn decode_aps2(
+    d: &[u8],
+    is64: bool,
+    rela: bool,
+    f: &mut dyn FnMut(u64, u64, Option<u64>),
+) -> Result<(), &'static str> {
+    const BY_INFO: u64 = 1;
+    const BY_OFFSET_DELTA: u64 = 2;
+    const BY_ADDEND: u64 = 4;
+    const HAS_ADDEND: u64 = 8;
+    let mask = if is64 { u64::MAX } else { 0xffff_ffff };
+    let body = d.strip_prefix(b"APS2").ok_or("bad magic")?;
+    let mut pos = 0usize;
+    let mut sleb = || -> Result<u64, &'static str> {
+        let (mut v, mut shift) = (0u64, 0u32);
+        loop {
+            let b = *body.get(pos).ok_or("truncated")?;
+            pos += 1;
+            if shift < 64 {
+                v |= u64::from(b & 0x7f) << shift;
+            }
+            shift += 7;
+            if b & 0x80 == 0 {
+                if shift < 64 && b & 0x40 != 0 {
+                    v |= u64::MAX << shift;
+                }
+                return Ok(v & mask);
+            }
+            if shift >= 70 {
+                return Err("overlong SLEB128");
+            }
+        }
+    };
+    let total = sleb()?;
+    let mut offset = sleb()?;
+    let (mut info, mut addend) = (0u64, 0u64);
+    let mut done = 0u64;
+    while done < total {
+        let size = sleb()?;
+        let flags = sleb()?;
+        if size == 0 || size > total - done {
+            return Err("bad group size");
+        }
+        let has_addend = flags & HAS_ADDEND != 0;
+        if has_addend && !rela {
+            return Err("addend in a REL table");
+        }
+        let delta = if flags & BY_OFFSET_DELTA != 0 {
+            sleb()?
+        } else {
+            0
+        };
+        if flags & BY_INFO != 0 {
+            info = sleb()?;
+        }
+        if has_addend && flags & BY_ADDEND != 0 {
+            addend = addend.wrapping_add(sleb()?) & mask;
+        } else if !has_addend {
+            addend = 0;
+        }
+        for _ in 0..size {
+            if done >= MAX_RELOCS {
+                return Err("more than the relocation cap");
+            }
+            offset = offset.wrapping_add(if flags & BY_OFFSET_DELTA != 0 {
+                delta
+            } else {
+                sleb()?
+            }) & mask;
+            if flags & BY_INFO == 0 {
+                info = sleb()?;
+            }
+            if has_addend && flags & BY_ADDEND == 0 {
+                addend = addend.wrapping_add(sleb()?) & mask;
+            }
+            f(offset, info, rela.then_some(addend));
+            done += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Plausible Java method name: no descriptor punctuation, no controls.
@@ -828,6 +933,85 @@ mod tests {
 
     const NAME: u64 = 0x2100;
     const SIG: u64 = 0x210b;
+
+    fn sleb(mut v: i64, out: &mut Vec<u8>) {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if (v == 0 && b & 0x40 == 0) || (v == -1 && b & 0x40 != 0) {
+                out.push(b);
+                return;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    /// `jni_elf` whose only relocation table is an APS2 `DT_ANDROID_RELA`
+    /// stream (`vals` SLEB128-encoded after the magic) at va 0x2400.
+    fn aps2_elf(vals: &[i64], cut: usize) -> Vec<u8> {
+        let mut blob = b"APS2".to_vec();
+        for v in vals {
+            sleb(*v, &mut blob);
+        }
+        blob.truncate(blob.len() - cut);
+        let mut b = jni_elf(&[], &[]);
+        put(&mut b, 0x1400, &blob);
+        put(&mut b, 0x1800, &0x6000_0011u64.to_le_bytes());
+        put(&mut b, 0x1810, &0x6000_0012u64.to_le_bytes());
+        put(&mut b, 0x1818, &(blob.len() as u64).to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn jni_tables_decode_aps2_packed_relocations() {
+        let (n, s) = (NAME as i64, SIG as i64);
+        let vals = [
+            4,
+            0x2200 - 8, // count, start offset
+            // group: 3 relocs, by info + offset delta, addend per reloc
+            3,
+            1 | 2 | 8,
+            8,
+            1027,
+            n,
+            s - n,
+            0x501 - s, // negative delta
+            // group: 1 symbolic reloc (no addend) at 0x2250
+            1,
+            1 | 2,
+            0x40,
+            257,
+        ];
+        let t = jni_tables(&aps2_elf(&vals, 0)).unwrap();
+        assert!(t.complete, "{:?}", t.notes);
+        assert_eq!(
+            t.entries,
+            [JniEntry {
+                name: "nativeInit".into(),
+                signature: "(Ljava/lang/String;[I)V".into(),
+                fn_addr: Some(0x501),
+            }]
+        );
+        // A truncated stream keeps what decoded and says it is incomplete.
+        let t = jni_tables(&aps2_elf(&vals, 2)).unwrap();
+        assert!(!t.complete);
+        assert!(
+            t.notes
+                .iter()
+                .any(|m| m.contains("APS2") && m.contains("truncated")),
+            "{:?}",
+            t.notes
+        );
+        // Garbage magic is reported, not trusted.
+        let mut b = aps2_elf(&vals, 0);
+        put(&mut b, 0x1400, b"XXXX");
+        let t = jni_tables(&b).unwrap();
+        assert!(
+            t.notes.iter().any(|m| m.contains("bad magic")),
+            "{:?}",
+            t.notes
+        );
+    }
 
     #[test]
     fn jni_tables_resolve_rela_in_place_and_symbolic_pointers() {

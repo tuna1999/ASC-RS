@@ -553,8 +553,19 @@ fn pair_name(id: u32) -> Option<&'static str> {
     pair_kind(id).map(|(name, _)| name)
 }
 
-/// Inventory the signing material of `path` (an APK).
+/// Inventory the signing material of `path` (an APK). Every parser
+/// below reads hostile bytes, so an unforeseen panic is caught and
+/// reported as an error (exit 2), never a crash with no report.
 pub fn run_cert(path: &Path) -> Result<CertReport, CoreError> {
+    std::panic::catch_unwind(|| run_cert_inner(path)).unwrap_or_else(|_| {
+        Err(CoreError::WorkerPanicked(
+            "cert: internal panic while parsing the signing material (report it with the APK)"
+                .into(),
+        ))
+    })
+}
+
+fn run_cert_inner(path: &Path) -> Result<CertReport, CoreError> {
     let apk = Apk::open(path)?;
     if apk.is_raw_dex() {
         return Err(CoreError::Usage(
