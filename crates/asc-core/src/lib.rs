@@ -44,6 +44,7 @@
 pub mod budget;
 pub mod cert;
 pub mod class_name;
+pub mod classes;
 pub mod format;
 pub mod hermes;
 pub mod inspect;

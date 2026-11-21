@@ -87,80 +87,86 @@ pub fn run_strings(path: &Path, opts: &StringsOptions) -> Result<StringsReport, 
         errors: Vec::new(),
         complete: true,
     };
+    for_each_dex_view(&apk, |name, view| match view {
+        DexScan::View(view) => collect_view(name, view, opts, &mut report),
+        DexScan::Skipped(why) => report.errors.push(format!("{name}: {why}")),
+        DexScan::Failed(why) => {
+            report.errors.push(format!("{name}: {why}"));
+            report.complete = false;
+        }
+    });
+    report.truncated = report.total_matched > report.hits.len();
+    Ok(report)
+}
+
+/// One step of [`for_each_dex_view`].
+pub(crate) enum DexScan<'v, 'a> {
+    /// A parsed DEX (or one logical DEX of a DEX-041 container).
+    View(&'v DexView<'a>),
+    /// An entry deliberately not decoded (not a DEX). Audit F06: a
+    /// deliberate skip is reported but is not a failed scan.
+    Skipped(String),
+    /// An entry that should have been scanned but could not be.
+    Failed(String),
+}
+
+/// Walk every `classes*.dex` entry of `apk` (DEX-041 containers split
+/// into their logical DEXes, each read capped at [`DEX_CAP`]) and hand
+/// each to `f` with its logical name. Never stops early: one bad entry
+/// is reported through `f` and the walk continues.
+pub(crate) fn for_each_dex_view(apk: &asc_apk::Apk, mut f: impl FnMut(&str, DexScan<'_, '_>)) {
     let cap = InflateLimits::with_max_output(DEX_CAP);
     for e in apk.dex_entries() {
         if e.uncompressed_size as usize > DEX_CAP {
-            report
-                .errors
-                .push(format!("{}: exceeds {} MiB DEX cap", e.name, DEX_CAP >> 20));
-            report.complete = false;
+            f(
+                &e.name,
+                DexScan::Failed(format!("exceeds {} MiB DEX cap", DEX_CAP >> 20)),
+            );
             continue;
         }
         let bytes = match apk.read_entry_with_limits(&e, cap.unwrap_or_default()) {
             Ok(b) => b,
             Err(x) => {
-                report.errors.push(format!("{}: read failed: {x}", e.name));
-                report.complete = false;
+                f(&e.name, DexScan::Failed(format!("read failed: {x}")));
                 continue;
             }
         };
         let b = bytes.as_slice();
         if b.len() < 8 || !b.starts_with(b"dex\n") {
-            // Same policy as findrefs (audit F06): an entry we
-            // deliberately declined to decode is not a failed scan —
-            // record the skip in `errors` but do NOT flip `complete`,
-            // so exit 2 keeps meaning "the scan ran and hit an error".
-            report
-                .errors
-                .push(format!("{}: skipped: entry is not a DEX", e.name));
+            f(
+                &e.name,
+                DexScan::Skipped("skipped: entry is not a DEX".into()),
+            );
             continue;
         }
-        let views: Vec<(String, DexView<'_>)> = if &b[4..8] == b"041\0" {
-            match DexView::logical_header_offsets(b) {
-                Ok(offsets) => offsets
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, off)| {
-                        let name = logical_dex_name(&e.name, offsets.len(), i);
-                        match DexView::parse_at(b, *off) {
-                            Ok(v) => Some((name, v)),
-                            Err(x) => {
-                                // A logical DEX we could not parse is a
-                                // failed scan (mirrors findrefs): record
-                                // it, never drop it silently.
-                                report
-                                    .errors
-                                    .push(format!("{name}: DexView::parse_at failed: {x}"));
-                                report.complete = false;
-                                None
-                            }
-                        }
-                    })
-                    .collect(),
+        if &b[4..8] == b"041\0" {
+            let offsets = match DexView::logical_header_offsets(b) {
+                Ok(o) => o,
                 Err(x) => {
-                    report
-                        .errors
-                        .push(format!("{}: logical_header_offsets failed: {x}", e.name));
-                    report.complete = false;
+                    f(
+                        &e.name,
+                        DexScan::Failed(format!("logical_header_offsets failed: {x}")),
+                    );
                     continue;
+                }
+            };
+            for (i, off) in offsets.iter().enumerate() {
+                let name = logical_dex_name(&e.name, offsets.len(), i);
+                match DexView::parse_at(b, *off) {
+                    Ok(v) => f(&name, DexScan::View(&v)),
+                    Err(x) => f(
+                        &name,
+                        DexScan::Failed(format!("DexView::parse_at failed: {x}")),
+                    ),
                 }
             }
         } else {
             match DexView::parse(b) {
-                Ok(v) => vec![(e.name.clone(), v)],
-                Err(x) => {
-                    report.errors.push(format!("{}: parse failed: {x}", e.name));
-                    report.complete = false;
-                    continue;
-                }
+                Ok(v) => f(&e.name, DexScan::View(&v)),
+                Err(x) => f(&e.name, DexScan::Failed(format!("parse failed: {x}"))),
             }
-        };
-        for (name, view) in views {
-            collect_view(&name, &view, opts, &mut report);
         }
     }
-    report.truncated = report.total_matched > report.hits.len();
-    Ok(report)
 }
 
 fn collect_view(name: &str, view: &DexView<'_>, opts: &StringsOptions, report: &mut StringsReport) {

@@ -56,3 +56,25 @@ fn global_flag_value_is_validated_in_either_position() {
         );
     }
 }
+
+/// A malformed command line is invalid input (exit 1), not an engine
+/// error (2, clap's default); `--help`/`--version` are success.
+#[test]
+fn usage_errors_exit_1_help_exits_0() {
+    for args in [
+        &["no-such-subcommand"][..],
+        &["listclass"],
+        &["listclass", "a.apk", "extra"],
+        &["listclass", "a.apk", "--no-such-flag"],
+        &[],
+    ] {
+        let out = run_cli(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(!out.stderr.is_empty(), "{args:?}: usage on stderr");
+    }
+    for args in [&["--help"][..], &["--version"], &["listclass", "--help"]] {
+        let out = run_cli(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(!out.stdout.is_empty(), "{args:?}");
+    }
+}

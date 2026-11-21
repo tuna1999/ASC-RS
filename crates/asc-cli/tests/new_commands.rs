@@ -245,3 +245,119 @@ fn strings_skips_non_dex_entry_without_failing() {
     );
     let _ = std::fs::remove_file(&apk);
 }
+
+/// `findrefs extends|impl` and `listmethod` against counts cross-checked
+/// with androguard 4.1.3 on workload.apk (Fragment subclasses 3, Runnable
+/// implementors 193, defined methods 47934).
+#[test]
+fn hierarchy_and_listmethod_match_androguard_on_workload() {
+    let Some(apk) = corpus("apk/workload.apk") else {
+        eprintln!("skipping: corpus/apk/workload.apk missing");
+        return;
+    };
+    let a = apk.to_str().unwrap();
+    let lines = |args: &[&str]| {
+        let out = run_cli(args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let ext = lines(&["findrefs", a, "extends", "androidx.fragment.app.Fragment"]);
+    assert_eq!(ext.len(), 3, "{ext:?}");
+    assert!(
+        ext.contains(&"classes.dex | Landroidx/fragment/app/DialogFragment;".to_string()),
+        "{ext:?}"
+    );
+    assert_eq!(
+        lines(&["findrefs", a, "impl", "Ljava/lang/Runnable;"]).len(),
+        193
+    );
+    let tr = lines(&[
+        "findrefs",
+        a,
+        "extends",
+        "androidx.fragment.app.Fragment",
+        "--transitive",
+    ]);
+    assert!(
+        tr.len() > 3 && tr[3..].iter().all(|l| l.contains("    # via L")),
+        "{tr:?}"
+    );
+
+    assert_eq!(lines(&["listmethod", a, "--limit", "1000000"]).len(), 47934);
+    assert_eq!(
+        lines(&["listmethod", a, "--class", "androidx.core.net.UriCompat"]),
+        [
+            "Landroidx/core/net/UriCompat;-><init>()V",
+            "Landroidx/core/net/UriCompat;->toSafeString(Landroid/net/Uri;)Ljava/lang/String;"
+        ]
+    );
+    let out = run_cli(&["listmethod", a, "--class", "Lcom/nope/X;"]);
+    assert_eq!(out.status.code(), Some(1));
+    let out = run_cli(&["findrefs", a, "extends", "Lcom/nope/X;"]);
+    assert_eq!(out.status.code(), Some(0), "no subclasses is not an error");
+    assert!(out.stdout.is_empty());
+}
+
+/// `asc-rs listclass x | head -1`: the reader closing the pipe early
+/// must end the run quietly (exit 0), not panic with exit 101.
+#[test]
+fn closed_stdout_pipe_exits_quietly() {
+    let Some(apk) = corpus("apk/workload.apk") else {
+        eprintln!("skipping: corpus/apk/workload.apk missing");
+        return;
+    };
+    for args in [&["listclass"][..], &["listmethod"], &["strings"]] {
+        let mut child = Command::new(BIN)
+            .args(args)
+            .arg(&apk)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = child.stdout.take().unwrap();
+        let mut first = [0u8; 1];
+        std::io::Read::read_exact(&mut out, &mut first).unwrap();
+        drop(out);
+        let o = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {err}");
+        assert!(!err.contains("panicked"), "{args:?}: {err}");
+    }
+}
+
+/// `--format json` is honoured by `disasm` (all three views).
+#[test]
+fn disasm_json_wraps_the_listing() {
+    let Some(apk) = corpus("apk/workload.apk") else {
+        eprintln!("skipping: corpus/apk/workload.apk missing");
+        return;
+    };
+    let class = "Lkotlin/jvm/internal/PropertyReference1;";
+    for view in ["smali", "bytecode", "cfg"] {
+        let run = |fmt: &str| {
+            let o = Command::new(BIN)
+                .args(["disasm"])
+                .arg(&apk)
+                .args([class, "--method", "<init>", "--view", view, "--format", fmt])
+                .output()
+                .unwrap();
+            assert_eq!(o.status.code(), Some(0), "{view} {fmt}");
+            String::from_utf8(o.stdout).unwrap()
+        };
+        let text = run("text");
+        let v: serde_json::Value = serde_json::from_str(&run("json")).unwrap();
+        assert_eq!(v["listing"], text.as_str(), "{view}");
+        assert_eq!(v["class"], class);
+        assert_eq!(v["method"], "<init>");
+        assert_eq!(v["view"], view);
+        assert_eq!(v["dex_name"], "classes.dex");
+    }
+}

@@ -17,7 +17,8 @@
 //! - 1 — class-not-found (`getclass`, `disasm`), method-not-found
 //!   (`disasm --method`), or input validation error
 //!   (`findrefs method` with neither name nor `--class`, empty
-//!   `listclass --prefix`, `--threads 0`, etc.).
+//!   `listclass --prefix`, `--threads 0`, a malformed command line, etc.).
+//!   A closed stdout pipe (`| head`) ends the run quietly with 0.
 //! - 2 — internal / unexpected error (APK parse, rebuild, decompile),
 //!   or a findrefs run in which at least one DEX entry failed to scan.
 //!   Partial findrefs results are still printed in full (stdout) with
@@ -28,6 +29,27 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
+
+/// Shadows `std::print!`/`println!` for this binary: std's versions panic
+/// (exit 101) when stdout is a closed pipe (`asc-rs listclass x | head`).
+/// A closed pipe means the reader has all it wanted, so exit 0 quietly;
+/// any other write failure (disk full on a redirect) is an error, exit 2.
+macro_rules! print {
+    ($($t:tt)*) => { stdout_write(format_args!($($t)*)) };
+}
+macro_rules! println {
+    ($($t:tt)*) => {{ print!($($t)*); print!("\n") }};
+}
+
+fn stdout_write(args: std::fmt::Arguments<'_>) {
+    if let Err(e) = std::io::stdout().write_fmt(args) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(EXIT_OK.into());
+        }
+        eprintln!("Error: write stdout: {e}");
+        std::process::exit(EXIT_INTERNAL.into());
+    }
+}
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -49,7 +71,20 @@ const EXIT_USER_ERROR: u8 = 1;
 const EXIT_INTERNAL: u8 = 2;
 
 fn main() -> ExitCode {
-    let mut cli = Cli::parse();
+    // clap exits 2 on a usage error, which here means "engine error";
+    // a bad command line is invalid input (exit 1). --help/--version stay 0.
+    let mut cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            let code = if e.use_stderr() {
+                EXIT_USER_ERROR
+            } else {
+                EXIT_OK
+            };
+            e.print().ok();
+            return ExitCode::from(code);
+        }
+    };
     if let Some(path) = cli.shared.mapping.clone()
         && let Err(code) = apply_mapping(&mut cli.cmd, &path)
     {
@@ -65,6 +100,43 @@ fn main() -> ExitCode {
     }
     if let Cmd::Cert { apk } = &cli.cmd {
         return run_cert_cmd(apk, cli.shared.output.as_deref(), cli.shared.format);
+    }
+    if let Cmd::Findrefs {
+        apk,
+        kind:
+            kind @ (FindRefsKind::Extends { class, transitive }
+            | FindRefsKind::Impl { class, transitive }),
+    } = &cli.cmd
+    {
+        let k = if matches!(kind, FindRefsKind::Extends { .. }) {
+            asc_core::classes::HierarchyKind::Extends
+        } else {
+            asc_core::classes::HierarchyKind::Impl
+        };
+        return run_hierarchy_cmd(
+            apk,
+            class,
+            k,
+            *transitive,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
+    }
+    if let Cmd::Listmethod {
+        apk,
+        class,
+        name,
+        limit,
+    } = &cli.cmd
+    {
+        return run_listmethod_cmd(
+            apk,
+            class.as_deref(),
+            name.as_deref(),
+            *limit,
+            cli.shared.output.as_deref(),
+            cli.shared.format,
+        );
     }
     if let Cmd::Findrefs { apk, kind } = &cli.cmd {
         return run_findrefs_cmd(
@@ -338,6 +410,21 @@ enum Cmd {
         #[command(subcommand)]
         kind: FindRefsKind,
     },
+    /// List methods defined in the APK (`Lcls;->name(params)ret`),
+    /// optionally for one class and/or a name substring.
+    Listmethod {
+        /// Path to the APK or raw DEX.
+        apk: PathBuf,
+        /// Only this class (exact; `Lcom/x/Y;` or `com.x.Y`).
+        #[arg(long)]
+        class: Option<String>,
+        /// Case-insensitive substring of the method name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Maximum methods emitted.
+        #[arg(long, default_value_t = 100_000)]
+        limit: usize,
+    },
     /// List every class defined in the APK (in DEX-definition order).
     Listclass {
         /// Path to the APK.
@@ -483,6 +570,22 @@ enum FindRefsKind {
         #[arg(long = "fuzzy-class", default_value_t = false)]
         fuzzy_class: bool,
     },
+    /// Classes whose superclass is CLASS (class_def scan, no bytecode).
+    Extends {
+        /// Exact class (`Lcom/x/Base;` or `com.x.Base`).
+        class: String,
+        /// Also list subclasses of subclasses (breadth-first, with depth).
+        #[arg(long)]
+        transitive: bool,
+    },
+    /// Classes and interfaces that list CLASS among their interfaces.
+    Impl {
+        /// Exact interface (`Landroid/os/IInterface;` or dotted).
+        class: String,
+        /// Also list sub-interfaces and subclasses of implementors.
+        #[arg(long)]
+        transitive: bool,
+    },
 }
 
 fn dispatch(cli: &Cli) -> Result<(), CoreError> {
@@ -518,6 +621,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
             shared.output.as_deref(),
             shared.threads,
             shared.debug,
+            shared.format,
         ),
         // Handled in `main` (needs partial-result output + exit-code control).
         Cmd::Findrefs { .. } => unreachable!("handled in main"),
@@ -538,6 +642,7 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         | Cmd::Cert { .. }
         | Cmd::Resources { .. }
         | Cmd::Strings { .. }
+        | Cmd::Listmethod { .. }
         | Cmd::Calls { .. }
         | Cmd::Member { .. }
         | Cmd::Mapping { .. }
@@ -625,6 +730,7 @@ fn run_getclass_cmd(
 /// `asc-rs disasm <apk|dex> <class>`: smali-syntax listing. `-o` is
 /// additive (same contract as `getclass`): the listing goes to stdout
 /// and, when set, also to the file.
+#[allow(clippy::too_many_arguments)] // flat CLI plumbing, mirrors the other cmds
 fn run_disasm_cmd(
     apk: &std::path::Path,
     class: &str,
@@ -633,6 +739,7 @@ fn run_disasm_cmd(
     output: Option<&std::path::Path>,
     threads: usize,
     debug: bool,
+    format: OutputFormat,
 ) -> Result<(), CoreError> {
     let target = asc_core::normalize_class_name(class).map_err(CoreError::Class)?;
     let opts = DisasmOptions {
@@ -640,13 +747,22 @@ fn run_disasm_cmd(
         debug,
         scan_budget_bytes: 0, // engine default
     };
-    let job = DisasmJob::new(apk.to_path_buf(), target, method);
+    let job = DisasmJob::new(apk.to_path_buf(), target.clone(), method);
     let result = match view {
         DisasmView::Smali => run_disasm(&job, &opts)?,
         DisasmView::Bytecode => run_bytecode(&job, &opts)?,
         DisasmView::Cfg => run_cfg(&job, &opts)?,
     };
-    let listing = result.listing;
+    let listing = match format {
+        OutputFormat::Text => result.listing,
+        OutputFormat::Json => to_json(&serde_json::json!({
+            "dex_name": result.dex_name,
+            "class": target,
+            "method": method,
+            "view": format!("{view:?}").to_lowercase(),
+            "listing": result.listing,
+        })),
+    };
     if let Some(out_path) = output {
         std::fs::write(out_path, listing.as_bytes())
             .map_err(|e| CoreError::Usage(format!("write {out_path:?}: {e}")))?;
@@ -1059,6 +1175,74 @@ fn run_strings_cmd(
     })
 }
 
+/// `findrefs extends|impl`: class_def scan, exit 2 when a DEX or class
+/// row could not be read (the hits are then a subset).
+fn run_hierarchy_cmd(
+    apk: &std::path::Path,
+    class: &str,
+    kind: asc_core::classes::HierarchyKind,
+    transitive: bool,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let target = match asc_core::normalize_class_name(class) {
+        Ok(t) => t,
+        Err(e) => return core_error_exit(&CoreError::Class(e)),
+    };
+    let r = match asc_core::classes::run_hierarchy(apk, &target, kind, transitive) {
+        Ok(r) => r,
+        Err(e) => return core_error_exit(&e),
+    };
+    for e in &r.issues.errors {
+        eprintln!("warning: {e}");
+    }
+    if r.hits.is_empty() {
+        eprintln!(
+            "no class defined in the APK names {target} (an SDK/library parent is fine; check the descriptor)"
+        );
+    }
+    let text = match format {
+        OutputFormat::Text => asc_core::classes::format_hierarchy_text(&r),
+        OutputFormat::Json => to_json(&r),
+    };
+    let text = with_original_names(text, format);
+    emit_partial(&text, output, r.issues.complete)
+}
+
+/// `listmethod`: methods defined by classes in the APK.
+fn run_listmethod_cmd(
+    apk: &std::path::Path,
+    class: Option<&str>,
+    name: Option<&str>,
+    limit: usize,
+    output: Option<&std::path::Path>,
+    format: OutputFormat,
+) -> ExitCode {
+    let target = match class.map(asc_core::normalize_class_name).transpose() {
+        Ok(t) => t,
+        Err(e) => return core_error_exit(&CoreError::Class(e)),
+    };
+    let r = match asc_core::classes::run_listmethods(apk, target.as_deref(), name, limit) {
+        Ok(r) => r,
+        Err(e) => return core_error_exit(&e),
+    };
+    for e in &r.issues.errors {
+        eprintln!("warning: {e}");
+    }
+    if let Some(t) = &target
+        && !r.class_found
+        && r.issues.complete
+    {
+        return core_error_exit(&CoreError::ClassNotFound(t.clone()));
+    }
+    let text = match format {
+        OutputFormat::Text => asc_core::classes::format_methods_text(&r),
+        OutputFormat::Json => to_json(&r),
+    };
+    let text = with_original_names(text, format);
+    emit_partial(&text, output, r.issues.complete)
+}
+
 /// Print `text` to `-o` or stdout, then map `complete` to exit 0/2.
 fn emit_partial(text: &str, output: Option<&std::path::Path>, complete: bool) -> ExitCode {
     match output {
@@ -1102,8 +1286,13 @@ fn apply_mapping(cmd: &mut Cmd, path: &std::path::Path) -> Result<(), ExitCode> 
                     class: Some(class),
                     fuzzy_class: false,
                     ..
-                },
+                }
+                | FindRefsKind::Extends { class, .. }
+                | FindRefsKind::Impl { class, .. },
             ..
+        }
+        | Cmd::Listmethod {
+            class: Some(class), ..
         } => class,
         _ => return Ok(()),
     };
@@ -2353,6 +2542,11 @@ fn build_query(kind: &FindRefsKind) -> Result<Query, CoreError> {
                 }
             });
             Query::field(name.clone(), class)
+        }
+        FindRefsKind::Extends { .. } | FindRefsKind::Impl { .. } => {
+            return Err(CoreError::Usage(
+                "extends/impl are class-definition queries, not reference scans".into(),
+            ));
         }
     };
     Ok(q)
