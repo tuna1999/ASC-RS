@@ -544,6 +544,14 @@ fn run_getclass_cmd(
              shared tail; the structurer copied it per catch; cross-check with `disasm`)"
         );
     }
+    let rotated = asc_core::rotated_loop_headers(&result.source);
+    if rotated > 0 {
+        eprintln!(
+            "warning: decompiled Java may be incorrect: {rotated} loop(s) repeat a header \
+             statement at the start of the body (the loop header likely runs once per \
+             iteration, not twice; cross-check with `disasm`)"
+        );
+    }
     if debug {
         eprintln!(
             "[DEBUG] Hit DEX: {} (class_def_off=0x{:x})",

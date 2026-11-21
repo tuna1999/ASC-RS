@@ -1026,6 +1026,12 @@ fn with_decompile_warnings(source: &str) -> String {
             "// warning: decompiled Java may be incorrect: {dup} identical catch bodies (cross-check with the Smali view)\n"
         ));
     }
+    let rotated = asc_core::rotated_loop_headers(source);
+    if rotated > 0 {
+        banner.push_str(&format!(
+            "// warning: decompiled Java may be incorrect: {rotated} loop(s) repeat a header statement at the start of the body (cross-check with the Smali view)\n"
+        ));
+    }
     if banner.is_empty() {
         source.to_string()
     } else {

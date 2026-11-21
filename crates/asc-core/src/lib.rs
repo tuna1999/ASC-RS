@@ -81,4 +81,4 @@ pub use crate::resources::{
     run_resources,
 };
 pub use crate::worker::{WorkerOutcome, WorkerPool};
-pub use asc_decompile::diagnose::{duplicated_catch_bodies, unbound_locals};
+pub use asc_decompile::diagnose::{duplicated_catch_bodies, rotated_loop_headers, unbound_locals};

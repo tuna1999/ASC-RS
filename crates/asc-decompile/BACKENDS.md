@@ -335,5 +335,19 @@ defect is still surfaced by the unbound-locals warning.
   converged handler joins) upstream of our adapter; not attempted here.
 - What we shipped instead: the `duplicated_catch_bodies` heuristic
   (exact-match only, unit-tested) plus this analysis, so the two known
-  shapes are documented and one is auto-detected. `disasm` bypasses the
+  shapes are documented and one is auto-detected.
+
+### Defect 3 — loop header emitted at both ends of the body
+
+`droidsaw-dex` 2.0.0 `structure.rs` `Frame::AwaitingWhileBody` builds a
+`while` body as `header_stmts + inner + header_stmts` ("loop rotation"):
+the copy at the end refreshes the condition variable, the copy at the
+start makes the Java run the header a second time per iteration, e.g.
+`while (v5_40) { v5_40 = it.hasNext(); Object v = it.next(); …;
+v5_40 = it.hasNext(); }`. Every name stays bound, so `unbound_locals`
+cannot see it. Detected by `rotated_loop_headers` (first top-level body
+statement == last, `return`/`throw`/`break`/`continue` excluded):
+54/600 classes of the `benches/f4_detector_sweep.py` sample (aurora,
+fdroid, workload DEX). Not patched (external crate); upstream report not
+sent. `disasm` bypasses the
   structurer entirely and remains the ground-truth cross-check.

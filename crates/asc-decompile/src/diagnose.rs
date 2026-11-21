@@ -4,9 +4,10 @@
 //! merge points, leaving SSA locals (`vN_M`) that are read but never
 //! assigned or declared. [`unbound_locals`] flags those names.
 //!
-//! Ceiling: this is a name heuristic. It does NOT detect the sibling
-//! defect where a loop body is emitted twice (every name stays bound), and
-//! an empty result is not evidence that the source is correct.
+//! The sibling loop defect (header statements re-emitted at the top of a
+//! `while` body, every name still bound) is flagged by
+//! [`rotated_loop_headers`]. All of these are heuristics over text: an
+//! empty result is not evidence that the source is correct.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -207,6 +208,74 @@ pub fn duplicated_catch_bodies(src: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Number of `while (...) {` loops whose body starts and ends with the
+/// same statement (exact text, `;`-terminated, at the body's top level).
+///
+/// droidsaw-dex 2.0.0 lowers a loop by emitting the header block's
+/// non-branch statements at both ends of the body (`structure.rs`
+/// `Frame::AwaitingWhileBody`, "loop rotation"). The copy at the end
+/// refreshes the condition; the copy at the start runs the header a second
+/// time per iteration, e.g. `v = it.hasNext();` before `it.next()`. Line
+/// based (droidsaw prints one statement per line); a `0` is not proof of
+/// absence and a hit is a "cross-check with Smali" hint, not a verdict.
+pub fn rotated_loop_headers(src: &str) -> usize {
+    let lines: Vec<&str> = src.lines().map(str::trim).collect();
+    let mut hits = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if !(line.starts_with("while (") && line.ends_with('{')) {
+            continue;
+        }
+        let mut depth = 1i32;
+        let mut top: Vec<&str> = Vec::new();
+        for l in &lines[i + 1..] {
+            if depth == 1 && l.ends_with(';') {
+                top.push(l);
+            }
+            depth += braces(l);
+            if depth <= 0 {
+                break;
+            }
+            if depth > 1 && top.last().is_some_and(|t| *t != "{") {
+                top.push("{"); // a nested block breaks the top-level run
+            }
+        }
+        if top.len() >= 3
+            && top[0] == top[top.len() - 1]
+            && !["return", "throw", "break", "continue"]
+                .iter()
+                .any(|k| top[0].starts_with(k))
+        {
+            hits += 1;
+        }
+    }
+    hits
+}
+
+/// Net `{` minus `}` on one line, ignoring string/char literals.
+fn braces(line: &str) -> i32 {
+    let (mut n, mut quote, mut esc) = (0, None, false);
+    for c in line.chars() {
+        match quote {
+            Some(q) => {
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '{' => n += 1,
+                '}' => n -= 1,
+                _ => {}
+            },
+        }
+    }
+    n
+}
+
 fn is_local(id: &str) -> bool {
     let Some(r) = id.strip_prefix('v') else {
         return false;
@@ -283,10 +352,43 @@ mod tests {
     }
 
     #[test]
-    fn duplicated_loop_body_is_not_detected() {
-        // Documented ceiling: every name stays bound.
+    fn duplicated_loop_body_is_not_an_unbound_local() {
+        // Every name stays bound: `rotated_loop_headers` covers this shape.
         let src = "int v1_0 = 0;\nwhile (v1_0 < 3) { v1_0 = v1_0 + 1; v1_0 = v1_0 + 1; }";
         assert!(unbound_locals(src).is_empty());
+    }
+
+    // Shape of real droidsaw output (aurora D1 SpecialEffectsController).
+    const ROTATED: &str = "boolean v5_40 = v3_38.hasNext();
+while (v5_40) {
+    v5_40 = v3_38.hasNext();
+    Object v5_41 = v3_38.next();
+    if (v5_41 == null) {
+        v5_40 = v3_38.hasNext();
+    }
+    v5_42.l();
+    v5_40 = v3_38.hasNext();
+}";
+
+    #[test]
+    fn rotated_loop_header_is_counted() {
+        assert_eq!(rotated_loop_headers(ROTATED), 1);
+        assert_eq!(rotated_loop_headers(&format!("{ROTATED}\n{ROTATED}")), 2);
+    }
+
+    #[test]
+    fn plain_loops_are_not_flagged() {
+        let ok = "while (v1) {\n    a();\n    b();\n    v1 = it.hasNext();\n}";
+        assert_eq!(rotated_loop_headers(ok), 0);
+        // Equal first/last only through a nested block is not top level.
+        let nested = "while (v1) {\n    x();\n    if (c) {\n        x();\n    }\n}";
+        assert_eq!(rotated_loop_headers(nested), 0);
+        // Repeated exits are legitimate.
+        let ret = "while (v1) {\n    return v2;\n    a();\n    return v2;\n}";
+        assert_eq!(rotated_loop_headers(ret), 0);
+        // A brace inside a string must not end the body early.
+        let s = "while (v1) {\n    a();\n    log(\"}\");\n    b();\n    a();\n}";
+        assert_eq!(rotated_loop_headers(s), 1);
     }
     #[test]
     fn identical_catch_bodies_are_counted() {
