@@ -70,6 +70,8 @@ const EXIT_OK: u8 = 0;
 const EXIT_USER_ERROR: u8 = 1;
 const EXIT_INTERNAL: u8 = 2;
 
+mod mcp;
+
 fn main() -> ExitCode {
     // clap exits 2 on a usage error, which here means "engine error";
     // a bad command line is invalid input (exit 1). --help/--version stay 0.
@@ -85,6 +87,9 @@ fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
+    if let Cmd::Mcp = &cli.cmd {
+        return mcp::serve();
+    }
     if let Some(path) = cli.shared.mapping.clone()
         && let Err(code) = apply_mapping(&mut cli.cmd, &path)
     {
@@ -534,6 +539,10 @@ enum Cmd {
         /// Path to the XAPK.
         apk: PathBuf,
     },
+    /// Run a Model Context Protocol server on stdin/stdout: every
+    /// command above (except `extract`) is exposed as a tool. Shared
+    /// flags given here are ignored; each call passes its own.
+    Mcp,
 }
 
 /// The four findrefs query kinds.
@@ -649,7 +658,8 @@ fn dispatch(cli: &Cli) -> Result<(), CoreError> {
         | Cmd::Extract { .. }
         | Cmd::Axml { .. }
         | Cmd::Hermes { .. }
-        | Cmd::Xapk { .. } => {
+        | Cmd::Xapk { .. }
+        | Cmd::Mcp => {
             unreachable!("handled in main")
         }
         Cmd::Inspect { apk } => run_inspect_cmd(apk, shared.output.as_deref(), shared.format),

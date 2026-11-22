@@ -361,3 +361,116 @@ fn disasm_json_wraps_the_listing() {
         assert_eq!(v["dex_name"], "classes.dex");
     }
 }
+
+/// Non-ASCII (Vietnamese) directory + file names must open and print
+/// normally (the APK path goes through the OS wide-char APIs).
+#[test]
+fn non_ascii_apk_path_is_accepted() {
+    let Some(apk) = corpus("apk/workload.apk") else {
+        eprintln!("skipping: corpus/apk/workload.apk missing");
+        return;
+    };
+    let dir = target_dir("tiếng việt");
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("ứng dụng.apk");
+    std::fs::copy(&apk, &copy).unwrap();
+    let run = |p: &std::path::Path| {
+        let o = Command::new(BIN).arg("listclass").arg(p).output().unwrap();
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        o.stdout
+    };
+    let out = run(&copy);
+    assert!(!out.is_empty());
+    assert_eq!(out, run(&apk));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `asc-rs mcp` speaks newline-delimited JSON-RPC: handshake, tool list,
+/// a real tool call, a failing call (isError), bad arguments (isError),
+/// an unknown method (-32601), garbage (-32700), a batch (-32600), and
+/// notifications/responses get no reply.
+#[test]
+fn mcp_server_round_trip() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::Stdio;
+    let Some(apk) = corpus("apk/workload.apk") else {
+        eprintln!("skipping: corpus/apk/workload.apk missing");
+        return;
+    };
+    let apk = apk.to_str().unwrap().replace('\\', "/");
+    let mut child = Command::new(BIN)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut call = |mut req: Vec<u8>| -> serde_json::Value {
+        req.push(b'\n');
+        input.write_all(&req).unwrap();
+        serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+    };
+    let r = call(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#.into());
+    assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(r["result"]["serverInfo"]["name"], "asc-rs");
+
+    // A notification must not produce a reply: the next line answers id 2.
+    let r = call(
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
+            .into(),
+    );
+    assert_eq!(r["id"], 2);
+    let tools = r["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|t| t["name"] == "getclass"));
+    assert!(tools.iter().all(|t| t["name"] != "extract"));
+
+    let r = call(format!(
+        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"listclass","arguments":{{"apk":"{apk}","prefix":"Lkotlin/jvm/internal/PropertyReference1"}}}}}}"#
+    ).into());
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("Lkotlin/jvm/internal/PropertyReference1;"),
+        "{text}"
+    );
+
+    let r = call(format!(
+        r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"getclass","arguments":{{"apk":"{apk}","class":"Lno/such/Klass;"}}}}}}"#
+    ).into());
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    // stdout and the diagnostic are separate items, so JSON output stays
+    // parseable even when the child writes to stderr.
+    assert!(
+        r["result"]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[exit 1]"),
+        "{r}"
+    );
+
+    // Bad arguments are a tool error the model can see, not a protocol error.
+    let r = call(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"getclass","arguments":{"apk":"a.apk"}}}"#.into());
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let r = call(r#"{"jsonrpc":"2.0","id":6,"method":"nope"}"#.into());
+    assert_eq!(r["error"]["code"], -32601);
+    let r = call("{not json".into());
+    assert_eq!(r["error"]["code"], -32700);
+    let r = call(r#"[{"jsonrpc":"2.0","id":7,"method":"ping"}]"#.into());
+    assert_eq!(r["error"]["code"], -32600);
+    // A response sent to us gets no reply; invalid UTF-8 gets -32700 and
+    // the server keeps serving.
+    let r = call(b"{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\xff\xfe".to_vec());
+    assert_eq!(r["error"]["code"], -32700);
+    let r = call(r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#.into());
+    assert_eq!(r["id"], 8);
+
+    drop(input);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+}

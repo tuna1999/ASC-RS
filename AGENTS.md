@@ -25,7 +25,7 @@ L2 asc-manifest   binary AXML                     asc-query     locators, find_r
    asc-paranoid   Paranoid/LSParanoid detect + decode (opt-in `--paranoid`)
 L3 asc-decompile  ClassDecompiler trait + DroidsawBackend (no internal deps: the firewall)
 L4 asc-core       run_findrefs / run_getclass / WorkerPool / text+json emitters
-L5 asc-cli (bin asc-rs, single main.rs)   asc-gui (bin asc-gui)
+L5 asc-cli (bin asc-rs: main.rs + mcp.rs stdio MCP server)   asc-gui (bin asc-gui)
 ```
 
 **findrefs:** `Apk::open` (mmap) → `dex_entries()` (numeric sort of `classes(\d*).dex`) → per DEX `DexView::parse[_at]` → `asc_query::find_refs` → `resolve_target_ids` → `CodeOwners::build` → per-`code_off` `RefWalker` → match `TargetSets` → `RefHit` → `render_hits` → `format_search_report_*`.
