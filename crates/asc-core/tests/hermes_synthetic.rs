@@ -345,3 +345,47 @@ fn oversized_hermes_bundle_is_partial() {
     assert!(r.errors.iter().any(|e| e.contains("exceeds")));
     let _ = std::fs::remove_file(&apk);
 }
+
+/// Table entries may overlap: 100 entries all pointing (via one overflow
+/// record) at the same 1 MiB of storage would cost 100 MiB of decoding
+/// from a ~1 MiB bundle. The total decode work is bounded, so the bundle
+/// fails with a controlled note instead.
+#[test]
+fn overlapping_entries_hit_the_decode_budget() {
+    const N: u32 = 100;
+    const LEN: u32 = 1 << 20;
+    let storage = vec![b'a'; LEN as usize];
+    let mut b = Vec::new();
+    b.extend_from_slice(&MAGIC);
+    b.extend_from_slice(&96u32.to_le_bytes());
+    b.extend_from_slice(&[0u8; 20]); // sourceHash
+    b.extend_from_slice(&0u32.to_le_bytes()); // fileLength (patched below)
+    b.extend_from_slice(&0u32.to_le_bytes()); // globalCodeIndex
+    b.extend_from_slice(&0u32.to_le_bytes()); // functionCount
+    b.extend_from_slice(&1u32.to_le_bytes()); // stringKindCount
+    b.extend_from_slice(&0u32.to_le_bytes()); // identifierCount
+    b.extend_from_slice(&N.to_le_bytes()); // stringCount
+    b.extend_from_slice(&1u32.to_le_bytes()); // overflowStringCount
+    b.extend_from_slice(&LEN.to_le_bytes()); // storage size
+    for v in [0u32; 11] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(&[0u8; 20]); // options + padding → 128
+    b.extend_from_slice(&N.to_le_bytes()); // kinds RLE: string ×N
+    for _ in 0..N {
+        b.extend_from_slice(&(0xFFu32 << 24).to_le_bytes()); // utf8, overflow #0
+    }
+    b.extend_from_slice(&0u32.to_le_bytes()); // overflow: off 0
+    b.extend_from_slice(&LEN.to_le_bytes()); //           len 1 MiB
+    b.extend_from_slice(&storage);
+    let file_len = b.len() as u32;
+    b[32..36].copy_from_slice(&file_len.to_le_bytes());
+
+    let apk = tmp_apk("overlap", &[("b", b)]);
+    let r = asc_core::hermes::run_hermes(&apk, &asc_core::hermes::HermesOptions::default())
+        .expect("run");
+    let _ = std::fs::remove_file(&apk);
+    assert!(!r.complete);
+    let note = r.bundles[0].note.as_deref().unwrap_or_default();
+    assert!(note.contains("decode work budget exhausted"), "{note}");
+}

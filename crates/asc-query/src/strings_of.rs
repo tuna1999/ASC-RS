@@ -86,6 +86,9 @@ fn collect_strings(
     // answers "seen already, and at which slot". A linear
     // `out.iter().find` here was O(distinct²) for string-heavy classes.
     let mut seen: HashMap<String, usize> = HashMap::new();
+    // Slot per string index already decoded: a 1 MiB string referenced at
+    // many sites is decoded once, not once per site.
+    let mut by_idx: HashMap<asc_dex::ids::StringIdx, usize> = HashMap::new();
     for &code_off in code_offs {
         let ci = match view.code_item(code_off) {
             Ok(Some(ci)) => ci,
@@ -131,16 +134,25 @@ fn collect_strings(
             };
             for r in [insn.primary, insn.secondary].into_iter().flatten() {
                 if let DexRef::String(idx) = r {
+                    if let Some(&slot) = by_idx.get(&idx) {
+                        out[slot].sites += 1;
+                        continue;
+                    }
                     match view.string(idx) {
                         Ok(s) => {
                             let text = s.decode_lossy().into_owned();
-                            match seen.get(&text).copied() {
-                                Some(slot) => out[slot].sites += 1,
+                            let slot = match seen.get(&text).copied() {
+                                Some(slot) => {
+                                    out[slot].sites += 1;
+                                    slot
+                                }
                                 None => {
                                     seen.insert(text.clone(), out.len());
                                     out.push(ClassString { text, sites: 1 });
+                                    out.len() - 1
                                 }
-                            }
+                            };
+                            by_idx.insert(idx, slot);
                         }
                         Err(source) => {
                             errors.push(SearchError::StringRef {

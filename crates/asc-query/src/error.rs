@@ -76,4 +76,13 @@ pub enum SearchError {
         #[source]
         source: asc_dex::error::DexError,
     },
+
+    /// A hostile-input work bound was hit (methods sharing class data or
+    /// code bodies multiply the work past the DEX's own size). Results
+    /// gathered before the bound are kept; the report is incomplete.
+    #[error("work budget exhausted: {what}; rest of this DEX skipped")]
+    Budget {
+        /// Which bound stopped the scan.
+        what: &'static str,
+    },
 }

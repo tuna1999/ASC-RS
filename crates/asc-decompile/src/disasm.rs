@@ -418,9 +418,12 @@ fn render_method(
         })?;
         let _ = writeln!(out, "    .registers {}", code.registers_size);
         let debug = (code.debug_info_off != 0).then(|| {
-            // Real items carry a handful of entries per instruction;
-            // past this the directives have nothing to attach to.
-            let max_events = 8 * (code.instructions.len() + 1) + 256;
+            // Real items can carry over 10 entries per instruction (R8
+            // inlining: line + local start/end/restart runs at one
+            // address; corpus `LL/t0;->d()I` has 1084 for ~95), so the
+            // bound only stops pathological items; the listing byte cap
+            // bounds the output anyway.
+            let max_events = 64 * (code.instructions.len() + 1) + 65_536;
             decode_debug_info(dex, bytes, code.debug_info_off as usize, max_events, &c)
         });
         let names = match &debug {
@@ -1256,6 +1259,29 @@ fn encoded_value(dex: &DexFile, v: &EncodedValue, c: &Ctx) -> Result<String, Dec
     encoded_value_at(dex, v, c, 0)
 }
 
+/// Java `Float.toString` / `Double.toString` from Rust's shortest
+/// round-trip digits (`plain` = `{}`, `sci` = `{:e}`): plain decimal with
+/// at least one fractional digit for 1e-3 <= |x| < 1e7, else
+/// `d.ddddE±n`; `NaN`, `Infinity`, `-0.0` as Java spells them.
+fn java_fp(nan: bool, inf: bool, neg: bool, abs: f64, plain: String, sci: String) -> String {
+    if nan {
+        return "NaN".into();
+    }
+    if inf {
+        return if neg { "-Infinity" } else { "Infinity" }.into();
+    }
+    if abs == 0.0 || (1e-3..1e7).contains(&abs) {
+        return if plain.contains('.') {
+            plain
+        } else {
+            plain + ".0"
+        };
+    }
+    let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let dot = if mant.contains('.') { "" } else { ".0" };
+    format!("{mant}{dot}E{exp}")
+}
+
 /// Nesting cap for rendering arrays/annotations (the workspace's
 /// encoded-value depth bound). droidsaw parses up to 65 536 levels without
 /// recursion; rendering them recursively would overflow the stack.
@@ -1285,8 +1311,22 @@ fn encoded_value_at(
         EncodedValue::Short(s) => Ok(format!("0x{:x}", *s as u32)),
         EncodedValue::Int(i) => Ok(format!("0x{:x}", *i as u32)),
         EncodedValue::Long(l) => Ok(format!("0x{:x}", *l as u64)),
-        EncodedValue::Float(f) => Ok(f.to_string()),
-        EncodedValue::Double(d) => Ok(d.to_string()),
+        EncodedValue::Float(f) => Ok(java_fp(
+            f.is_nan(),
+            f.is_infinite(),
+            *f < 0.0,
+            f64::from(f.abs()),
+            f.to_string(),
+            format!("{f:e}"),
+        )),
+        EncodedValue::Double(d) => Ok(java_fp(
+            d.is_nan(),
+            d.is_infinite(),
+            *d < 0.0,
+            d.abs(),
+            d.to_string(),
+            format!("{d:e}"),
+        )),
         EncodedValue::Null => Ok("null".to_string()),
         EncodedValue::String(s) => Ok(format!(
             "\"{}\"",
@@ -1780,6 +1820,44 @@ fn wide_literal(value: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jf(f: f32) -> String {
+        java_fp(
+            f.is_nan(),
+            f.is_infinite(),
+            f < 0.0,
+            f64::from(f.abs()),
+            f.to_string(),
+            format!("{f:e}"),
+        )
+    }
+    fn jd(d: f64) -> String {
+        java_fp(
+            d.is_nan(),
+            d.is_infinite(),
+            d < 0.0,
+            d.abs(),
+            d.to_string(),
+            format!("{d:e}"),
+        )
+    }
+
+    /// `Float.toString` / `Double.toString` spellings (baksmali output).
+    #[test]
+    fn floats_print_like_java() {
+        assert_eq!(jf(1.0), "1.0");
+        assert_eq!(jf(-0.0), "-0.0");
+        assert_eq!(jf(0.5), "0.5");
+        assert_eq!(jf(0.001), "0.001");
+        assert_eq!(jf(1.0e-4), "1.0E-4");
+        assert_eq!(jf(1.5e7), "1.5E7");
+        assert_eq!(jf(f32::NAN), "NaN");
+        assert_eq!(jf(f32::NEG_INFINITY), "-Infinity");
+        assert_eq!(jd(1e10), "1.0E10");
+        assert_eq!(jd(-2.5e-8), "-2.5E-8");
+        assert_eq!(jd(1234567.0), "1234567.0");
+        assert_eq!(jd(f64::INFINITY), "Infinity");
+    }
 
     #[test]
     fn payload_units_count_code_units_not_elements() {

@@ -41,6 +41,7 @@ pub struct CodeOwner {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodeOwners {
     owners: Vec<CodeOwner>,
+    truncated: bool,
 }
 
 impl CodeOwners {
@@ -61,23 +62,42 @@ impl CodeOwners {
         let mut by_off: Vec<(u32, SmallVec<[MethodIdx; OWNER_INLINE_HINT]>)> = Vec::new();
         let mut index: std::collections::HashMap<u32, usize> =
             std::collections::HashMap::with_capacity(1024);
+        // Hostile-input bounds. Class defs may share one `class_data_off`
+        // (or overlapping ones), so per-class work is not bounded by the
+        // file: skip a `class_data_off` already walked (identical methods),
+        // drop a repeated `(code_off, method_idx)` pair (an identical hit),
+        // and stop once the encoded methods visited exceed the DEX size —
+        // a genuine `encoded_method` is at least 3 bytes, so a real DEX
+        // never gets near it.
+        let mut seen_data: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut seen_pair: std::collections::HashSet<(u32, MethodIdx)> =
+            std::collections::HashSet::new();
+        let mut budget = view.physical().len();
+        let mut truncated = false;
 
         for i in 0..n {
             let def = match view.class_def(i) {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            if def.class_data_off == 0 {
+            if def.class_data_off == 0 || !seen_data.insert(def.class_data_off) {
                 continue;
             }
             let data = match view.class_data(def.class_data_off) {
                 Ok(Some(d)) => d,
                 _ => continue,
             };
+            let cost = data.direct_methods.len() + data.virtual_methods.len();
+            if cost > budget {
+                truncated = true;
+                break;
+            }
+            budget -= cost;
 
             // Direct + virtual methods, in declaration order.
-            collect_methods(&mut by_off, &mut index, &data.direct_methods);
-            collect_methods(&mut by_off, &mut index, &data.virtual_methods);
+            for methods in [&data.direct_methods, &data.virtual_methods] {
+                collect_methods(&mut by_off, &mut index, &mut seen_pair, methods);
+            }
         }
 
         // by_off is in insertion order; copy into `owners` keeping
@@ -86,7 +106,14 @@ impl CodeOwners {
             owners.push(CodeOwner { code_off, methods });
         }
 
-        Self { owners }
+        Self { owners, truncated }
+    }
+
+    /// `true` when [`CodeOwners::build`] stopped at its work bound: the
+    /// table is a prefix and a scan over it is incomplete.
+    #[inline]
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Returns the deduplicated owner list.
@@ -110,14 +137,16 @@ impl CodeOwners {
 }
 
 /// Appends every method in `methods` whose `code_off != 0` to
-/// `by_off`, deduplicating by `code_off`.
+/// `by_off`, grouping by `code_off` and dropping a `(code_off,
+/// method_idx)` pair already recorded.
 fn collect_methods(
     by_off: &mut Vec<(u32, SmallVec<[MethodIdx; OWNER_INLINE_HINT]>)>,
     index: &mut std::collections::HashMap<u32, usize>,
+    seen: &mut std::collections::HashSet<(u32, MethodIdx)>,
     methods: &[asc_dex::EncodedMethod],
 ) {
     for m in methods {
-        if m.code_off == 0 {
+        if m.code_off == 0 || !seen.insert((m.code_off, m.method_idx)) {
             continue;
         }
         if let Some(&slot) = index.get(&m.code_off) {

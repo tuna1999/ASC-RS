@@ -185,8 +185,19 @@ pub fn find_refs(view: &DexView, query: &Query) -> DexSearchReport {
     let mut hits: Vec<RefHit> = Vec::new();
     let mut errors: Vec<SearchError> = Vec::new();
     let mut complete = true;
+    if owners.is_truncated() {
+        errors.push(SearchError::Budget {
+            what: "class data shared or overlapping across class defs",
+        });
+        complete = false;
+    }
+    // Every matched ref fans out to each owner of its body. A genuine
+    // reference costs at least 2 bytes of bytecode, so a real DEX stays
+    // under `len / 2` hits; past that, methods sharing one body are
+    // multiplying the output (hostile input), so stop.
+    let hit_cap = (view.physical().len() / 2).max(1 << 16);
 
-    for owner in owners.owners() {
+    'owners: for owner in owners.owners() {
         let code_off = owner.code_off;
         let ci = match view.code_item(code_off) {
             Ok(Some(ci)) => ci,
@@ -228,6 +239,13 @@ pub fn find_refs(view: &DexView, query: &Query) -> DexSearchReport {
                     if let Some(r) = insn.primary
                         && targets.matches(&r)
                     {
+                        if hits.len() + owner.methods.len() > hit_cap {
+                            errors.push(SearchError::Budget {
+                                what: "too many hits for the DEX size (methods sharing one code body)",
+                            });
+                            complete = false;
+                            break 'owners;
+                        }
                         for &method in &owner.methods {
                             hits.push(RefHit {
                                 method,
@@ -239,6 +257,13 @@ pub fn find_refs(view: &DexView, query: &Query) -> DexSearchReport {
                     if let Some(r) = insn.secondary
                         && targets.matches(&r)
                     {
+                        if hits.len() + owner.methods.len() > hit_cap {
+                            errors.push(SearchError::Budget {
+                                what: "too many hits for the DEX size (methods sharing one code body)",
+                            });
+                            complete = false;
+                            break 'owners;
+                        }
                         for &method in &owner.methods {
                             hits.push(RefHit {
                                 method,

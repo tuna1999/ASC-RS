@@ -1330,6 +1330,31 @@ enum DisasmForm {
     Cfg,
 }
 
+/// droidsaw-dex parses one DEX from offset 0, insists on a 0x70-byte
+/// header and checks adler32 over `[0x0C..file_size]`. A DEX-041 member's
+/// offsets are absolute in the container (shared data may sit in earlier
+/// members), so — like the oracle's `normalize_dex041_logical` — keep the
+/// container prefix, move the member's header to offset 0, and re-stamp
+/// `file_size`/`header_size`/checksum so droidsaw accepts it. Non-041
+/// entries are passed through with no copy.
+fn logical_member(hit: &ClassHit) -> Result<Cow<'_, [u8]>, CoreError> {
+    let bytes = &hit.bytes;
+    if !bytes.starts_with(b"dex\n041\0") {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let view = DexView::parse_at(bytes, hit.header_off)?;
+    let end = hit.header_off + view.header().file_size as usize;
+    let mut buf = bytes[..end].to_vec();
+    buf[..0x70].copy_from_slice(&bytes[hit.header_off..hit.header_off + 0x70]);
+    let len =
+        u32::try_from(end).map_err(|_| CoreError::Usage("DEX-041 container over 4 GiB".into()))?;
+    buf[0x20..0x24].copy_from_slice(&len.to_le_bytes());
+    buf[0x24..0x28].copy_from_slice(&0x70u32.to_le_bytes());
+    let sum = adler2::adler32(&buf[0x0C..]).unwrap_or(0);
+    buf[0x08..0x0C].copy_from_slice(&sum.to_le_bytes());
+    Ok(Cow::Owned(buf))
+}
+
 fn disasm_winner_mode(
     hit: ClassHit,
     method: &Option<String>,
@@ -1337,17 +1362,7 @@ fn disasm_winner_mode(
     started: std::time::Instant,
     form: DisasmForm,
 ) -> Result<DisasmResult, CoreError> {
-    // A DEX-041 container packs several logical DEXes into one entry;
-    // droidsaw-dex parses a single file from offset 0, so hand it just
-    // the member that defines the class. Single-DEX entries (`header_off
-    // == 0`) are passed through with no copy.
-    let dex_bytes: Cow<'_, [u8]> = if hit.header_off == 0 {
-        Cow::Borrowed(&hit.bytes)
-    } else {
-        let member = &hit.bytes[hit.header_off..];
-        let size = DexView::parse_at(member, 0)?.header().file_size as usize;
-        Cow::Owned(member[..size].to_vec())
-    };
+    let dex_bytes = logical_member(&hit)?;
     let backend = asc_decompile::droidsaw::DroidsawBackend::new();
     let listing = match form {
         DisasmForm::Smali => backend.disassemble(&dex_bytes, &hit.class, method.as_deref()),
@@ -2768,7 +2783,7 @@ pub fn run_member_overloads(job: &MemberInfoJob) -> Result<Vec<MemberInfo>, Core
         hit.bytes = eb.into_vec();
         let backend = asc_decompile::droidsaw::DroidsawBackend::default();
         let infos = backend
-            .method_info(&hit.bytes, &hit.class, &job.method)
+            .method_info(&logical_member(&hit)?, &hit.class, &job.method)
             .map_err(map_disasm_error)?;
         return Ok(infos
             .into_iter()

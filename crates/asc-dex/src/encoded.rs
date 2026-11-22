@@ -148,10 +148,19 @@ impl<'a> DexView<'a> {
                 for i in 0..width {
                     v |= (bytes[p + i] as u64) << (i * 8);
                 }
+                // char zero-extends to the left; float/double are
+                // RIGHT-zero-extended (the payload is the high-order bytes).
                 let r = match ty {
                     ValueType::Char => EncodedValue::Char(v as u16),
-                    ValueType::Float => EncodedValue::Float(v as u32),
-                    _ => EncodedValue::Double(v),
+                    ValueType::Float if width <= 4 => {
+                        EncodedValue::Float((v << ((4 - width) * 8)) as u32)
+                    }
+                    ValueType::Float => {
+                        return Err(DexError::Malformed(
+                            "float encoded_value wider than 4 bytes",
+                        ));
+                    }
+                    _ => EncodedValue::Double(v << ((8 - width) * 8)),
                 };
                 Ok((r, p + width - off))
             }

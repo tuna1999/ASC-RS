@@ -202,6 +202,12 @@ pub fn extract_strings(
     let storage = &b[layout.storage_off..layout.storage_off + layout.storage_size];
     let mut out = Vec::new();
     let mut truncated = false;
+    // Entries may overlap (nothing forbids two table entries pointing at
+    // the same storage bytes), so the per-string cap alone lets a small
+    // bundle demand string_count × 1 MiB of decoding. A real table covers
+    // its storage about once; twice the storage (at least the file cap)
+    // is never reached by a genuine bundle.
+    let mut work = layout.storage_size.saturating_mul(2).max(FILE_CAP);
     for i in 0..layout.string_count as usize {
         let entry = decode_entry(b, &layout, i)?;
         // Upstream (`RuntimeModule::getStringFromStringID`,
@@ -219,6 +225,9 @@ pub fn extract_strings(
             .ok_or("string outside storage")?;
         let truncated_len = slice.len() > MAX_STRING_BYTES;
         let slice = &slice[..slice.len().min(MAX_STRING_BYTES)];
+        work = work
+            .checked_sub(slice.len())
+            .ok_or("decode work budget exhausted (overlapping string-table entries)")?;
         let text = decode_text(slice, entry.is_utf16, truncated_len);
         if let Some(p) = &opts.pattern
             && !text.contains(p.as_str())

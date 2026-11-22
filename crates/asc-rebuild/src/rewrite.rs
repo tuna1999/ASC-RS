@@ -376,12 +376,8 @@ pub(crate) fn rewrite_encoded_value(
         EncodedValue::Long(x) => {
             push_numeric(out, tag_byte, &x.to_le_bytes(), true);
         }
-        EncodedValue::Float(x) => {
-            push_numeric(out, tag_byte, &x.to_le_bytes(), false);
-        }
-        EncodedValue::Double(x) => {
-            push_numeric(out, tag_byte, &x.to_le_bytes(), false);
-        }
+        EncodedValue::Float(x) => push_right_extended(out, tag_byte, &x.to_le_bytes()),
+        EncodedValue::Double(x) => push_right_extended(out, tag_byte, &x.to_le_bytes()),
         EncodedValue::MethodType(_) | EncodedValue::MethodHandle(_) => {
             // MethodType → proto, MethodHandle → method_handles.
             let idx = match v {
@@ -495,6 +491,19 @@ fn push_numeric(out: &mut Vec<u8>, tag: u8, bytes_le: &[u8], signed: bool) {
     let last = out.len() - 1;
     out[last] = tag | (((n - 1) as u8) << 5);
     out.extend_from_slice(&bytes_le[..n]);
+}
+
+/// float/double payloads are RIGHT-zero-extended: keep the high-order
+/// bytes, dropping low-order zero bytes (at least one byte stays).
+fn push_right_extended(out: &mut Vec<u8>, tag: u8, bytes_le: &[u8]) {
+    let skip = bytes_le
+        .iter()
+        .take_while(|&&b| b == 0)
+        .count()
+        .min(bytes_le.len() - 1);
+    let last = out.len() - 1;
+    out[last] = tag | (((bytes_le.len() - skip - 1) as u8) << 5);
+    out.extend_from_slice(&bytes_le[skip..]);
 }
 
 /// Returns the smallest `arg` (0..=3) whose byte width covers `idx`.
@@ -787,4 +796,24 @@ pub(crate) fn rewrite_static_values(
         rewrite_encoded_value(v, &mut out, maps, 0)?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// float/double keep their HIGH-order bytes (right-zero-extended),
+    /// mirroring the asc-dex decoder: 1.0f → tag|arg 1, `[80 3F]`.
+    #[test]
+    fn float_and_double_emit_high_order_bytes() {
+        let mut out = vec![0x10];
+        push_right_extended(&mut out, 0x10, &1.0f32.to_bits().to_le_bytes());
+        assert_eq!(out, [0x30, 0x80, 0x3F]);
+        let mut out = vec![0x11];
+        push_right_extended(&mut out, 0x11, &1.0f64.to_bits().to_le_bytes());
+        assert_eq!(out, [0x31, 0xF0, 0x3F]);
+        let mut out = vec![0x10];
+        push_right_extended(&mut out, 0x10, &0u32.to_le_bytes());
+        assert_eq!(out, [0x10, 0x00], "zero keeps one byte");
+    }
 }

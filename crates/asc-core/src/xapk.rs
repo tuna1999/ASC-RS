@@ -97,10 +97,47 @@ fn count_classes(bytes: &[u8]) -> Result<usize, String> {
     Ok(total)
 }
 
+/// Inflate work an entry read can cost: output is bounded by the declared
+/// size (+1, see [`run_xapk_with_budget`]) and a DEFLATE walk by the
+/// compressed size; a STORED entry is a borrowed slice.
+fn read_cost(uncompressed: u64, compressed: u64, method: Compression) -> usize {
+    (uncompressed as usize).saturating_add(match method {
+        Compression::Deflated => compressed as usize,
+        Compression::Stored => 0,
+    })
+}
+
+/// Charge `cost` against `budget` BEFORE a read; `false` (nothing taken)
+/// when it does not fit.
+fn take(budget: &mut usize, cost: usize) -> bool {
+    let ok = *budget >= cost;
+    if ok {
+        *budget -= cost;
+    }
+    ok
+}
+
 /// Analyze one member APK buffer: manifest, DEX entries, native libs.
 /// Public bytes-level API (fuzz target drives it directly, no
-/// filesystem or outer-ZIP wrapper).
+/// filesystem or outer-ZIP wrapper). Inner reads are bounded by the
+/// default aggregate budget; see [`analyze_member_with_budget`].
 pub fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u8]) -> MemberApk {
+    let mut budget = TOTAL_BUDGET;
+    analyze_member_with_budget(name, compressed, uncompressed, bytes, &mut budget)
+}
+
+/// [`analyze_member`] charging every inner read (manifest and each
+/// `classes*.dex`) against `budget` before it happens. The per-entry cap
+/// alone left a member with hundreds of tiny, highly compressible 256 MiB
+/// DEX entries free to cost hundreds of GiB of inflate work; an entry
+/// that no longer fits is reported and makes the member incomplete.
+pub fn analyze_member_with_budget(
+    name: &str,
+    compressed: u64,
+    uncompressed: u64,
+    bytes: &[u8],
+    budget: &mut usize,
+) -> MemberApk {
     let mut m = MemberApk {
         name: name.to_string(),
         compressed_size: compressed,
@@ -124,6 +161,15 @@ pub fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u
     };
     // Manifest: parsed in isolation; three states kept apart.
     match view.entry("AndroidManifest.xml") {
+        Some(entry)
+            if !take(
+                budget,
+                read_cost(entry.uncompressed_size, entry.compressed_size, entry.method),
+            ) =>
+        {
+            m.manifest_error = Some("manifest skipped: aggregate budget exhausted".into());
+            m.complete = false;
+        }
         Some(entry) => match view.read_entry_with_limits(&entry, inner_cap.unwrap_or_default()) {
             Ok(b) => match asc_manifest::parse_manifest(b.as_slice()) {
                 Ok(mi) => {
@@ -170,6 +216,18 @@ pub fn analyze_member(name: &str, compressed: u64, uncompressed: u64, bytes: &[u
                 name: e.name.clone(),
                 classes: 0,
                 error: Some(format!("exceeds {} MiB cap", INNER_CAP >> 20)),
+            });
+            m.complete = false;
+            continue;
+        }
+        if !take(
+            budget,
+            read_cost(e.uncompressed_size, e.compressed_size, e.method),
+        ) {
+            m.dex.push(MemberDex {
+                name: e.name.clone(),
+                classes: 0,
+                error: Some("skipped: aggregate budget exhausted".into()),
             });
             m.complete = false;
             continue;
@@ -251,10 +309,7 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
         // charging the declaration alone let N members that declare 0 bytes
         // buy N compressed payloads' worth of decoding for free. A STORED
         // entry is a borrowed slice — no inflate work at all.
-        let charge = (e.uncompressed_size as usize).saturating_add(match e.method {
-            Compression::Deflated => e.compressed_size as usize,
-            Compression::Stored => 0,
-        });
+        let charge = read_cost(e.uncompressed_size, e.compressed_size, e.method);
         if budget_left < charge {
             report.errors.push(format!(
                 "aggregate budget exceeded ({} MiB) before {}; {} of {} members analyzed",
@@ -279,11 +334,14 @@ pub fn run_xapk_with_budget(path: &Path, total_budget: usize) -> Result<XapkRepo
                 continue;
             }
         };
-        let member = analyze_member(
+        // Inner reads share the same budget: a member's own DEX entries
+        // can declare far more than the member itself.
+        let member = analyze_member_with_budget(
             &e.name,
             e.compressed_size,
             e.uncompressed_size,
             bytes.as_slice(),
+            &mut budget_left,
         );
         if !member.complete {
             report.complete = false;

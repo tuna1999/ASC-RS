@@ -118,6 +118,16 @@ impl Builder {
         }
     }
 
+    /// A builder whose data items start at `data_start`. `finalize` lays
+    /// the header and id pools out from 0x70 upward, so a DEX with many
+    /// ids must reserve room for them or the pools overwrite data.
+    #[allow(dead_code)]
+    pub fn with_data_start(data_start: u32) -> Self {
+        let mut b = Self::new();
+        b.next_align = data_start;
+        b
+    }
+
     /// Allocates a 4-byte slot and writes the value. Extends the
     /// buffer with zeros as needed.
     fn write_u32(&mut self, off: u32, v: u32) {
@@ -367,7 +377,8 @@ impl Builder {
 
         // Move next_align past the pool region so subsequent code /
         // class_data / string_data writes don't trample it.
-        self.next_align = class_defs_end;
+        // (`max`: data placed past the pools must stay inside file_size.)
+        self.next_align = self.next_align.max(class_defs_end);
 
         // Recompute code_items / class_data / string_data offsets so
         // we don't overwrite the pools. We need to know where

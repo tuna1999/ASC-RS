@@ -1523,7 +1523,7 @@ fn oversized_debug_info_is_capped() {
     set_code(&mut s, vec![0x000E], 1);
     let g = s.classes[0].direct_methods[0].name;
     let mut item = vec![1, 0];
-    item.extend(std::iter::repeat_n(0x0F, 10_000));
+    item.extend(std::iter::repeat_n(0x0F, 100_000));
     item.push(0x00);
     s.classes[0].debug_info = vec![(g, item)];
     let out = ok(&s.build());

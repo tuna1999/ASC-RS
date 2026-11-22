@@ -9,7 +9,7 @@
 //! are sent as `--flag=value` and free-text positionals after `--`, so a
 //! value that starts with `-` is data, never an option.
 
-use std::io::{BufRead as _, Write as _};
+use std::io::{BufRead as _, Read, Write as _};
 use std::process::{Command, ExitCode, Stdio};
 
 use serde_json::{Value, json};
@@ -503,21 +503,47 @@ fn run_tool(argv: &[String]) -> Value {
         Ok(e) => e,
         Err(e) => return tool_error(format!("cannot locate asc-rs: {e}")),
     };
-    let out = match Command::new(exe).args(argv).stdin(Stdio::null()).output() {
-        Ok(o) => o,
+    let mut child = match Command::new(exe)
+        .args(argv)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => return tool_error(format!("cannot run asc-rs: {e}")),
     };
-    let code = out.status.code().unwrap_or(-1);
+    // Keep at most MAX_TEXT + 1 bytes of each stream (the +1 lets `capped`
+    // see the overflow) and drain the rest, so a huge listing never sits
+    // in memory whole and the child never blocks on a full pipe.
+    // `Command::output()` buffered everything before the cap applied.
+    let stderr_pipe = child.stderr.take();
+    let stderr_reader =
+        std::thread::spawn(move || stderr_pipe.map(read_capped).unwrap_or_default());
+    let stdout = child.stdout.take().map(read_capped).unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let code = match child.wait() {
+        Ok(st) => st.code().unwrap_or(-1),
+        Err(e) => return tool_error(format!("asc-rs did not finish: {e}")),
+    };
     let mut content = vec![text_item(capped(
-        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&stdout).into_owned(),
     ))];
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = String::from_utf8_lossy(&stderr);
     // Diagnostics go in their own item so a `format: json` result stays
     // parseable; exit 2 can still carry partial results above it.
     if code != 0 || !stderr.trim().is_empty() {
         content.push(text_item(capped(format!("[exit {code}] {stderr}"))));
     }
     json!({"content": content, "isError": code != 0})
+}
+
+/// First `MAX_TEXT + 1` bytes of `r`; the remainder is read and discarded.
+fn read_capped(mut r: impl Read) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = r.by_ref().take(MAX_TEXT as u64 + 1).read_to_end(&mut buf);
+    let _ = std::io::copy(&mut r, &mut std::io::sink());
+    buf
 }
 
 fn tool_error(message: String) -> Value {
@@ -694,5 +720,17 @@ mod tests {
                 assert!(ok, "{} --{flag}", t.name);
             }
         }
+    }
+
+    /// Only `MAX_TEXT + 1` bytes are kept however much the child writes;
+    /// the rest is consumed (so the child is never blocked) and dropped.
+    #[test]
+    fn read_capped_keeps_cap_plus_one_and_drains() {
+        let mut src = std::io::Cursor::new(vec![b'x'; MAX_TEXT * 3]);
+        let got = read_capped(&mut src);
+        assert_eq!(got.len(), MAX_TEXT + 1);
+        assert_eq!(src.position() as usize, MAX_TEXT * 3, "remainder drained");
+        assert!(capped(String::from_utf8(got).unwrap()).ends_with("(limit/prefix/class/method)."));
+        assert_eq!(read_capped(&b"short"[..]), b"short");
     }
 }

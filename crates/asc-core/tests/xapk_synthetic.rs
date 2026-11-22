@@ -225,7 +225,8 @@ fn aggregate_budget_stops_and_reports_partial() {
         m.into_inner()
     };
     let payload = member();
-    let two = 2 * payload.len();
+    // Each member costs its own bytes plus its one stored inner DEX read.
+    let two = 2 * (payload.len() + b"not a dex".len());
     let xapk = std::env::temp_dir().join("asc-xapk-budget.zip");
     write_zip(
         &xapk,
@@ -235,7 +236,8 @@ fn aggregate_budget_stops_and_reports_partial() {
             ("c.apk", payload),
         ],
     );
-    // Budget covers a.apk + b.apk exactly; c.apk must be skipped.
+    // Budget covers a.apk + b.apk (and their inner reads) exactly; c.apk
+    // must be skipped.
     let r = asc_core::xapk::run_xapk_with_budget(&xapk, two).expect("run");
     assert!(!r.complete);
     assert_eq!(r.members.len(), 2, "third member must be skipped");
@@ -406,4 +408,52 @@ fn custom_budget_message_names_the_caller_value() {
         "must not name the default: {msg}"
     );
     let _ = std::fs::remove_file(&xapk);
+}
+
+/// A member's inner `classes*.dex` reads share the container budget:
+/// before, only the outer member was charged, so a tiny member holding
+/// many highly compressible DEX entries (each under the per-entry cap)
+/// bought unbounded inflate work.
+#[test]
+fn inner_dex_reads_are_charged_to_the_aggregate_budget() {
+    const DEX: usize = 8;
+    const EACH: usize = 1 << 20;
+    let names: Vec<String> = (0..DEX)
+        .map(|i| {
+            if i == 0 {
+                "classes.dex".into()
+            } else {
+                format!("classes{}.dex", i + 1)
+            }
+        })
+        .collect();
+    let inner: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), vec![0u8; EACH]))
+        .collect();
+    let member = zip_bytes_deflated(&inner);
+    let member_len = member.len();
+    assert!(member_len < EACH, "fixture must expand hugely");
+    let container = zip_bytes(&[("base.apk", member)]);
+    let xapk = std::env::temp_dir().join("asc-xapk-inner-budget.zip");
+    std::fs::write(&xapk, &container).unwrap();
+
+    // Enough for the member and ~2 inner DEX reads, not all 8.
+    let r =
+        asc_core::xapk::run_xapk_with_budget(&xapk, member_len + 2 * EACH + EACH / 2).expect("run");
+    let _ = std::fs::remove_file(&xapk);
+    assert!(!r.complete, "a budget-truncated member is incomplete");
+    let m = &r.members[0];
+    assert!(!m.complete);
+    assert_eq!(m.dex.len(), DEX, "every DEX entry is still listed");
+    let skipped = m
+        .dex
+        .iter()
+        .filter(|d| {
+            d.error
+                .as_deref()
+                .is_some_and(|e| e.contains("budget exhausted"))
+        })
+        .count();
+    assert_eq!(skipped, DEX - 2, "{:?}", m.dex);
 }
