@@ -420,6 +420,9 @@ impl AscApp {
         self.symbol_sel = None;
         self.member_info = None;
         self.member_info_wanted = None;
+        // A member scroll queued against the old artifact must not fire on
+        // a same-named class of the new one.
+        self.pending_member = None;
         // Per-artifact answer sets: descriptors from the old app would
         // navigate nowhere (mapping especially) and the old rows would
         // read as the new app's.
@@ -501,7 +504,16 @@ impl AscApp {
             self.set_status("rename: the selection belongs to another document", false);
             return;
         }
-        let own = self.documents.peek(&sel.descriptor).unwrap_or(doc);
+        // The byte range belongs to the selection's own view; never apply
+        // it to a sibling view of the same class (class tab vs `#smali`).
+        let own = match self.documents.peek(&sel.descriptor) {
+            Some(d) => d,
+            None if doc.descriptor == sel.descriptor => doc,
+            None => {
+                self.set_status("rename: the selected view is no longer loaded", false);
+                return;
+            }
+        };
         let Some(first) = crate::source_edit::rename_in_range(
             &own.source,
             sel.method.0.min(own.source.len()),

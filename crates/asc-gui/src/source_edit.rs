@@ -332,6 +332,12 @@ pub fn rename_in_range(
     old: &str,
     new: &str,
 ) -> Option<String> {
+    // A stale selection range may land mid-UTF-8 sequence: refuse instead
+    // of panicking on the slices below.
+    let end = end.min(text.len());
+    if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
     let hits = occurrences_in_range(text, start, end, old);
     if hits.is_empty() {
         return None;
@@ -374,6 +380,19 @@ mod tests {
     use super::*;
 
     const SRC: &str = "public class A {\n    int field;\n    void run(int px) {\n        int q = px + 1;\n        log(\"px in string\"); // px in comment\n    }\n}\n";
+
+    #[test]
+    fn rename_refuses_ranges_off_char_boundaries() {
+        let text = "// ẞ\nint x = x;\n";
+        // 4 is inside the 3-byte 'ẞ'; a stale range must not panic.
+        assert_eq!(rename_in_range(text, 4, text.len(), "x", "y"), None);
+        assert_eq!(rename_in_range(text, 0, 4, "x", "y"), None);
+        assert_eq!(rename_in_range(text, 9, 3, "x", "y"), None);
+        assert_eq!(
+            rename_in_range(text, 0, usize::MAX, "x", "y").as_deref(),
+            Some("// ẞ\nint y = y;\n")
+        );
+    }
 
     #[test]
     fn token_at_finds_full_identifier() {
