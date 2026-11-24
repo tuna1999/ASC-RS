@@ -370,13 +370,13 @@ fn decode_text(slice: &[u8], is_utf16: bool, truncated: bool) -> String {
     text
 }
 
-/// Mask ASCII control characters and DEL so each string renders as one
-/// line. Applied by the TEXT formatter only; JSON and `--pattern` see
-/// the raw decoded string.
+/// Mask control characters (newline and tab included) and bidi controls
+/// so each string renders as one line. Applied by the TEXT formatter
+/// only; JSON and `--pattern` see the raw decoded string.
 fn mask_control(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if (c as u32) < 0x20 || c as u32 == 0x7F {
+            if c == '\n' || c == '\t' || crate::format::is_terminal_unsafe(c) {
                 '·'
             } else {
                 c

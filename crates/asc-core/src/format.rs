@@ -28,6 +28,28 @@
 
 use serde::Serialize;
 
+/// `true` for characters a terminal may act on rather than print: C0
+/// controls except `\n`/`\t`, DEL, C1 controls (U+0080..=U+009F, e.g. CSI
+/// U+009B) and the bidi overrides/isolates (U+202A..=U+202E,
+/// U+2066..=U+2069) that visually reorder text (Trojan Source).
+pub fn is_terminal_unsafe(c: char) -> bool {
+    matches!(c,
+        '\0'..='\x08' | '\x0B'..='\x1F' | '\x7F'..='\u{9F}'
+        | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Replace every [`is_terminal_unsafe`] character with `·`, borrowing
+/// when there is nothing to replace.
+pub fn mask_terminal_unsafe(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(is_terminal_unsafe) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    text.chars()
+        .map(|c| if is_terminal_unsafe(c) { '·' } else { c })
+        .collect::<String>()
+        .into()
+}
+
 use crate::pipeline::{GetClassResult, ListClassesResult};
 use crate::report::{DexResults, SearchReport};
 
@@ -314,5 +336,15 @@ mod tests {
         let back: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(back["source"], r.source.as_str());
         assert_eq!(back["class_def_off"], 112);
+    }
+
+    #[test]
+    fn terminal_masking_covers_c0_c1_and_bidi() {
+        let hostile = "a\x1b[2Jb\u{9b}31mc\u{202e}d\u{2066}e\x7f\tf\ng";
+        assert_eq!(mask_terminal_unsafe(hostile), "a·[2Jb·31mc·d·e·\tf\ng");
+        assert!(matches!(
+            mask_terminal_unsafe("Lé/Ok;"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 }

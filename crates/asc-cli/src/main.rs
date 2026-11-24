@@ -42,7 +42,17 @@ macro_rules! println {
 }
 
 fn stdout_write(args: std::fmt::Arguments<'_>) {
-    if let Err(e) = std::io::stdout().write_fmt(args) {
+    // APK-controlled strings (descriptors, string constants, manifest
+    // values) must not drive the user's terminal: on a TTY, escape/C1/bidi
+    // controls print as `·`. Pipes and files stay byte-exact.
+    static TTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let result = if *TTY.get_or_init(|| std::io::IsTerminal::is_terminal(&std::io::stdout())) {
+        let text = args.to_string();
+        std::io::stdout().write_all(asc_core::format::mask_terminal_unsafe(&text).as_bytes())
+    } else {
+        std::io::stdout().write_fmt(args)
+    };
+    if let Err(e) = result {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             std::process::exit(EXIT_OK.into());
         }
