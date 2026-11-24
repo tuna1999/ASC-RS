@@ -50,6 +50,14 @@ pub enum RebuildError {
         cap: u32,
     },
 
+    /// A selected pool index is outside the source pool (hostile DEX).
+    #[error("{pool} index {idx} out of range (pool has {count})")]
+    IndexOutOfRange {
+        pool: &'static str,
+        idx: u32,
+        count: u32,
+    },
+
     /// Internal invariant violation: an internal table missed an entry that
     /// should be present (e.g. a referenced pool idx was never queued).
     #[error("internal inconsistency: {0}")]

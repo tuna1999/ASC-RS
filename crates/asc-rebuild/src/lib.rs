@@ -110,7 +110,7 @@ pub fn rebuild_patched(
     let started = std::time::Instant::now();
     let mut closure = closure::Closure::compute(view, target_descriptor)?;
     let closure_us = started.elapsed().as_micros();
-    let mut maps = remap::PoolMaps::build(&closure, view);
+    let mut maps = remap::PoolMaps::build(&closure, view)?;
     let plan = patch::Plan::build(view, &mut closure, patches, &mut maps.strings)?;
     let remap_us = started.elapsed().as_micros() - closure_us;
     let lo = layout::emit(view, &closure, &maps, &plan)?;

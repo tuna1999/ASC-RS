@@ -9,7 +9,7 @@
 //! are sent as `--flag=value` and free-text positionals after `--`, so a
 //! value that starts with `-` is data, never an option.
 
-use std::io::{BufRead as _, Read, Write as _};
+use std::io::{BufRead, Read, Write as _};
 use std::process::{Command, ExitCode, Stdio};
 
 use serde_json::{Value, json};
@@ -20,6 +20,13 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 // ponytail: fixed cap on tool text, add paging if agents need >4 MiB.
 const MAX_TEXT: usize = 4 << 20;
+
+/// Longest accepted request line; a longer one is skipped, never buffered.
+const MAX_LINE: usize = 1 << 20;
+
+// ponytail: one fixed deadline for every tool; make it per-tool if a
+// legitimate getclass on a huge APK ever needs longer.
+const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Clone, Copy)]
 enum Arg {
@@ -496,8 +503,8 @@ fn build_argv(tool: &Tool, args: &serde_json::Map<String, Value>) -> Result<Vec<
     Ok(head)
 }
 
-// ponytail: no per-call timeout and one call at a time; a hung child
-// blocks the server. Add a kill-after-deadline wait loop if that bites.
+// ponytail: one call at a time; a slow child blocks the server until
+// TOOL_TIMEOUT kills it.
 fn run_tool(argv: &[String]) -> Value {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
@@ -520,11 +527,31 @@ fn run_tool(argv: &[String]) -> Value {
     let stderr_pipe = child.stderr.take();
     let stderr_reader =
         std::thread::spawn(move || stderr_pipe.map(read_capped).unwrap_or_default());
-    let stdout = child.stdout.take().map(read_capped).unwrap_or_default();
+    let stdout_pipe = child.stdout.take();
+    let stdout_reader =
+        std::thread::spawn(move || stdout_pipe.map(read_capped).unwrap_or_default());
+    let deadline = std::time::Instant::now() + TOOL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Ok(st),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "asc-rs timed out after {}s and was killed; narrow the query",
+                    TOOL_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => break Err(format!("asc-rs did not finish: {e}")),
+        }
+    };
+    // The pipes close once the child is gone, so both readers return.
+    let stdout = stdout_reader.join().unwrap_or_default();
     let stderr = stderr_reader.join().unwrap_or_default();
-    let code = match child.wait() {
+    let code = match status {
         Ok(st) => st.code().unwrap_or(-1),
-        Err(e) => return tool_error(format!("asc-rs did not finish: {e}")),
+        Err(e) => return tool_error(e),
     };
     let mut content = vec![text_item(capped(
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -573,9 +600,22 @@ fn handle(msg: &Value) -> Option<Value> {
         return Some(json!({"jsonrpc": "2.0", "id": null,
             "error": {"code": -32600, "message": "invalid request: expected one JSON object"}}));
     };
-    // No id = notification; no method = a response to us: never answered.
+    // No id = notification: never answered.
     let id = obj.get("id")?.clone();
-    let method = obj.get("method")?.as_str().unwrap_or("");
+    if !(id.is_string() || id.is_number() || id.is_null()) {
+        return Some(json!({"jsonrpc": "2.0", "id": null,
+            "error": {"code": -32600, "message": "invalid request: id must be a string or number"}}));
+    }
+    let Some(method) = obj.get("method") else {
+        // A response to us (result/error) is never answered; anything
+        // else with an id is a malformed request and is told so.
+        if obj.contains_key("result") || obj.contains_key("error") {
+            return None;
+        }
+        return Some(json!({"jsonrpc": "2.0", "id": id,
+            "error": {"code": -32600, "message": "invalid request: missing method"}}));
+    };
+    let method = method.as_str().unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
         "initialize" => {
@@ -615,27 +655,53 @@ fn handle(msg: &Value) -> Option<Value> {
     })
 }
 
+/// Reads one request line into `buf`: `Ok(None)` at EOF, `Ok(Some(false))`
+/// when the line exceeded `MAX_LINE` (its rest is skipped, not buffered).
+fn read_line_capped(r: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<Option<bool>> {
+    buf.clear();
+    if r.take(MAX_LINE as u64 + 1).read_until(b'\n', buf)? == 0 {
+        return Ok(None);
+    }
+    if buf.len() > MAX_LINE && buf.last() != Some(&b'\n') {
+        r.skip_until(b'\n')?;
+        return Ok(Some(false));
+    }
+    Ok(Some(true))
+}
+
+/// Reply to one complete request line; `None` for blank lines and
+/// notifications.
+fn parse_reply(buf: &[u8]) -> Option<Value> {
+    // Invalid UTF-8 becomes U+FFFD and then a -32700, never a silent exit.
+    let line = String::from_utf8_lossy(buf);
+    if line.trim().is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<Value>(&line) {
+        Ok(msg) => handle(&msg),
+        Err(e) => Some(json!({
+            "jsonrpc": "2.0", "id": null,
+            "error": {"code": -32700, "message": format!("parse error: {e}")},
+        })),
+    }
+}
+
 /// Serve until stdin closes.
 pub fn serve() -> ExitCode {
     let mut stdin = std::io::stdin().lock();
     let mut buf = Vec::new();
     loop {
-        buf.clear();
-        match stdin.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        // Invalid UTF-8 becomes U+FFFD and then a -32700, never a silent exit.
-        let line = String::from_utf8_lossy(&buf);
-        if line.trim().is_empty() {
-            continue;
-        }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&msg),
-            Err(e) => Some(json!({
+        let reply = match read_line_capped(&mut stdin, &mut buf) {
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("asc-rs mcp: stdin read failed: {e}");
+                return ExitCode::FAILURE;
+            }
+            Ok(Some(false)) => Some(json!({
                 "jsonrpc": "2.0", "id": null,
-                "error": {"code": -32700, "message": format!("parse error: {e}")},
+                "error": {"code": -32600, "message": format!("request line exceeds {MAX_LINE} bytes")},
             })),
+            Ok(Some(true)) => parse_reply(&buf),
         };
         if let Some(r) = reply {
             let mut out = std::io::stdout().lock();
@@ -732,5 +798,35 @@ mod tests {
         assert_eq!(src.position() as usize, MAX_TEXT * 3, "remainder drained");
         assert!(capped(String::from_utf8(got).unwrap()).ends_with("(limit/prefix/class/method)."));
         assert_eq!(read_capped(&b"short"[..]), b"short");
+    }
+
+    /// An over-long line is skipped up to its newline; the next one is read.
+    #[test]
+    fn read_line_capped_skips_oversized_line() {
+        let mut input = vec![b'x'; MAX_LINE * 2];
+        input.extend_from_slice(b"\n{}\n");
+        let mut r = std::io::Cursor::new(input);
+        let mut buf = Vec::new();
+        assert_eq!(read_line_capped(&mut r, &mut buf).unwrap(), Some(false));
+        assert!(buf.len() <= MAX_LINE + 1);
+        assert_eq!(read_line_capped(&mut r, &mut buf).unwrap(), Some(true));
+        assert_eq!(buf, b"{}\n");
+        assert_eq!(read_line_capped(&mut r, &mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_requests_get_a_32600() {
+        let code = |m: Value| handle(&m).map(|r| r["error"]["code"].clone());
+        assert_eq!(
+            code(json!({"jsonrpc": "2.0", "id": 1})),
+            Some(json!(-32600))
+        );
+        let bad_id = json!({"jsonrpc": "2.0", "id": [1], "method": "ping"});
+        assert_eq!(code(bad_id), Some(json!(-32600)));
+        // A response to us and a notification are never answered.
+        assert_eq!(code(json!({"jsonrpc": "2.0", "id": 1, "result": {}})), None);
+        assert_eq!(code(json!({"jsonrpc": "2.0", "method": "ping"})), None);
+        let ok = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+        assert_eq!(code(ok), Some(Value::Null));
     }
 }

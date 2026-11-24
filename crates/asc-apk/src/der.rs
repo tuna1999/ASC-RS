@@ -205,6 +205,10 @@ fn name_string(t: &Tlv<'_>) -> Result<String, String> {
 /// UTCTime / GeneralizedTime → `YYYY-MM-DD HH:MM:SS UTC`. Only the `Z`
 /// forms with seconds are supported; anything else is an error.
 fn time_string(t: &Tlv<'_>) -> Result<String, String> {
+    // ASCII first: the fixed byte slices below must land on char boundaries.
+    if !t.content.is_ascii() {
+        return Err("time is not ASCII".into());
+    }
     let s = std::str::from_utf8(t.content).map_err(|_| "time is not ASCII".to_string())?;
     let (year, rest) = match t.tag {
         0x17 if s.len() == 13 => {
@@ -495,6 +499,16 @@ mod tests {
             assert_eq!(f.not_after.as_deref(), Ok(na_exp));
             assert!(f.not_before.is_ok());
         }
+    }
+
+    #[test]
+    fn non_ascii_time_is_an_error_not_a_panic() {
+        // 13 bytes, "é" straddles the s[..2] year slice; 15 bytes for s[..4].
+        let utc = t(0x17, &"1é3456789012Z".as_bytes()[..13]);
+        let gen_ = t(0x18, &"203é5678901234Z".as_bytes()[..15]);
+        let f = parse_cert(&cert(utc, gen_)).unwrap();
+        assert_eq!(f.not_before, Err("time is not ASCII".to_string()));
+        assert_eq!(f.not_after, Err("time is not ASCII".to_string()));
     }
 
     #[test]

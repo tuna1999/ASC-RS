@@ -28,16 +28,32 @@ pub(crate) struct IndexMap<I> {
 impl<I> IndexMap<I> {
     /// Builds an `IndexMap` from a `BTreeSet<u32>` of selected old
     /// indices. The map's backing `Vec` is sized to `old_count`.
-    pub(crate) fn build(selected: &std::collections::BTreeSet<u32>, old_count: u32) -> Self {
+    /// A selected index at or past old_count (a hostile DEX whose
+    /// name/shorty/descriptor/const-string points outside its pool) is an
+    /// error, never an out-of-bounds panic.
+    pub(crate) fn build(
+        selected: &std::collections::BTreeSet<u32>,
+        old_count: u32,
+        pool: &'static str,
+    ) -> Result<Self, crate::RebuildError> {
+        if let Some(&max) = selected.last()
+            && max >= old_count
+        {
+            return Err(crate::RebuildError::IndexOutOfRange {
+                pool,
+                idx: max,
+                count: old_count,
+            });
+        }
         let mut inner: Vec<Option<u32>> = vec![None; old_count as usize];
         for (rank, &old) in selected.iter().enumerate() {
             inner[old as usize] = Some(rank as u32);
         }
-        Self {
+        Ok(Self {
             inner,
             count: selected.len() as u32,
             _kind: PhantomData,
-        }
+        })
     }
 
     /// Builds a map from an explicit output order: entry `rank` is
@@ -110,15 +126,46 @@ pub(crate) struct PoolMaps {
 }
 
 impl PoolMaps {
-    pub(crate) fn build(closure: &crate::closure::Closure, view: &asc_dex::DexView<'_>) -> Self {
-        Self {
-            strings: IndexMap::build(&closure.strings, view.string_count()),
-            types: IndexMap::build(&closure.types, view.type_count()),
-            protos: IndexMap::build(&closure.protos, view.proto_count()),
-            fields: IndexMap::build(&closure.fields, view.field_count()),
-            methods: IndexMap::build(&closure.methods, view.method_count()),
-            call_sites: IndexMap::build(&closure.call_sites, view.call_site_count()),
-            method_handles: IndexMap::build(&closure.method_handles, view.method_handle_count()),
-        }
+    pub(crate) fn build(
+        closure: &crate::closure::Closure,
+        view: &asc_dex::DexView<'_>,
+    ) -> Result<Self, crate::RebuildError> {
+        Ok(Self {
+            strings: IndexMap::build(&closure.strings, view.string_count(), "string_ids")?,
+            types: IndexMap::build(&closure.types, view.type_count(), "type_ids")?,
+            protos: IndexMap::build(&closure.protos, view.proto_count(), "proto_ids")?,
+            fields: IndexMap::build(&closure.fields, view.field_count(), "field_ids")?,
+            methods: IndexMap::build(&closure.methods, view.method_count(), "method_ids")?,
+            call_sites: IndexMap::build(
+                &closure.call_sites,
+                view.call_site_count(),
+                "call_site_ids",
+            )?,
+            method_handles: IndexMap::build(
+                &closure.method_handles,
+                view.method_handle_count(),
+                "method_handles",
+            )?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IndexMap;
+
+    #[test]
+    fn out_of_pool_index_is_an_error_not_a_panic() {
+        let sel: std::collections::BTreeSet<u32> = [0, 2, 7].into();
+        let err = IndexMap::<asc_dex::StringIdx>::build(&sel, 3, "string_ids").err();
+        assert!(matches!(
+            err,
+            Some(crate::RebuildError::IndexOutOfRange {
+                idx: 7,
+                count: 3,
+                ..
+            })
+        ));
+        assert!(IndexMap::<asc_dex::StringIdx>::build(&sel, 8, "string_ids").is_ok());
     }
 }
