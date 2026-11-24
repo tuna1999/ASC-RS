@@ -442,6 +442,20 @@ fn eocd_with_trailing_comment_parses() {
     assert_eq!(view.entry_count(), 1);
 }
 
+/// The declared entry count bounds the central-directory walk: an EOCD
+/// claiming 0 entries yields none, even if a record sits in the CD window.
+#[test]
+fn eocd_declaring_zero_entries_yields_none() {
+    let mut b = ZipBuilder::new();
+    b.add_stored("classes.dex", vec![1, 2, 3]);
+    let mut bytes = b.build();
+    let eocd = bytes.len() - 22;
+    assert_eq!(&bytes[eocd..eocd + 4], b"PK\x05\x06");
+    bytes[eocd + 8..eocd + 12].copy_from_slice(&[0; 4]); // disk + total entries
+    let view = parse_view(&bytes).expect("parse");
+    assert_eq!(view.entry_count(), 0);
+}
+
 // =========================================================================
 // Forged EOCD inside the archive comment (audit F01)
 // =========================================================================

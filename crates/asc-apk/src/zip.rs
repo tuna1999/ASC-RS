@@ -153,7 +153,9 @@ pub(crate) fn parse_directory(buf: &[u8]) -> Result<Vec<DexEntry>, ApkError> {
     let mut entries: Vec<DexEntry> = Vec::with_capacity(total.min(1024));
     let mut pos = cd_off;
     let mut iter_count = 0usize;
-    while pos + CD_FIXED_LEN <= cd_end {
+    // Bounded by the declared count first: an EOCD that declares 0 entries
+    // yields none (as Android's libziparchive does), not one parsed anyway.
+    while iter_count < total && pos + CD_FIXED_LEN <= cd_end {
         if read_u32(buf, pos) != SIG_CENTRAL {
             return Err(ApkError::BadSignature { at: pos as u64 });
         }
@@ -225,12 +227,6 @@ pub(crate) fn parse_directory(buf: &[u8]) -> Result<Vec<DexEntry>, ApkError> {
 
         pos = comment_end;
         iter_count += 1;
-
-        // Stop iterating once we've recorded all declared entries even if
-        // padding bytes follow.
-        if iter_count >= total {
-            break;
-        }
     }
 
     if iter_count < total {

@@ -68,8 +68,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 #[cfg(test)]
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use asc_apk::{Apk, ApkError, DexEntry};
 use asc_bytecode::DexRef;
@@ -854,8 +854,11 @@ fn find_defining_dex(
     // Entry indexes whose budget reservation was refused while other
     // workers held theirs — unproven, to be rescanned after the join.
     let deferred: Arc<std::sync::Mutex<Vec<usize>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-    // First read/parse failure; only matters when nothing was found.
-    let first_err: Arc<OnceLock<CoreError>> = Arc::new(OnceLock::new());
+    // Lowest-index read/parse failure; only matters when nothing was found.
+    // Keyed by entry index, not arrival order, so the reported error does
+    // not depend on thread scheduling.
+    let first_err: Arc<std::sync::Mutex<Option<(usize, CoreError)>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let target_arc = Arc::new(target.to_owned());
     let apk_clone = Arc::clone(apk);
     let best_clone = Arc::clone(&best);
@@ -881,7 +884,7 @@ fn find_defining_dex(
                 // can ever scan it — a permanent failure. Anything
                 // else is same-pool contention: defer, never decide.
                 if entry.uncompressed_size as usize > budget {
-                    let _ = err_clone.set(e);
+                    record_err(&err_clone, i, e);
                 } else {
                     #[cfg(test)]
                     test_faults::note_deferred();
@@ -898,7 +901,7 @@ fn find_defining_dex(
         let eb = match apk_clone.read_entry(entry) {
             Ok(b) => b,
             Err(e) => {
-                let _ = err_clone.set(e.into());
+                record_err(&err_clone, i, e.into());
                 return None;
             }
         };
@@ -918,7 +921,7 @@ fn find_defining_dex(
             }
             Ok(None) => None,
             Err(e) => {
-                let _ = err_clone.set(e);
+                record_err(&err_clone, i, e);
                 None
             }
         }
@@ -968,18 +971,11 @@ fn find_defining_dex(
             // Propagating it here instead would abandon every entry
             // still queued behind it, making the outcome depend on
             // which phase happened to pick the broken entry up.
-            // Budget refusal stays a hard `?` (above): it means some
-            // OTHER task holds the bytes, so the answer cannot be
-            // proven. A *read* failure is this entry's own, and phase 1
-            // records it and moves on (`scan_for_class`, above).
-            // Propagating it here instead would abandon every entry
-            // still queued behind it, making the outcome depend on
-            // which phase happened to pick the broken entry up.
             let _guard = crate::budget::acquire(budget, entry.uncompressed_size as usize)?;
             let eb = match apk.read_entry(entry) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = first_err.set(e.into());
+                    record_err(&first_err, i, e.into());
                     continue;
                 }
             };
@@ -1006,7 +1002,7 @@ fn find_defining_dex(
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => {
-                    let _ = first_err.set(e);
+                    record_err(&first_err, i, e);
                 }
             }
         }
@@ -1046,14 +1042,25 @@ fn find_defining_dex(
         // A panic above the winner never invalidates it.
         Some(w) => Ok(w),
         None => Err(
-            match Arc::try_unwrap(first_err)
-                .ok()
-                .and_then(OnceLock::into_inner)
+            match first_err
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
             {
-                Some(e) => e,
+                Some((_, e)) => e,
                 None => CoreError::ClassNotFound(target.to_string()),
             },
         ),
+    }
+}
+
+/// Keep the failure of the lowest entry index (deterministic report).
+fn record_err(cell: &std::sync::Mutex<Option<(usize, CoreError)>>, i: usize, e: CoreError) {
+    let mut g = cell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.as_ref().is_none_or(|(bi, _)| i < *bi) {
+        *g = Some((i, e));
     }
 }
 
@@ -2305,6 +2312,43 @@ mod tests {
                 "{tag}: corrupt DEX must be an engine error, got {r:?}"
             );
         }
+    }
+
+    /// Several broken entries race in the pool; the report must name the
+    /// lowest-index one every time, not whichever thread failed first.
+    #[test]
+    fn getclass_reports_the_lowest_broken_entry_deterministically() {
+        let _lock = fault_lock();
+        // classes.dex fails to parse; the higher entries fail differently
+        // (each is bigger than the whole scan budget), so the message
+        // tells which entry won the report.
+        let bad: &[u8] = b"dex\n035\0\0\0\0\0";
+        let big = vec![0u8; 4096];
+        let entries: Vec<(&str, &[u8])> = vec![
+            ("classes.dex", bad),
+            ("classes2.dex", &big),
+            ("classes3.dex", &big),
+            ("classes4.dex", &big),
+        ];
+        let path = std::env::temp_dir().join(format!("asc_err_order_{}.apk", std::process::id()));
+        std::fs::write(&path, stored_zip(&entries)).unwrap();
+        for _ in 0..20 {
+            let err = run_getclass(
+                &GetClassJob::new(&path, "Lcom/x/Y;"),
+                &GetClassOptions {
+                    threads: 4,
+                    scan_budget_bytes: 1024,
+                    ..Default::default()
+                },
+            )
+            .expect_err("corrupt DEX must be an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("dex parse failed"),
+                "must report classes.dex (parse), not a budget refusal: {msg}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

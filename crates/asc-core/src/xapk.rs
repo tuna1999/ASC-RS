@@ -60,8 +60,10 @@ pub struct MemberApk {
     pub manifest: Option<MemberManifest>,
     pub manifest_error: Option<String>,
     pub dex: Vec<MemberDex>,
-    /// `lib/<abi>/*.so` entry names (capped).
+    /// `lib/<abi>/*.so` entry names (first 500; see `native_lib_count`).
     pub native_libs: Vec<String>,
+    /// Every `lib/<abi>/*.so` entry, including those past the name cap.
+    pub native_lib_count: usize,
     pub abi_dirs: Vec<String>,
     /// `false` when the member ZIP could not be traversed at all or a
     /// DEX entry could not be READ (cap exceeded, inflate failure) —
@@ -147,6 +149,7 @@ pub fn analyze_member_with_budget(
         manifest_error: None,
         dex: Vec::new(),
         native_libs: Vec::new(),
+        native_lib_count: 0,
         abi_dirs: Vec::new(),
         complete: true,
     };
@@ -194,6 +197,7 @@ pub fn analyze_member_with_budget(
         // they are not part of the DEX inventory and never counted in
         // `dex`. Only oversized DEX entries make the inventory partial.
         if e.name.starts_with("lib/") && e.name.ends_with(".so") {
+            m.native_lib_count += 1;
             if m.native_libs.len() < MAX_LIBS {
                 m.native_libs.push(e.name.clone());
             }
@@ -365,7 +369,7 @@ pub fn format_xapk_text(r: &XapkReport) -> String {
             m.uncompressed_size,
             m.dex.len(),
             m.dex.iter().map(|d| d.classes).sum::<usize>(),
-            m.native_libs.len(),
+            m.native_lib_count,
             m.abi_dirs.join(","),
             if m.complete { "" } else { " (incomplete)" }
         );

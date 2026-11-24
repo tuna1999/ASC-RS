@@ -457,3 +457,15 @@ fn inner_dex_reads_are_charged_to_the_aggregate_budget() {
         .count();
     assert_eq!(skipped, DEX - 2, "{:?}", m.dex);
 }
+
+/// The name list is capped at 500, but the count (and the text report)
+/// must cover every `.so` entry rather than reading as exactly 500.
+#[test]
+fn native_lib_count_survives_the_name_cap() {
+    let names: Vec<String> = (0..600).map(|i| format!("lib/arm64-v8a/l{i}.so")).collect();
+    let entries: Vec<(&str, Vec<u8>)> = names.iter().map(|n| (n.as_str(), Vec::new())).collect();
+    let member = zip_bytes(&entries);
+    let m = asc_core::xapk::analyze_member("m.apk", 0, 0, &member);
+    assert_eq!(m.native_libs.len(), 500);
+    assert_eq!(m.native_lib_count, 600);
+}

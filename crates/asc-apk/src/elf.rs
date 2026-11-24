@@ -287,7 +287,8 @@ fn segments(r: &R, is64: bool) -> Option<Vec<Seg>> {
 fn va_to_off(segs: &[Seg], va: u64) -> Option<u64> {
     segs.iter()
         .filter(|s| s.ty == PT_LOAD)
-        .find_map(|s| (va >= s.va && va - s.va < s.fsz).then(|| s.off + (va - s.va)))
+        .find_map(|s| (va >= s.va && va - s.va < s.fsz).then(|| s.off.checked_add(va - s.va)))
+        .flatten()
 }
 
 /// `(tag, value)` pairs of the first `PT_DYNAMIC`, up to `DT_NULL`.
@@ -296,8 +297,10 @@ fn dynamic_entries(r: &R, is64: bool, segs: &[Seg]) -> Option<Vec<(u64, u64)>> {
     let esz = if is64 { 16 } else { 8 };
     let mut out = Vec::new();
     for i in 0..(d.fsz / esz).min(MAX_DYN_ENTRIES as u64) {
-        let p = d.off + i * esz;
-        let (Some(tag), Some(val)) = (r.w(p, is64), r.w(p + esz / 2, is64)) else {
+        let Some(p) = d.off.checked_add(i * esz) else {
+            break;
+        };
+        let (Some(tag), Some(val)) = (r.w(p, is64), r.w(p.saturating_add(esz / 2), is64)) else {
             break;
         };
         if tag == 0 {
@@ -597,11 +600,17 @@ fn relocations(
                 .push(format!("more than {MAX_RELOCS} relocations; truncated"));
         }
         for i in 0..count.min(MAX_RELOCS) {
-            let e = off + i * esz;
-            let (Some(at), Some(info)) = (r.w(e, is64), r.w(e + w, is64)) else {
+            let Some(e) = off.checked_add(i * esz) else {
                 break;
             };
-            let addend = if rela { r.w(e + 2 * w, is64) } else { None };
+            let (Some(at), Some(info)) = (r.w(e, is64), r.w(e.saturating_add(w), is64)) else {
+                break;
+            };
+            let addend = if rela {
+                r.w(e.saturating_add(2 * w), is64)
+            } else {
+                None
+            };
             classify(at, info, addend);
         }
     }
@@ -863,6 +872,17 @@ mod tests {
             assert_eq!(i.machine, 183);
             assert!(i.complete, "{:?}", i.notes);
         }
+    }
+
+    /// Segment offsets near `u64::MAX` must not overflow offset math
+    /// (a debug-build panic before; wrap-around in release).
+    #[test]
+    fn huge_segment_offsets_do_not_overflow() {
+        let mut b = elf64(&[("JNI_OnLoad", G, 7)], false);
+        // PT_LOAD only: PT_DYNAMIC stays readable so va_to_off is reached.
+        put(&mut b, 0x40 + 8, &(u64::MAX - 8).to_le_bytes());
+        let i = parse_elf(&b).unwrap();
+        assert!(i.exports.is_empty());
     }
 
     #[test]
