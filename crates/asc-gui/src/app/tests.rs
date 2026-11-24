@@ -1190,7 +1190,11 @@ fn mapping_search_lists_obfuscated_targets() {
     let mut app = empty_app();
     let ctx = egui::Context::default();
     app.dispatch(Command::OpenMapping(path), &ctx);
-    assert!(app.mapping.is_some(), "mapping loaded");
+    assert!(app.mapping.is_none(), "parsed on a worker, not inline");
+    assert!(
+        pump_until(&mut app, &ctx, |a| a.mapping.is_some()),
+        "mapping loaded"
+    );
     assert!(app.status.as_ref().unwrap().ok, "load reported ok");
     app.search.input = "secret".into();
     app.dispatch(Command::SearchMapping, &ctx);
@@ -1203,6 +1207,35 @@ fn mapping_search_lists_obfuscated_targets() {
     assert!(results.rows[0].matched[0].contains("com.example.Secret"));
 }
 
+/// Loading runs on a worker: the last file picked wins, and an
+/// unreadable one reports an error without dropping the loaded mapping.
+#[test]
+fn mapping_load_supersedes_and_failure_keeps_previous() {
+    let dir = std::env::temp_dir().join("asc_gui_mapping");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("mapping_a.txt"), dir.join("mapping_b.txt"));
+    std::fs::write(&a, "com.example.A -> a:\n").unwrap();
+    std::fs::write(&b, "com.example.B -> b:\ncom.example.C -> c:\n").unwrap();
+    let mut app = empty_app();
+    let ctx = egui::Context::default();
+    app.dispatch(Command::OpenMapping(a), &ctx);
+    app.dispatch(Command::OpenMapping(b.clone()), &ctx);
+    assert!(pump_until(&mut app, &ctx, |x| x.mapping.is_some()
+        && !x.tasks.has_in_flight()));
+    assert_eq!(app.mapping.as_ref().unwrap().0, b, "newest pick wins");
+    app.dispatch(Command::OpenMapping(dir.join("missing.txt")), &ctx);
+    assert!(pump_until(&mut app, &ctx, |x| !x
+        .status
+        .as_ref()
+        .unwrap()
+        .ok));
+    assert_eq!(
+        app.mapping.as_ref().unwrap().0,
+        b,
+        "failure keeps the old one"
+    );
+}
+
 /// An unknown name yields an empty, unsuccessful report.
 #[test]
 fn mapping_search_without_a_hit_still_reports() {
@@ -1213,6 +1246,7 @@ fn mapping_search_without_a_hit_still_reports() {
     let mut app = empty_app();
     let ctx = egui::Context::default();
     app.dispatch(Command::OpenMapping(path), &ctx);
+    assert!(pump_until(&mut app, &ctx, |a| a.mapping.is_some()));
     app.search.input = "nothing-here".into();
     app.dispatch(Command::SearchMapping, &ctx);
     assert_eq!(app.references.as_ref().unwrap().rows.len(), 0);
@@ -4679,6 +4713,16 @@ fn visual_shots_v022_views() {
     {
         let ctx = h.ctx.clone();
         h.state_mut().dispatch(Command::OpenMapping(map), &ctx);
+    }
+    for _ in 0..300 {
+        h.step();
+        if h.state().mapping.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    {
+        let ctx = h.ctx.clone();
         // The obfuscated name you read in the code must answer.
         h.state_mut().search.input = "a".into();
         h.state_mut().dispatch(Command::SearchMapping, &ctx);

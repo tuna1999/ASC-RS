@@ -95,6 +95,9 @@ pub enum TaskKind {
     /// `run_resources` for one `resources.arsc` query (inventory /
     /// lookup / search, ASC-RS-GUI-103).
     Resources,
+    /// Read + parse an R8 `mapping.txt` (can be hundreds of MiB, so off
+    /// the UI thread).
+    Mapping,
 }
 
 impl TaskKind {
@@ -113,6 +116,7 @@ impl TaskKind {
             TaskKind::Cfg => "cfg",
             TaskKind::ClassStrings => "class strings",
             TaskKind::Resources => "resources",
+            TaskKind::Mapping => "mapping",
         }
     }
 
@@ -179,6 +183,8 @@ pub enum TaskOutcome {
     ClassStrings(asc_core::ClassStringsResult),
     /// Successful `run_resources`: `resources.arsc` inventory + hits.
     Resources(asc_core::ResourcesReport),
+    /// Parsed `mapping.txt` and the path it came from.
+    Mapping(PathBuf, asc_core::mapping::MappingIndex),
     /// Engine error or worker panic, as a display string.
     Failed(String),
 }
@@ -799,6 +805,28 @@ impl TaskManager {
             TaskKind::Resources,
             label,
             move || run_resources_job(&apk, &query),
+            ctx,
+        )
+    }
+
+    /// Spawn a `mapping.txt` load. A newer load supersedes an older one
+    /// (discard-on-arrival), so the last file picked wins.
+    pub fn spawn_mapping(&mut self, path: &Path, ctx: &egui::Context) -> TaskId {
+        for t in &mut self.in_flight {
+            if t.kind == TaskKind::Mapping {
+                t.discarded.store(true, Ordering::Release);
+            }
+        }
+        let path = path.to_path_buf();
+        self.submit(
+            TaskKind::Mapping,
+            path.display().to_string(),
+            move || match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    TaskOutcome::Mapping(path, asc_core::mapping::MappingIndex::parse(&text))
+                }
+                Err(e) => TaskOutcome::Failed(e.to_string()),
+            },
             ctx,
         )
     }

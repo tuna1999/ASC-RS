@@ -989,6 +989,28 @@ impl AscApp {
                 self.apply_fanout_task(kind, task)
             }
             TaskKind::ClassStrings | TaskKind::Resources => self.apply_inventory_task(kind, task),
+            TaskKind::Mapping => self.apply_mapping_task(task),
+        }
+    }
+
+    /// Applies a finished `mapping.txt` load. An empty or unreadable file
+    /// keeps the previously loaded mapping.
+    fn apply_mapping_task(&mut self, task: CompletedTask) {
+        match task.outcome {
+            TaskOutcome::Mapping(path, index) => {
+                if index.is_empty() {
+                    self.set_status(format!("mapping: no entries in {}", path.display()), false);
+                    return;
+                }
+                let (classes, members) = index.counts();
+                self.set_status(
+                    format!("mapping: {classes} classes / {members} members loaded"),
+                    true,
+                );
+                self.mapping = Some((path, index));
+            }
+            TaskOutcome::Failed(e) => self.set_status(format!("mapping: {e}"), false),
+            other => self.task_mismatch(TaskKind::Mapping, task_label_of(&other)),
         }
     }
 
@@ -1428,24 +1450,8 @@ impl AscApp {
                 self.dispatch(Command::OpenMapping(path), ctx);
             }
             Command::OpenMapping(path) => {
-                let text = match std::fs::read_to_string(path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.set_status(format!("mapping: {e}"), false);
-                        return;
-                    }
-                };
-                let index = asc_core::mapping::MappingIndex::parse(&text);
-                if index.is_empty() {
-                    self.set_status(format!("mapping: no entries in {}", path.display()), false);
-                    return;
-                }
-                let (classes, members) = index.counts();
-                self.set_status(
-                    format!("mapping: {classes} classes / {members} members loaded"),
-                    true,
-                );
-                self.mapping = Some((path.clone(), index));
+                self.tasks.spawn_mapping(path, ctx);
+                self.set_status(format!("mapping: loading {}", path.display()), true);
             }
             other => unreachable!("misrouted {other:?}"),
         }
@@ -2242,6 +2248,7 @@ fn task_label_of(outcome: &TaskOutcome) -> &'static str {
         TaskOutcome::MemberInfo(_) => "member",
         TaskOutcome::ClassStrings(_) => "class strings",
         TaskOutcome::Resources(_) => "resources",
+        TaskOutcome::Mapping(..) => "mapping",
         TaskOutcome::Search(_) => "search",
         TaskOutcome::Failed(_) => "failed",
     }
