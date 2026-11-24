@@ -153,6 +153,8 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
     };
     // Stack of open elements (most recent last).
     let mut stack: Vec<AxmlElement> = Vec::new();
+    // Pool text copied into the tree so far (crate::copy_pool_str).
+    let mut copied = 0u64;
     while cursor + 8 <= root_end {
         let chunk_type = read_u16(bytes, cursor)?;
         let header_size = read_u16(bytes, cursor + 2)?;
@@ -183,8 +185,8 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
                 validate_string_index_str(&strings, uri, "start-ns uri", true)?;
                 if prefix != NO_INDEX && uri != NO_INDEX {
                     doc.namespaces.push((
-                        strings[prefix as usize].clone(),
-                        strings[uri as usize].clone(),
+                        crate::copy_pool_str(&strings, prefix, &mut copied)?,
+                        crate::copy_pool_str(&strings, uri, &mut copied)?,
                     ));
                 }
             }
@@ -195,7 +197,7 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
                         "element nesting exceeds cap {MAX_ELEMENT_DEPTH}"
                     )));
                 }
-                let element = parse_element(bytes, cursor, chunk_end, &strings)?;
+                let element = parse_element(bytes, cursor, chunk_end, &strings, &mut copied)?;
                 stack.push(element);
             }
             RES_XML_END_ELEMENT_TYPE => {
@@ -242,7 +244,7 @@ pub fn parse_axml(bytes: &[u8]) -> Result<AxmlDocument, ManifestError> {
                 let data = read_u32(bytes, body)?;
                 if data != NO_INDEX {
                     validate_string_index_str(&strings, data, "cdata data", false)?;
-                    let text = strings[data as usize].clone();
+                    let text = crate::copy_pool_str(&strings, data, &mut copied)?;
                     match stack.last_mut() {
                         Some(open) => open.children.push(AxmlNode::Text { text }),
                         None => {
@@ -281,6 +283,7 @@ fn parse_element(
     chunk_start: usize,
     chunk_end: usize,
     strings: &[String],
+    copied: &mut u64,
 ) -> Result<AxmlElement, ManifestError> {
     let body_off = chunk_start + XML_TREE_BODY_OFF;
     if body_off + 20 > chunk_end {
@@ -302,7 +305,7 @@ fn parse_element(
         None
     } else {
         validate_string_index_str(strings, ns_idx, "start-element ns", true)?;
-        Some(strings[ns_idx as usize].clone())
+        Some(crate::copy_pool_str(strings, ns_idx, copied)?)
     };
     let attr_table_off = body_off + attr_start;
     let attrs_needed = attr_count
@@ -327,18 +330,18 @@ fn parse_element(
             None
         } else {
             validate_string_index_str(strings, a_ns, "attribute ns", false)?;
-            Some(strings[a_ns as usize].clone())
+            Some(crate::copy_pool_str(strings, a_ns, copied)?)
         };
         attrs.push(AxmlAttr {
             ns,
-            name: strings[a_name as usize].clone(),
-            value: render_typed_value_str(strings, tv_type, tv_data, a_raw)?,
+            name: crate::copy_pool_str(strings, a_name, copied)?,
+            value: render_typed_value_str(strings, tv_type, tv_data, a_raw, copied)?,
             value_type: tv_type,
         });
     }
     Ok(AxmlElement {
         ns,
-        name: strings[name_idx as usize].clone(),
+        name: crate::copy_pool_str(strings, name_idx, copied)?,
         attrs,
         children: Vec::new(),
     })

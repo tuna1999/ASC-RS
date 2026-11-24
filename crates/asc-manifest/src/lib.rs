@@ -910,6 +910,8 @@ struct Parser<'a> {
     root_end: usize,
     /// String pool, populated after the first chunk is processed.
     strings: Vec<String>,
+    /// Pool text copied out so far (see [`copy_pool_str`]).
+    copied: u64,
     /// Stack of currently-open elements (root first).
     stack: Vec<Frame>,
     /// Output accumulator.
@@ -954,6 +956,7 @@ impl<'a> Parser<'a> {
             cursor: 8,
             root_end,
             strings: Vec::new(),
+            copied: 0,
             stack: Vec::new(),
             info: ManifestInfo::default(),
         })
@@ -1174,7 +1177,7 @@ impl<'a> Parser<'a> {
             )));
         }
         self.validate_string_index(name_idx, "start-element name", false)?;
-        let name = self.strings[name_idx as usize].clone();
+        let name = copy_pool_str(&self.strings, name_idx, &mut self.copied)?;
         // First attribute begins at offset `attr_start` past the
         // **attrExt start** (chunk_start + 16), which is `body_off`.
         // AOSP's comment "Offset from start of node" is misleading:
@@ -1208,10 +1211,11 @@ impl<'a> Parser<'a> {
                 None
             } else {
                 self.validate_string_index(a_ns, "attribute ns", false)?;
-                Some(self.strings[a_ns as usize].clone())
+                Some(copy_pool_str(&self.strings, a_ns, &mut self.copied)?)
             };
-            let a_name_str = self.strings[a_name as usize].clone();
-            let value = self.render_typed_value(tv_type, tv_data, a_raw)?;
+            let a_name_str = copy_pool_str(&self.strings, a_name, &mut self.copied)?;
+            let value =
+                render_typed_value_str(&self.strings, tv_type, tv_data, a_raw, &mut self.copied)?;
             attrs.push(XmlAttr {
                 ns,
                 name: a_name_str,
@@ -1232,9 +1236,9 @@ impl<'a> Parser<'a> {
         }
         let name_idx = read_u32(self.bytes, body_off + 4)?;
         self.validate_string_index(name_idx, "end-element name", false)?;
-        let name = self.strings[name_idx as usize].clone();
+        let name = &self.strings[name_idx as usize];
         match self.stack.last() {
-            Some(frame) if frame.name == name => {}
+            Some(frame) if frame.name == *name => {}
             Some(other) => {
                 return Err(ManifestError::BadChunk(format!(
                     "end-element <{name}> does not match top of stack <{}>",
@@ -1249,20 +1253,6 @@ impl<'a> Parser<'a> {
         }
         self.stack.pop();
         Ok(())
-    }
-
-    /// Convert a `(dataType, data, rawValueIndex)` triple into a Rust
-    /// `String` suitable for display. Reference / attribute values
-    /// become `@0xDEADBEEF`; decimal ints become the digit string;
-    /// string references resolve via the string pool; everything else
-    /// becomes the raw hex form.
-    fn render_typed_value(
-        &self,
-        data_type: u8,
-        data: u32,
-        raw_index: u32,
-    ) -> Result<Option<String>, ManifestError> {
-        render_typed_value_str(&self.strings, data_type, data, raw_index)
     }
 
     /// Validate a string-pool index. `allow_no_index` is false for
@@ -1898,13 +1888,38 @@ pub(crate) fn validate_string_index_str(
     Ok(())
 }
 
-/// [`Parser::render_typed_value`] as a free function over a pool:
-/// references stay `@0x…`, strings resolve, ints/bools render.
+/// Cap on the pool text one parse may copy out. Every element/attribute
+/// reference clones its pool string, so a small file whose attribute
+/// table points thousands of times at one 1 MiB string would otherwise
+/// cost `len × refs` (gigabytes from a 64 MiB chunk). Real manifests copy
+/// a few hundred KiB.
+const MAX_COPIED_TEXT: u64 = 64 * 1024 * 1024;
+
+/// Clone pool string `idx` (already validated) and charge it to `copied`.
+pub(crate) fn copy_pool_str(
+    strings: &[String],
+    idx: u32,
+    copied: &mut u64,
+) -> Result<String, ManifestError> {
+    let s = &strings[idx as usize];
+    *copied += s.len() as u64;
+    if *copied > MAX_COPIED_TEXT {
+        return Err(ManifestError::BadChunk(format!(
+            "string references copy more than {MAX_COPIED_TEXT} bytes of pool text"
+        )));
+    }
+    Ok(s.clone())
+}
+
+/// Render a `(dataType, data, rawValueIndex)` triple for display:
+/// references stay `@0x…`, strings resolve (charged to `copied`, see
+/// [`copy_pool_str`]), ints/bools render, anything else is raw hex.
 pub(crate) fn render_typed_value_str(
     strings: &[String],
     data_type: u8,
     data: u32,
     raw_index: u32,
+    copied: &mut u64,
 ) -> Result<Option<String>, ManifestError> {
     const TYPE_NULL: u8 = 0x00;
     const TYPE_REFERENCE: u8 = 0x01;
@@ -1930,7 +1945,7 @@ pub(crate) fn render_typed_value_str(
                 None
             } else {
                 validate_string_index_str(strings, idx, "string-typed value", true)?;
-                Some(strings[idx as usize].clone())
+                Some(copy_pool_str(strings, idx, copied)?)
             }
         }
         TYPE_REFERENCE | TYPE_ATTRIBUTE => Some(format!("@0x{data:08x}")),

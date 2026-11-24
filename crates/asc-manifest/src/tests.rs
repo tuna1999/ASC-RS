@@ -2687,3 +2687,25 @@ fn aapt2_uri_group_fixtures_match_expected() {
     assert_eq!(checked, info.activities.len(), "one case per activity");
     assert!(checked >= 51, "case table shrank unexpectedly: {checked}");
 }
+
+/// One 32 KiB pool string referenced by ~2.1k attributes is a 42 KiB
+/// chunk but ~68 MiB of copied text: both parsers must refuse it rather
+/// than materialise `len × refs` bytes.
+#[test]
+fn repeated_huge_string_references_hit_the_copy_cap() {
+    use axml::{Val, attr, elem};
+    let big: &'static str = Box::leak("a".repeat(0x7FFF).into_boxed_str());
+    let attrs = (0..2100).map(|_| attr(None, "v", Val::Str(big))).collect();
+    let bytes = axml::build(&elem("manifest", attrs, vec![]));
+    assert!(
+        bytes.len() < 128 * 1024,
+        "fixture stays small: {}",
+        bytes.len()
+    );
+    let msg = |e: ManifestError| e.to_string();
+    assert!(msg(crate::axml::parse_axml(&bytes).unwrap_err()).contains("bytes of pool text"));
+    assert!(msg(parse_manifest(&bytes).unwrap_err()).contains("bytes of pool text"));
+    // Well under the cap still decodes.
+    let few = (0..100).map(|_| attr(None, "v", Val::Str(big))).collect();
+    crate::axml::parse_axml(&axml::build(&elem("manifest", few, vec![]))).expect("small doc");
+}

@@ -22,6 +22,14 @@ pub const DEFAULT_MAX_OUTPUT: usize = 1 << 30;
 /// the declaration (not this chunk) is what bounds the inflate work.
 pub const INFLATE_CHUNK: usize = 64 * 1024;
 
+/// Upper bound on what `compressed_len` bytes of raw DEFLATE can inflate
+/// to (the format tops out near 1032:1; slack covers a tiny stream).
+fn max_inflated_len(compressed_len: usize) -> usize {
+    compressed_len
+        .saturating_mul(1032)
+        .saturating_add(INFLATE_CHUNK)
+}
+
 /// Limits that govern inflate output size.
 #[derive(Debug, Clone, Copy)]
 pub struct InflateLimits {
@@ -82,7 +90,10 @@ pub(crate) fn inflate_into_vec(
         });
     }
 
-    let mut out: Vec<u8> = Vec::with_capacity(expected_len);
+    // DEFLATE expands at most ~1032:1, so a 100-byte entry declaring 1 GiB
+    // can never fill it: reserve what the stream could produce, not what
+    // the (attacker-controlled) declaration says. The Vec grows if needed.
+    let mut out: Vec<u8> = Vec::with_capacity(expected_len.min(max_inflated_len(compressed.len())));
     let mut decoder = flate2::read::DeflateDecoder::new(compressed);
 
     // Chunked loop that fails the moment the stream produces more than
